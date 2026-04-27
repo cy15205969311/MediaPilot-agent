@@ -185,7 +185,7 @@ export function Composer({
 
         <div className="relative">
           <textarea
-            className="min-h-32 w-full resize-none rounded-[28px] border border-border bg-card px-5 py-4 pr-16 text-sm leading-7 text-card-foreground shadow-sm outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+            className="min-h-32 w-full resize-none rounded-[28px] border border-border bg-card px-5 py-4 pr-16 text-sm leading-7 text-card-foreground shadow-sm outline-none transition focus:border-primary focus:outline-none focus:ring-0"
             onChange={(event) => onMessageChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="描述你的内容需求，或上传素材让 Agent 帮你分析..."

@@ -29,19 +29,11 @@ const platformOptions: Array<{ id: UiPlatform; label: string }> = [
 ];
 
 function getPlatformButtonClass(id: UiPlatform, activePlatform: UiPlatform) {
-  if (activePlatform !== id) {
-    return "bg-secondary text-secondary-foreground hover:bg-muted";
+  if (activePlatform === id) {
+    return "bg-primary text-primary-foreground shadow-sm";
   }
 
-  if (id === "douyin") {
-    return "bg-foreground text-background shadow-sm";
-  }
-
-  if (id === "both") {
-    return "bg-brand-soft text-brand shadow-sm";
-  }
-
-  return "bg-brand text-brand-foreground shadow-sm";
+  return "text-muted-foreground hover:bg-background/50 hover:text-foreground";
 }
 
 export function AppHeader({
@@ -84,11 +76,12 @@ export function AppHeader({
         </div>
       </div>
 
-      <div className="hidden items-center gap-2 md:flex">
+      <div className="hidden items-center space-x-1 rounded-full bg-muted p-1 md:flex">
         {platformOptions.map((option) => (
           <button
+            aria-pressed={platform === option.id}
             key={option.id}
-            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${getPlatformButtonClass(
+            className={`relative inline-flex items-center justify-center rounded-full px-4 py-1.5 text-sm font-medium transition-all duration-200 ease-out cursor-pointer select-none ${getPlatformButtonClass(
               option.id,
               platform,
             )}`}
@@ -104,7 +97,7 @@ export function AppHeader({
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <select
-            className="rounded-xl border border-border bg-card py-2 pl-10 pr-4 text-sm font-medium text-foreground outline-none transition hover:bg-muted focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+            className="rounded-xl border border-border bg-card py-2 pl-10 pr-4 text-sm font-medium text-foreground outline-none transition hover:bg-muted focus:border-primary focus:outline-none focus:ring-0"
             onChange={(event) => onTaskTypeChange(event.target.value as UiTaskType)}
             value={taskType}
           >
