@@ -18,9 +18,9 @@ MediaPilot Agent 是一个面向新媒体内容运营场景的智能工作台，
 - 线程会话创建、历史回放、重命名、删除
 - 用户资料编辑，包括昵称、简介与头像上传
 - 设备会话查看与定向下线
-- 素材上传与持久化跟踪
-- LangGraph 多模态工作流
-- 图片素材 OCR / 视觉理解
+- 素材上传、持久化跟踪与本地 / OSS 双后端存储
+- LangGraph 多模态工作流与联网热点检索
+- 图片素材 OCR / 视觉理解 / 搜索上下文增强
 - 结构化内容产物生成与前端渲染
 - 工作台全局主题切换与主题偏好持久化
 
@@ -77,11 +77,31 @@ copy .env.example .env
 
 - 大模型提供者配置
 - 视觉模型配置
+- 可选联网搜索配置（如 `TAVILY_API_KEY`）
+- 可选对象存储配置（如 `OMNIMEDIA_STORAGE_BACKEND`、`OSS_*`）
 - JWT 配置
 - 数据库连接配置
 - 本地联调使用的 `CORS_ALLOWED_ORIGINS`
 
 注意：`.env` 包含敏感信息，不应提交到 Git 仓库。
+
+如需启用阿里云 OSS，可至少补充以下变量：
+
+```env
+OMNIMEDIA_STORAGE_BACKEND=auto
+OSS_ACCESS_KEY_ID=
+OSS_ACCESS_KEY_SECRET=
+OSS_ENDPOINT=
+OSS_BUCKET_NAME=
+OSS_REGION=
+OSS_PUBLIC_BASE_URL=
+```
+
+说明：
+
+- `auto`：当 OSS 配置完整时优先使用 OSS，否则自动回退到本地 `/uploads`
+- `local`：强制使用本地存储
+- `oss`：强制使用阿里云 OSS，缺少配置时会直接报错
 
 ### 4.4 数据库迁移
 
@@ -112,6 +132,11 @@ npm run dev
 - 后端文档：`http://127.0.0.1:8000/docs`
 
 Vite 开发服务器已绑定 `0.0.0.0`，方便同网段设备直接访问。后端 CORS 白名单可通过 `CORS_ALLOWED_ORIGINS` 扩展。
+
+当前上传链路支持两种后端：
+
+- 本地 `/uploads`：适合纯本地开发和快速联调
+- 阿里云 OSS：适合多实例部署、集中存储与生产环境素材管理
 
 ## 6. 主题系统
 

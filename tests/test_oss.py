@@ -193,12 +193,19 @@ def test_upload_media_uses_oss_storage_backend_when_configured(
     class FakeOSSStorageClient:
         backend_name = "oss"
 
-        async def upload_file(self, *, user_id: str, filename: str, content_type: str, data: bytes):
+        async def upload_file_stream(
+            self,
+            *,
+            user_id: str,
+            filename: str,
+            content_type: str,
+            file_stream,
+        ):
             captured["upload"] = {
                 "user_id": user_id,
                 "filename": filename,
                 "content_type": content_type,
-                "data": data,
+                "data": file_stream.read(),
             }
             return storage_module.StoredUpload(
                 backend_name="oss",

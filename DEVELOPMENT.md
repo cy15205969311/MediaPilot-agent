@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.1`
+- Current version: `v1.13.3`
 - Updated on: `2026-04-27`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, tenant isolation, tracked user-scoped uploads, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, documentation baseline, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration and search routing, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, documentation baseline, and verification baseline
 
 Document set:
 
@@ -46,7 +46,7 @@ The current baseline includes:
 4. Per-user thread ownership and tenant isolation.
 5. Per-thread dynamic `system_prompt` persistence.
 6. Provider-based SSE streaming chat flow.
-7. Local upload API with whitelist and size limit.
+7. Upload API with whitelist, size limit, and local or OSS-backed storage support.
 8. SQLite persistence via SQLAlchemy.
 9. Alembic migrations for schema evolution.
 10. Thread history replay, rename, archive, and deletion APIs.
@@ -55,20 +55,21 @@ The current baseline includes:
 13. UTC-normalized backend timestamps plus frontend local rendering.
 14. Frontend login view, token storage, authenticated request interception, and local user cache sync.
 15. Frontend new-thread setup flow with title and persona configuration.
-16. Authenticated upload storage under per-user directories.
+16. Authenticated upload storage under per-user object keys with local `/uploads` fallback.
 17. Upload metadata tracking with `UploadRecord`.
 18. Avatar orphan-file cleanup after profile updates.
 19. Frontend avatar upload and profile-preview sync.
-20. LangGraph branching orchestration with real vision-model OCR support, safe degradation, and review/retry control.
+20. LangGraph branching orchestration with real vision-model OCR, structured search routing, mock-or-live web search support, safe degradation, and review/retry control.
 21. Thread-linked material upload tracking, backfill, and cleanup on thread deletion.
 22. Active session visibility and targeted device revocation.
-23. Hourly scheduled abandoned-material cleanup via APScheduler.
+23. Hourly scheduled abandoned-material cleanup via APScheduler across the active storage backend.
 24. Frontend material attachments are preserved from upload completion through optimistic chat bubbles and `/chat/stream` payloads.
-25. Automated backend tests for auth-protected SSE, history isolation, thread prompt updates, profile updates, avatar persistence, upload tracking, cleanup, upload retention, refresh rotation, logout revocation, session management, scheduler behavior, and LangGraph branching behavior.
+25. Automated backend tests for auth-protected SSE, history isolation, thread prompt updates, profile updates, avatar persistence, upload tracking, cleanup, upload retention, refresh rotation, logout revocation, session management, scheduler behavior, and LangGraph branching/search behavior.
 26. Frontend chat bubbles can now sync the authenticated user's avatar state and render user-facing avatars in a circular presentation with safe fallback behavior.
 27. FastAPI now supports environment-variable-driven CORS origin configuration for local frontend-backend integration.
 28. Vite development server now binds to `0.0.0.0` so devices on the same LAN can access the frontend workspace directly.
 29. Frontend workspace now supports persisted Light / Dark themes through CSS variables, semantic chat-bubble tokens, and root HTML theme classes.
+30. Shared storage client abstraction now supports either local disk or Aliyun OSS uploads, public URLs, and deletion.
 
 ### 3.2 Out of Scope
 
@@ -76,12 +77,11 @@ The following capabilities are intentionally not production-complete yet:
 
 1. third-party SSO or enterprise identity providers
 2. access-token revocation lists, device fingerprints, or organization-wide session-management dashboards
-3. cloud object storage integration
-4. production observability, rate limiting, or audit logging
-5. advanced LangGraph workflows beyond the current branching vision/review baseline
-6. end-to-end browser automation tests
-7. scheduled or cloud-backed media retention policies beyond the current local cleanup rules
-8. advanced avatar processing such as cropping, compression, and CDN hosting
+3. production observability, rate limiting, or audit logging
+4. advanced LangGraph workflows beyond the current branching vision/review baseline
+5. end-to-end browser automation tests
+6. managed OSS lifecycle policies, signed URLs, CDN invalidation, or bucket-level governance
+7. advanced avatar processing such as cropping, compression, and CDN hosting
 
 ## 4. Architecture Overview
 
@@ -93,7 +93,7 @@ The project uses a frontend-backend separated structure:
 - Frontend: `React + Vite + TypeScript + Tailwind CSS`
 - Streaming: `SSE`
 - Auth: `JWT + passlib`
-- Local uploads: `/uploads`
+- Upload storage: local `/uploads` fallback or Aliyun OSS through a shared storage client
 - Persistence: `SQLite` by default
 
 ### 4.2 Layering Rules
@@ -143,6 +143,7 @@ omnimedia-agent/
 |     |- __init__.py
 |     |- agent.py
 |     |- auth.py
+|     |- oss_client.py
 |     |- persistence.py
 |     |- providers.py
 |     |- scheduler.py
@@ -195,8 +196,11 @@ omnimedia-agent/
 |              '- TopicPlanningArtifact.tsx
 |- tests/
 |  |- test_chat.py
+|  |- test_config.py
+|  |- test_graph_search.py
 |  |- test_graph_vision.py
 |  |- test_oss.py
+|  |- test_oss_client.py
 |  '- test_scheduler.py
 |- uploads/
 |- .env.example
@@ -228,6 +232,7 @@ omnimedia-agent/
 - `passlib[bcrypt]==1.7.4`
 - `bcrypt==4.0.1`
 - `APScheduler==3.10.4`
+- `oss2==2.19.1`
 
 ### 6.2 Frontend
 
@@ -268,13 +273,24 @@ Current supported runtime variables:
 - `LLM_ARTIFACT_MODEL`
 - `LLM_VISION_MODEL`
 - `LLM_TIMEOUT_SECONDS`
+- `TAVILY_API_KEY`
+- `SEARCH_TIMEOUT_SECONDS`
 - `CORS_ALLOWED_ORIGINS`
+- `OMNIMEDIA_STORAGE_BACKEND=auto|local|oss`
+- `OSS_ACCESS_KEY_ID`
+- `OSS_ACCESS_KEY_SECRET`
+- `OSS_ENDPOINT`
+- `OSS_BUCKET_NAME`
+- `OSS_REGION`
+- `OSS_PUBLIC_BASE_URL`
 
 The committed `.env.example` now includes:
 
 - provider selection defaults for `LangGraphProvider`
 - text-model and artifact-model placeholders
 - vision-model placeholders for multimodal OCR
+- optional Tavily search placeholders for real-time web retrieval
+- optional OSS storage placeholders with `auto`, `local`, and `oss` backend selection
 - local SQLite and JWT defaults for development
 
 Current compatible-provider example:
@@ -286,6 +302,7 @@ LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_MODEL=qwen3.5-flash
 LLM_ARTIFACT_MODEL=qwen3.5-flash
 OPENAI_TIMEOUT_SECONDS=60
+OMNIMEDIA_STORAGE_BACKEND=auto
 JWT_SECRET_KEY=change-this-secret-in-production
 JWT_ALGORITHM=HS256
 JWT_ACCESS_EXPIRE_MINUTES=30
@@ -364,8 +381,8 @@ alembic upgrade head
 | `GET` | `/api/v1/media/threads/{thread_id}/messages` | authenticated thread replay |
 | `PATCH` | `/api/v1/media/threads/{thread_id}` | rename, archive, or update thread prompt |
 | `DELETE` | `/api/v1/media/threads/{thread_id}` | delete owned thread |
-| `POST` | `/api/v1/media/upload` | authenticated user-scoped local upload |
-| `GET` | `/uploads/{user_id}/{filename}` | uploaded file preview |
+| `POST` | `/api/v1/media/upload` | authenticated user-scoped upload via the active storage backend |
+| `GET` | `/uploads/{user_id}/{filename}` | local-upload preview path when the local backend is active |
 
 ### 8.1 Authentication Rules
 
@@ -396,7 +413,7 @@ alembic upgrade head
 2. thread upsert with `user_id`, `title`, and `system_prompt`
 3. user message persistence
 4. material persistence
-5. upload-record thread backfill for local `/uploads/...` material URLs
+5. upload-record thread backfill for local `/uploads/...` and OSS public material URLs
 6. provider stream execution
 7. assistant text persistence before `done`
 8. artifact persistence into `ArtifactRecord`
@@ -498,7 +515,7 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 | `username` | `str` | yes | login name |
 | `nickname` | `str \| None` | no | display name override |
 | `bio` | `str \| None` | no | short profile bio |
-| `avatar_url` | `str \| None` | no | avatar image URL, usually an app-relative uploads path |
+| `avatar_url` | `str \| None` | no | avatar image URL, usually a local `/uploads/...` path or an OSS public URL |
 | `created_at` | ISO 8601 UTC string | yes | serialized with trailing `Z` |
 
 #### `UserProfileUpdate`
@@ -523,7 +540,7 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `url` | `str` | app-relative preview path |
+| `url` | `str` | storage-backed preview URL returned by the active backend |
 | `file_type` | `str` | image, video, or document |
 | `content_type` | `str` | MIME type |
 | `filename` | `str` | stored filename |
@@ -608,8 +625,9 @@ The backend response MUST:
 ```json
 {
   "event": "tool_call",
-  "name": "artifact_structuring",
-  "status": "processing"
+  "name": "web_search",
+  "status": "processing",
+  "message": "正在搜索全网热点: 2026 最新手机发布会"
 }
 ```
 
@@ -672,21 +690,24 @@ Provider selection is controlled by `OMNIMEDIA_LLM_PROVIDER`:
 1. `router`
 2. `parse_materials_node`
 3. `ocr_node` when image materials are present
-4. `generate_draft_node`
-5. `review_node`
-6. `format_artifact_node`
+4. `search_node` when the router decides the request needs live search context
+5. `generate_draft_node`
+6. `review_node`
+7. `format_artifact_node`
 
 Current execution rules:
 
-1. `parse_materials_node` emits a `tool_call` event and converts raw materials into summarized text clues
-2. after parse, the graph conditionally routes to `ocr_node` only when image materials are present
-3. `ocr_node` emits a `tool_call` event and appends mock visual-extraction clues into the material context
-4. `generate_draft_node` delegates drafting to the configured inner provider and buffers the latest draft candidate
-5. `review_node` emits `tool_call` progress, validates the draft against lightweight structural and persona constraints, and can retry generation up to `2` times
-6. only the accepted or max-retry draft is emitted downstream as `message` events, which keeps persisted assistant output aligned with the final visible draft
-7. `format_artifact_node` emits a `tool_call` event and produces the final `artifact`
-8. when the inner provider returns an invalid artifact payload, the graph falls back to a deterministic local artifact builder
-9. the graph preserves the external SSE contract so the route layer does not need special handling
+1. `router` performs a structured search-intent decision, sets `needs_search`, and extracts a `search_query` when the request needs up-to-date external context
+2. `parse_materials_node` emits a `tool_call` event and converts raw materials into summarized text clues
+3. after parse, the graph conditionally routes to `ocr_node` only when image materials are present
+4. after parse or OCR, the graph conditionally routes to `search_node` only when `needs_search == true`
+5. `search_node` emits `web_search` tool events, prefers real Tavily search when configured, and otherwise falls back to deterministic mock search results
+6. `generate_draft_node` delegates drafting to the configured inner provider and injects XML-style `<image_context>` and `<search_context>` blocks into the user message when those contexts exist
+7. `review_node` emits `tool_call` progress, validates the draft against lightweight structural and persona constraints, and can retry generation up to `2` times
+8. only the accepted or max-retry draft is emitted downstream as `message` events, which keeps persisted assistant output aligned with the final visible draft
+9. `format_artifact_node` emits a `tool_call` event and produces the final `artifact`
+10. when the inner provider returns an invalid artifact payload, the graph falls back to a deterministic local artifact builder
+11. the graph preserves the external SSE contract so the route layer does not need special handling
 
 Superseding note for `v1.10.0`:
 
@@ -733,6 +754,13 @@ Superseding note for `v1.13.1`:
 2. `frontend/src/app/ThemeContext.tsx` now persists `mediapilot-theme`, falls back to `prefers-color-scheme`, and applies the active Light or Dark theme class to the root `html` element.
 3. the workspace shell, header, sidebars, chat surfaces, artifact panel, thread settings modal, and profile modal now consume semantic theme tokens instead of relying on hardcoded grayscale utility classes.
 
+Superseding note for `v1.13.2`:
+
+1. `router` now performs a structured search decision and extracts a dedicated `search_query` instead of relying on task-type-only hardcoded search routing.
+2. `search_node` now emits `web_search` tool events, stores normalized `search_results`, and can fall back to deterministic mock search output when no live search API is configured.
+3. `generate_draft_node` now injects XML-style `<search_context>` blocks into the drafting request so the downstream model can incorporate time-sensitive external context.
+4. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the optional Tavily search configuration and the upgraded LangGraph workflow baseline.
+
 ### 11.4 Dynamic Persona Rule
 
 The current provider baseline MUST follow these rules:
@@ -768,15 +796,17 @@ Current enforced boundaries:
 5. validation is performed while reading the stream
 6. filenames are sanitized before storage
 7. uploads require a valid bearer token
-8. files are stored under `uploads/{user_id}/`
-9. each saved file is tracked in `UploadRecord`
-10. material uploads MAY include an owned `thread_id` when the upload already belongs to an existing thread
-11. local material URLs used in chat persistence SHOULD backfill `UploadRecord.thread_id` once the thread is created or confirmed
-12. avatar uploads can be cleaned up after profile changes when they become stale orphan files
-13. stale material uploads older than `24h` are eligible for cleanup when they are still unbound or their thread no longer exists
-14. deleting a thread triggers immediate cleanup of linked material upload files and records
-15. an APScheduler background job runs `cleanup_abandoned_materials()` every hour
-16. partial files are cleaned up on failure
+8. files are streamed to the active backend after validation, without first assembling the full payload in application memory
+9. local storage uses `{user_id}/{filename}` object keys and returns `/uploads/{user_id}/{filename}` preview URLs
+10. OSS storage uses `uploads/{user_id}/{filename}` object keys and returns the configured public OSS base URL
+11. each saved file is tracked in `UploadRecord`
+12. material uploads MAY include an owned `thread_id` when the upload already belongs to an existing thread
+13. local or OSS material URLs used in chat persistence SHOULD backfill `UploadRecord.thread_id` once the thread is created or confirmed
+14. avatar uploads can be cleaned up after profile changes when they become stale orphan files
+15. stale material uploads older than `24h` are eligible for cleanup when they are still unbound or their thread no longer exists
+16. deleting a thread triggers immediate cleanup of linked material upload files and records
+17. an APScheduler background job runs `cleanup_abandoned_materials()` every hour and deletes the physical file through the resolved storage backend before removing the database record
+18. partial files are cleaned up on failure
 
 ## 13. Frontend Engineering Baseline
 
@@ -971,8 +1001,11 @@ If a database existed before the auth migration, `20260424_03_auth_and_persona.p
 Current automated tests are located in:
 
 - [tests/test_chat.py](/E:/omnimedia-agent/tests/test_chat.py)
+- [tests/test_graph_search.py](/E:/omnimedia-agent/tests/test_graph_search.py)
 - [tests/test_graph_vision.py](/E:/omnimedia-agent/tests/test_graph_vision.py)
 - [tests/test_oss.py](/E:/omnimedia-agent/tests/test_oss.py)
+- [tests/test_oss_client.py](/E:/omnimedia-agent/tests/test_oss_client.py)
+- [tests/test_config.py](/E:/omnimedia-agent/tests/test_config.py)
 - [tests/test_scheduler.py](/E:/omnimedia-agent/tests/test_scheduler.py)
 
 Covered cases:
@@ -996,37 +1029,42 @@ Covered cases:
 17. UTC timestamp serialization for auth and history payloads
 18. thread rename, archive, and delete flow
 19. upload authentication enforcement
-20. upload success with user-scoped storage
+20. upload success with user-scoped local or OSS-backed storage
 21. upload type rejection
 22. upload size rejection
 23. upload record metadata persistence
 24. upload record thread binding persistence
 25. avatar orphan-file cleanup after profile update
 26. stale unbound material cleanup after the retention window
-27. chat persistence backfills upload records for local material URLs
+27. chat persistence backfills upload records for both local and OSS material URLs
 28. thread deletion removes linked material uploads immediately
 29. active session listing marks the current device and returns device/IP metadata
 30. targeted session revocation invalidates the corresponding access token chain
-31. scheduler job registration and hourly cleanup execution
+31. scheduler job registration and hourly cleanup execution across storage backends
 32. local upload image paths are converted to data URLs for multimodal requests
 33. custom vision clues are passed into the downstream drafting context
 34. vision-analysis failures degrade safely while preserving the main workflow
 35. LangGraph text-material path skips OCR and emits review-stage tool calls
 36. LangGraph image-material path routes through OCR and retries after review failure
 37. thread history returns user-message image materials after refresh/replay
+38. LangGraph search routing injects `<search_context>` into drafting requests before artifact generation
+39. LangGraph search fallback uses deterministic mock results when no live search API is configured
+40. local storage and Aliyun OSS clients both support direct stream-based uploads
+41. OSS client V4 auth and bucket wiring use the configured credential set
+42. OSS `.env` configuration reloads after file changes and reports missing required fields clearly
 
 ### 15.2 Latest Verification Result
 
-The following check was executed for the current `v1.13.1` theme-system change set on `2026-04-27` and passed:
+The following checks were executed for the current `v1.13.3` storage-streaming and OSS-baseline change set on `2026-04-27` and passed:
 
 ```bash
-cd frontend && npm run build
+python -m pytest tests/test_chat.py tests/test_graph_search.py tests/test_graph_vision.py tests/test_oss.py tests/test_oss_client.py tests/test_config.py tests/test_scheduler.py -q
 ```
 
 Observed result baseline:
 
-- frontend production build: success
-- the Light / Dark dual-theme system compiles successfully with `ThemeProvider`, root HTML class switching, and CSS-variable-backed semantic Tailwind tokens
+- backend targeted regression suite: 58 passed
+- LangGraph search routing, OCR enrichment, upload streaming, OSS cleanup, and scheduler behavior remain compatible with the current workflow baseline
 
 ### 15.3 Current Warning
 
@@ -1034,17 +1072,16 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.1
+### 16.1 Completed in v1.13.3
 
 This version adds or solidifies:
 
-1. the frontend workspace now supports two global visual modes: `light` and `dark`
-2. `frontend/src/styles/theme.css` now exposes semantic CSS-variable tokens for shell backgrounds, cards, muted surfaces, overlays, status colors, and dedicated user/AI chat bubbles across both themes
-3. `frontend/src/app/ThemeContext.tsx` now manages theme initialization, persistence, root HTML class updates, and one-click Light / Dark toggling
-4. `frontend/src/main.tsx` now wraps the application in `ThemeProvider`
-5. the workspace header now includes a theme switcher that toggles between Light and Dark modes with `lucide-react` sun/moon icons
-6. the app shell, chat feed, composer, sidebars, right panel, artifact renderers, thread settings modal, and profile modal now consume semantic theme tokens for cross-theme consistency
-7. `README.md` and `DEVELOPMENT.md` now document the dual-theme UX baseline and the latest frontend verification result
+1. the upload route now validates file size while reading the incoming stream, rewinds the file, and then streams directly into the active storage backend
+2. `app/services/oss_client.py` now exposes a shared stream-upload contract for both local disk and Aliyun OSS storage clients
+3. local and OSS uploads continue to share one `UploadRecord` persistence path through backend-specific stored object keys and public URLs
+4. cleanup routines continue to delete physical files through the resolved storage backend before removing stale avatar or material records
+5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the active storage backend switch plus the required OSS environment variables
+6. backend regression coverage now explicitly includes direct stream-based local and OSS uploads plus OSS configuration reload behavior
 
 ### 16.2 Current Non-Blocking Gaps
 
@@ -1052,16 +1089,16 @@ The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 
 1. access tokens are now tied to the refresh-session chain, but there is still no separate global blacklist or password-reset invalidation flow
 2. no password reset or account recovery flow
-3. upload cleanup now covers avatars plus local material retention with a scheduled local job, but still lacks cloud-storage lifecycle support
-4. LangGraph now has branching, real vision integration, and review retry control, but still lacks retrieval, search, and external business tool execution
+3. upload cleanup now covers avatars plus local and OSS-backed material retention, but still lacks managed bucket lifecycle policies, signed URLs, and CDN governance
+4. LangGraph now has branching, real vision integration, search routing, and review retry control, but still lacks deeper retrieval and external business tool execution
 5. no E2E tests covering browser login, stream replay, thread settings, thread mutations, avatar upload, logout flow, refresh rotation, session management, and LangGraph flows
 
 ## 17. Recommended Next Steps
 
 The next engineering steps SHOULD prioritize:
 
-1. deepen LangGraph with retrieval, search, and business-grade tool nodes beyond the current vision + review baseline
-2. evolve scheduled cleanup into a production retention strategy with cloud object storage and lifecycle policies
+1. deepen LangGraph with retrieval and business-grade tool nodes beyond the current vision + search + review baseline
+2. add managed OSS lifecycle rules, signed delivery URLs, and richer production retention controls on top of the current backend-level cleanup
 3. end-to-end browser coverage for auth, replay, uploads, avatar updates, refresh flows, session management, thread settings, and SSE flows
 4. strengthen account recovery, password reset, and broader access-token revocation strategy
 

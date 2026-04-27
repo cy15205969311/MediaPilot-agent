@@ -1,11 +1,13 @@
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import mimetypes
 import os
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -68,6 +70,20 @@ DRAFT_VISION_USER_MESSAGE_TEMPLATE = (
     "不要在开头做任何解释或说明。\n"
     "用户的具体要求是：{user_message}"
 )
+DRAFT_SEARCH_INSTRUCTION = (
+    "请结合以下最新全网搜索结果，为用户生成具有时效性的新媒体文案或分析结论。"
+)
+DRAFT_FINAL_RESPONSE_INSTRUCTION = (
+    "请直接基于上述上下文和用户的具体要求输出最终的新媒体文案或回答，"
+    "不要在开头做任何解释或说明。"
+)
+ROUTER_DECISION_SYSTEM_PROMPT = (
+    "你是 LangGraph 工作流中的联网路由器。"
+    "你的任务是判断当前用户请求是否需要额外获取最新资讯、全网热点、近期案例、新闻动态或实时趋势。"
+    "只有当外部搜索能显著提升答案时效性和准确性时，才将 needs_search 设为 true。"
+    "如果不需要联网搜索，search_query 必须返回空字符串。"
+    "请始终只返回 JSON object，字段固定为 needs_search 和 search_query。"
+)
 
 
 def _resolve_vision_model(explicit_model: str | None) -> str:
@@ -95,7 +111,8 @@ class GraphState(TypedDict, total=False):
     request: MediaChatRequest
     materials_parsed: list[str]
     ocr_clues: list[str]
-    search_context: list[str]
+    search_query: str
+    search_results: str
     current_draft: str
     current_step: str
     validation_errors: list[str]
@@ -109,6 +126,11 @@ class GraphState(TypedDict, total=False):
     needs_ocr: bool
     needs_search: bool
     next_route: str
+
+
+class SearchRouteDecision(BaseModel):
+    needs_search: bool = False
+    search_query: str = ""
 
 
 def create_langgraph_inner_provider() -> BaseLLMProvider:
@@ -134,14 +156,16 @@ class LangGraphProvider(BaseLLMProvider):
         self,
         inner_provider: BaseLLMProvider | None = None,
         *,
+        route_analyzer: Callable[[MediaChatRequest], Awaitable[SearchRouteDecision | dict[str, object]]] | None = None,
         vision_analyzer: Callable[[MediaChatRequest], Awaitable[list[str]]] | None = None,
-        search_analyzer: Callable[[MediaChatRequest], Awaitable[list[str]]] | None = None,
+        search_analyzer: Callable[..., Awaitable[object]] | None = None,
         vision_model: str | None = None,
         vision_timeout_seconds: float | None = None,
         search_timeout_seconds: float | None = None,
     ) -> None:
         load_environment()
         self.inner_provider = inner_provider or create_langgraph_inner_provider()
+        self.route_analyzer = route_analyzer
         self.vision_analyzer = vision_analyzer
         self.search_analyzer = search_analyzer
         self.vision_model = _resolve_vision_model(vision_model)
@@ -192,7 +216,8 @@ class LangGraphProvider(BaseLLMProvider):
             "request": request,
             "materials_parsed": [],
             "ocr_clues": [],
-            "search_context": [],
+            "search_query": "",
+            "search_results": "",
             "current_draft": "",
             "current_step": "router",
             "validation_errors": [],
@@ -204,7 +229,7 @@ class LangGraphProvider(BaseLLMProvider):
             "thread": thread,
             "user_id": user_id,
             "needs_ocr": False,
-            "needs_search": _should_search(request),
+            "needs_search": False,
             "next_route": "parse_materials_node",
         }
 
@@ -277,10 +302,14 @@ class LangGraphProvider(BaseLLMProvider):
         return graph.compile()
 
     async def _router_node(self, state: GraphState) -> GraphState:
-        logger.info("langgraph node=router thread_id=%s", state["request"].thread_id)
+        request = state["request"]
+        logger.info("langgraph node=router thread_id=%s", request.thread_id)
+        decision = await self._decide_search_route(request)
         return {
+            "needs_search": decision.needs_search,
+            "search_query": decision.search_query,
             "next_route": "parse_materials_node",
-            "current_step": "router:ready",
+            "current_step": "router:completed",
         }
 
     def _route_from_router(self, state: GraphState) -> str:
@@ -391,19 +420,36 @@ class LangGraphProvider(BaseLLMProvider):
 
     async def _search_node(self, state: GraphState) -> GraphState:
         writer = get_stream_writer()
-        _emit_tool_call(writer, name="search", status="processing")
-        logger.info("langgraph node=search thread_id=%s", state["request"].thread_id)
+        request = state["request"]
+        search_query = (state.get("search_query") or "").strip() or _build_default_search_query(
+            request
+        )
+        _emit_tool_call(
+            writer,
+            name="web_search",
+            status="processing",
+            message=f"正在搜索全网热点: {search_query}",
+        )
+        logger.info(
+            "langgraph node=search thread_id=%s search_query=%s",
+            request.thread_id,
+            search_query,
+        )
 
         try:
             async with asyncio.timeout(self.search_timeout_seconds):
-                search_context = await self._collect_search_context(state["request"], writer)
+                search_results = await self._collect_search_results(
+                    request=request,
+                    search_query=search_query,
+                    writer=writer,
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 "Search timed out for thread_id=%s after %ss",
-                state["request"].thread_id,
+                request.thread_id,
                 self.search_timeout_seconds,
             )
-            _emit_tool_call(writer, name="search", status="timeout")
+            _emit_tool_call(writer, name="web_search", status="timeout")
             writer(
                 {
                     "payload": {
@@ -413,10 +459,10 @@ class LangGraphProvider(BaseLLMProvider):
                     }
                 }
             )
-            search_context = []
+            search_results = ""
         except Exception as exc:  # pragma: no cover - defensive boundary
             logger.exception("Search step failed: %s", exc)
-            _emit_tool_call(writer, name="search", status="failed")
+            _emit_tool_call(writer, name="web_search", status="failed")
             writer(
                 {
                     "payload": {
@@ -426,10 +472,13 @@ class LangGraphProvider(BaseLLMProvider):
                     }
                 }
             )
-            search_context = []
+            search_results = ""
+        else:
+            _emit_tool_call(writer, name="web_search", status="completed")
 
         return {
-            "search_context": search_context,
+            "search_query": search_query,
+            "search_results": search_results,
             "current_step": "search:completed",
         }
 
@@ -451,7 +500,7 @@ class LangGraphProvider(BaseLLMProvider):
             request=request,
             materials_parsed=state.get("materials_parsed", []),
             vision_clues=state.get("ocr_clues", []),
-            search_context=state.get("search_context", []),
+            search_results=state.get("search_results", ""),
             validation_errors=state.get("validation_errors", []),
             system_prompt=draft_system_prompt,
         )
@@ -609,6 +658,74 @@ class LangGraphProvider(BaseLLMProvider):
             "current_step": "format_artifact:completed",
         }
 
+    async def _decide_search_route(self, request: MediaChatRequest) -> SearchRouteDecision:
+        if self.route_analyzer is not None:
+            result = await self.route_analyzer(request)
+            return _coerce_search_route_decision(result, request)
+
+        try:
+            return await self._request_search_route_decision(request)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Search route LLM decision failed for thread_id=%s, falling back to heuristic: %s",
+                request.thread_id,
+                exc,
+            )
+            return _build_heuristic_search_route_decision(request)
+
+    async def _request_search_route_decision(
+        self,
+        request: MediaChatRequest,
+    ) -> SearchRouteDecision:
+        if isinstance(self.inner_provider, CompatibleLLMProvider):
+            if not self.inner_provider.api_key or not self.inner_provider.base_url:
+                return _build_heuristic_search_route_decision(request)
+            client = self.inner_provider._get_client()
+            model = self.inner_provider.model
+            timeout = self.inner_provider.request_timeout
+        elif isinstance(self.inner_provider, OpenAIProvider):
+            if not self.inner_provider.api_key:
+                return _build_heuristic_search_route_decision(request)
+            client = self.inner_provider._get_client()
+            model = self.inner_provider.model
+            timeout = self.inner_provider.request_timeout
+        else:
+            return _build_heuristic_search_route_decision(request)
+
+        messages = [
+            {"role": "system", "content": ROUTER_DECISION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"任务类型：{request.task_type.value}\n"
+                    f"目标平台：{request.platform.value}\n"
+                    f"用户请求：{request.message}\n"
+                    f"素材数量：{len(request.materials)}\n"
+                    "请判断是否需要联网搜索最新信息，并生成一个适合搜索引擎使用的简洁查询词。"
+                ),
+            },
+        ]
+
+        request_kwargs: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0,
+            "timeout": timeout,
+        }
+
+        try:
+            response = await client.chat.completions.create(
+                **request_kwargs,
+                response_format={"type": "json_object"},
+            )
+        except BadRequestError:
+            response = await client.chat.completions.create(**request_kwargs)
+
+        content = response.choices[0].message.content or ""
+        if not content.strip():
+            return _build_heuristic_search_route_decision(request)
+        return _coerce_search_route_decision(content, request)
+
     async def _extract_ocr_clues(
         self,
         request: MediaChatRequest,
@@ -663,33 +780,37 @@ class LangGraphProvider(BaseLLMProvider):
 
         return clues
 
-    async def _collect_search_context(
+    async def _collect_search_results(
         self,
+        *,
         request: MediaChatRequest,
+        search_query: str,
         writer,
-    ) -> list[str]:
+    ) -> str:
         if self.search_analyzer is not None:
-            return await self.search_analyzer(request)
-
-        if not self.search_api_key:
-            _emit_tool_call(writer, name="search", status="skipped")
-            return []
+            analyzer_signature = inspect.signature(self.search_analyzer)
+            if len(analyzer_signature.parameters) >= 2:
+                payload = await self.search_analyzer(request, search_query)
+            else:
+                payload = await self.search_analyzer(request)
+            return _coerce_search_results_text(payload)
 
         logger.info(
-            "Running Tavily search for thread_id=%s, task_type=%s",
+            "Running search collection for thread_id=%s, task_type=%s",
             request.thread_id,
             request.task_type.value,
         )
-        return await self._request_search_context(request)
+        if self.search_api_key:
+            return await self._request_search_results(search_query)
+        return _build_mock_search_results(request, search_query)
 
-    async def _request_search_context(
+    async def _request_search_results(
         self,
-        request: MediaChatRequest,
-    ) -> list[str]:
-        query = _build_search_query(request)
+        search_query: str,
+    ) -> str:
         payload = {
             "api_key": self.search_api_key,
-            "query": query,
+            "query": search_query,
             "topic": "general",
             "search_depth": "advanced",
             "max_results": 5,
@@ -801,16 +922,16 @@ def _emit_tool_call(
     *,
     name: str,
     status: str,
+    message: str | None = None,
 ) -> None:
-    writer(
-        {
-            "payload": {
-                "event": "tool_call",
-                "name": name,
-                "status": status,
-            }
-        }
-    )
+    payload: dict[str, object] = {
+        "event": "tool_call",
+        "name": name,
+        "status": status,
+    }
+    if message:
+        payload["message"] = message
+    writer({"payload": payload})
 
 
 def _stream_message_chunks(writer, draft: str, chunk_size: int = 32) -> None:
@@ -862,7 +983,7 @@ def _build_enriched_request(
     *,
     request: MediaChatRequest,
     materials_parsed: list[str],
-    search_context: list[str],
+    search_results: str,
     validation_errors: list[str],
     system_prompt: str | None,
 ) -> MediaChatRequest:
@@ -870,8 +991,13 @@ def _build_enriched_request(
 
     if materials_parsed:
         sections.append("已解析素材要点：\n" + "\n".join(materials_parsed))
-    if search_context:
-        sections.append("联网检索参考：\n" + "\n".join(search_context))
+    if search_results.strip():
+        sections.append(
+            "请结合以下最新全网搜索结果：\n"
+            "<search_context>\n"
+            f"{search_results.strip()}\n"
+            "</search_context>"
+        )
     if validation_errors:
         sections.append(
             "上一轮审查建议（本轮必须修正）：\n"
@@ -890,7 +1016,7 @@ def _build_enriched_draft_request(
     request: MediaChatRequest,
     materials_parsed: list[str],
     vision_clues: list[str],
-    search_context: list[str],
+    search_results: str,
     validation_errors: list[str],
     system_prompt: str | None,
 ) -> MediaChatRequest:
@@ -898,8 +1024,6 @@ def _build_enriched_draft_request(
 
     if materials_parsed:
         sections.append("已解析素材要点：\n" + "\n".join(materials_parsed))
-    if search_context:
-        sections.append("联网检索参考：\n" + "\n".join(search_context))
     if validation_errors:
         sections.append(
             "上一轮审查建议（本轮必须修正）：\n"
@@ -910,6 +1034,7 @@ def _build_enriched_draft_request(
     effective_message = _rewrite_draft_user_message(
         user_message=request.message,
         vision_clues=vision_clues,
+        search_results=search_results,
     )
     cleaned_materials = _remove_image_materials(request)
     if sections:
@@ -938,14 +1063,33 @@ def _rewrite_draft_user_message(
     *,
     user_message: str,
     vision_clues: list[str],
+    search_results: str,
 ) -> str:
-    if not vision_clues:
+    if not vision_clues and not search_results.strip():
         return user_message
 
-    return DRAFT_VISION_USER_MESSAGE_TEMPLATE.format(
-        vision_clues="\n".join(vision_clues),
-        user_message=user_message,
-    )
+    sections: list[str] = []
+
+    if vision_clues:
+        sections.append(
+            "用户提供了图片，视觉感知系统已提取以下图片内容详情：\n"
+            "<image_context>\n"
+            + "\n".join(vision_clues)
+            + "\n</image_context>"
+        )
+
+    if search_results.strip():
+        sections.append(
+            DRAFT_SEARCH_INSTRUCTION
+            + "\n"
+            + "<search_context>\n"
+            + search_results.strip()
+            + "\n</search_context>"
+        )
+
+    sections.append(DRAFT_FINAL_RESPONSE_INSTRUCTION)
+    sections.append(f"用户的具体要求是：{user_message}")
+    return "\n\n".join(sections)
 
 
 def _remove_image_materials(request: MediaChatRequest) -> list[MaterialInput]:
@@ -956,24 +1100,104 @@ def _remove_image_materials(request: MediaChatRequest) -> list[MaterialInput]:
     ]
 
 
-def _should_search(request: MediaChatRequest) -> bool:
-    return request.task_type in {
-        TaskType.TOPIC_PLANNING,
-        TaskType.HOT_POST_ANALYSIS,
-    }
-
-
-def _build_search_query(request: MediaChatRequest) -> str:
+def _build_default_search_query(request: MediaChatRequest) -> str:
     task_hint = {
         TaskType.TOPIC_PLANNING: "请检索最新行业趋势、用户讨论和高热选题方向",
         TaskType.HOT_POST_ANALYSIS: "请检索最新热点内容、爆款案例和传播讨论",
+        TaskType.CONTENT_GENERATION: "请检索最新热点话题、观点切口和用户讨论",
+        TaskType.COMMENT_REPLY: "请检索相关热点背景和近期舆情讨论",
     }.get(request.task_type, "请检索相关外部信息")
     return f"{request.message}\n{task_hint}\n目标平台：{request.platform.value}"
 
 
-def _normalize_search_results(payload: object) -> list[str]:
+def _build_heuristic_search_route_decision(
+    request: MediaChatRequest,
+) -> SearchRouteDecision:
+    task_requires_search = request.task_type in {
+        TaskType.TOPIC_PLANNING,
+        TaskType.HOT_POST_ANALYSIS,
+    }
+    keyword_triggers = (
+        "最新",
+        "最近",
+        "今日",
+        "今天",
+        "本周",
+        "近期",
+        "热搜",
+        "热点",
+        "爆款",
+        "趋势",
+        "新闻",
+        "发布",
+        "上市",
+        "上新",
+        "实时",
+        "current",
+        "latest",
+        "today",
+        "recent",
+        "trend",
+        "trending",
+        "news",
+    )
+    message = request.message.strip()
+    needs_search = task_requires_search or any(keyword in message.lower() for keyword in keyword_triggers)
+    search_query = _build_default_search_query(request) if needs_search else ""
+    return SearchRouteDecision(needs_search=needs_search, search_query=search_query)
+
+
+def _coerce_search_route_decision(
+    payload: SearchRouteDecision | dict[str, object] | str,
+    request: MediaChatRequest,
+) -> SearchRouteDecision:
+    if isinstance(payload, SearchRouteDecision):
+        decision = payload
+    elif isinstance(payload, str):
+        try:
+            decision = SearchRouteDecision.model_validate_json(payload)
+        except ValidationError:
+            decision = SearchRouteDecision.model_validate(json.loads(payload))
+    else:
+        decision = SearchRouteDecision.model_validate(payload)
+
+    normalized_query = decision.search_query.strip() if decision.search_query else ""
+    if decision.needs_search and not normalized_query:
+        normalized_query = _build_default_search_query(request)
+    if not decision.needs_search:
+        normalized_query = ""
+    return SearchRouteDecision(
+        needs_search=decision.needs_search,
+        search_query=normalized_query,
+    )
+
+
+def _coerce_search_results_text(payload: object) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+
+    if isinstance(payload, list):
+        normalized_lines: list[str] = []
+        for item in payload:
+            if isinstance(item, str):
+                line = item.strip()
+            elif isinstance(item, dict):
+                line = _normalize_search_results({"results": [item]}).strip()
+            else:
+                line = str(item).strip()
+            if line:
+                normalized_lines.append(line)
+        return "\n".join(normalized_lines).strip()
+
+    if isinstance(payload, dict):
+        return _normalize_search_results(payload)
+
+    return str(payload).strip()
+
+
+def _normalize_search_results(payload: object) -> str:
     if not isinstance(payload, dict):
-        return []
+        return ""
 
     context: list[str] = []
 
@@ -983,7 +1207,7 @@ def _normalize_search_results(payload: object) -> list[str]:
 
     results = payload.get("results")
     if not isinstance(results, list):
-        return context
+        return "\n".join(context).strip()
 
     for index, item in enumerate(results[:5], start=1):
         if not isinstance(item, dict):
@@ -996,7 +1220,73 @@ def _normalize_search_results(payload: object) -> list[str]:
         if segments:
             context.append(f"{index}. " + " | ".join(segments))
 
-    return context
+    return "\n".join(context).strip()
+
+
+def _build_mock_search_results(
+    request: MediaChatRequest,
+    search_query: str,
+) -> str:
+    today = datetime.now(timezone.utc).date().isoformat()
+    platform_label = request.platform.value
+
+    topic_map = {
+        TaskType.TOPIC_PLANNING: (
+            "平台内容团队正在集中讨论更强时效性的话题切口，偏好“热点事件 + 可执行建议 + 明确受众”结构。",
+            [
+                "选题趋势 | 用户更关注可立即落地的清单式内容，而不是泛泛观点。",
+                "讨论热词 | 真实体验、避坑总结、情绪价值、成本对比仍然是高频点击词。",
+                "内容机会 | 将行业新闻和个人经验结合，更容易形成收藏与转发。",
+            ],
+        ),
+        TaskType.HOT_POST_ANALYSIS: (
+            "近期高表现内容普遍使用“热词切入 + 具体案例 + 结论前置”的表达方式。",
+            [
+                "传播结构 | 标题先给冲突感，再在正文前 3 句明确收益点。",
+                "读者反馈 | 用户更愿意互动那些能快速验证、并带有时间窗口感的内容。",
+                "复用建议 | 可把热点观点改写成『原因拆解 / 方法复盘 / 适用人群』三段式。",
+            ],
+        ),
+        TaskType.CONTENT_GENERATION: (
+            "当前相关内容的高频表达强调“最新消息、明确结论、实测体验”和“是否值得跟进”。",
+            [
+                "写法偏好 | 标题更强调结论先行，例如“刚发布值不值得买/学/试”。",
+                "用户关注 | 常见问题集中在价格、体验差异、适用人群和替代方案。",
+                "转化动作 | 结尾加入观点总结和评论区互动问题，更容易放大讨论。",
+            ],
+        ),
+        TaskType.COMMENT_REPLY: (
+            "近期相关话题下，用户更在意回应是否及时、真诚，并且能给出明确下一步。",
+            [
+                "回复策略 | 先确认情绪或诉求，再补充一条具体可执行动作。",
+                "风险提示 | 涉及判断类表述时，先说明适用前提，避免绝对化承诺。",
+                "互动方向 | 以追问场景或邀请补充信息的方式结尾，更利于继续沟通。",
+            ],
+        ),
+    }
+
+    summary, highlights = topic_map.get(
+        request.task_type,
+        (
+            "当前热点结果显示，用户更偏好具有时效性、结论明确且能快速执行的内容形式。",
+            [
+                "内容结构 | 结论前置、信息压缩、场景明确。",
+                "用户需求 | 希望快速判断值不值得继续看、继续做、继续买。",
+                "传播机会 | 结合当下讨论词和真实案例，更容易形成扩散。",
+            ],
+        ),
+    )
+
+    lines = [
+        f"搜索总结：{summary}",
+        (
+            f"1. 模拟热点快照 | 日期：{today} | 平台：{platform_label} | "
+            f"查询：{search_query}"
+        ),
+    ]
+    lines.extend(f"{index + 1}. {item}" for index, item in enumerate(highlights, start=1))
+    lines.append("5. 说明 | 当前未配置外部搜索服务，以上为与真实搜索结果格式一致的模拟联网检索上下文。")
+    return "\n".join(lines)
 
 
 def _merge_validation_errors(

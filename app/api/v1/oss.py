@@ -99,7 +99,6 @@ async def upload_media(
     total_size = 0
     content_type = file.content_type or mimetypes.guess_type(original_filename)[0]
     storage_client = create_storage_client()
-    file_buffer = bytearray()
 
     try:
         while chunk := await file.read(READ_CHUNK_SIZE):
@@ -109,7 +108,7 @@ async def upload_media(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail="上传文件不能超过 15MB。",
                 )
-            file_buffer.extend(chunk)
+        await file.seek(0)
     except HTTPException:
         raise
     except OSError as exc:
@@ -117,15 +116,13 @@ async def upload_media(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="文件保存失败，请稍后重试。",
         ) from exc
-    finally:
-        await file.close()
 
     try:
-        stored_upload = await storage_client.upload_file(
+        stored_upload = await storage_client.upload_file_stream(
             user_id=current_user.id,
             filename=stored_name,
             content_type=content_type or "application/octet-stream",
-            data=bytes(file_buffer),
+            file_stream=file.file,
         )
     except RuntimeError as exc:
         logger.warning("Storage upload failed before persistence: %s", exc)
@@ -138,6 +135,8 @@ async def upload_media(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="文件上传失败，请稍后重试。",
         ) from exc
+    finally:
+        await file.close()
 
     try:
         db.add(

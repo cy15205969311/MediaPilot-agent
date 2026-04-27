@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import quote, urlparse
+from uuid import uuid4
 
 from fastapi.concurrency import run_in_threadpool
 
@@ -63,6 +66,17 @@ class BaseStorageClient(ABC):
         """Upload a file and return its storage metadata."""
 
     @abstractmethod
+    async def upload_file_stream(
+        self,
+        *,
+        user_id: str,
+        filename: str,
+        content_type: str,
+        file_stream: BinaryIO,
+    ) -> StoredUpload:
+        """Upload a file-like object and return its storage metadata."""
+
+    @abstractmethod
     async def delete_file(self, object_key: str) -> None:
         """Delete a file from the storage backend."""
 
@@ -106,10 +120,48 @@ class LocalStorageClient(BaseStorageClient):
             public_url=self.build_public_url(object_key),
         )
 
+    async def upload_file_stream(
+        self,
+        *,
+        user_id: str,
+        filename: str,
+        content_type: str,
+        file_stream: BinaryIO,
+    ) -> StoredUpload:
+        object_key = self.build_object_key(user_id=user_id, filename=filename)
+        await run_in_threadpool(self._write_stream, object_key, file_stream)
+        return StoredUpload(
+            backend_name=self.backend_name,
+            object_key=object_key,
+            public_url=self.build_public_url(object_key),
+        )
+
     def _write_file(self, object_key: str, data: bytes) -> None:
         destination = LOCAL_UPLOADS_DIR / object_key
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
+        temp_destination = self._build_temp_destination(destination)
+        try:
+            temp_destination.write_bytes(data)
+            temp_destination.replace(destination)
+        except Exception:
+            temp_destination.unlink(missing_ok=True)
+            raise
+
+    def _write_stream(self, object_key: str, file_stream: BinaryIO) -> None:
+        destination = LOCAL_UPLOADS_DIR / object_key
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_destination = self._build_temp_destination(destination)
+        file_stream.seek(0)
+        try:
+            with temp_destination.open("wb") as output:
+                shutil.copyfileobj(file_stream, output, length=1024 * 1024)
+            temp_destination.replace(destination)
+        except Exception:
+            temp_destination.unlink(missing_ok=True)
+            raise
+
+    def _build_temp_destination(self, destination: Path) -> Path:
+        return destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
 
     async def delete_file(self, object_key: str) -> None:
         await run_in_threadpool(self._delete_file, object_key)
@@ -165,9 +217,40 @@ class AliyunOSSClient(BaseStorageClient):
             public_url=self.build_public_url(object_key),
         )
 
+    async def upload_file_stream(
+        self,
+        *,
+        user_id: str,
+        filename: str,
+        content_type: str,
+        file_stream: BinaryIO,
+    ) -> StoredUpload:
+        object_key = self.build_object_key(user_id=user_id, filename=filename)
+        await run_in_threadpool(
+            self._upload_stream_sync,
+            object_key,
+            content_type,
+            file_stream,
+        )
+        return StoredUpload(
+            backend_name=self.backend_name,
+            object_key=object_key,
+            public_url=self.build_public_url(object_key),
+        )
+
     def _upload_sync(self, object_key: str, content_type: str, data: bytes) -> None:
         headers = {"Content-Type": content_type}
         self._get_bucket().put_object(object_key, data, headers=headers)
+
+    def _upload_stream_sync(
+        self,
+        object_key: str,
+        content_type: str,
+        file_stream: BinaryIO,
+    ) -> None:
+        headers = {"Content-Type": content_type}
+        file_stream.seek(0)
+        self._get_bucket().put_object(object_key, file_stream, headers=headers)
 
     async def delete_file(self, object_key: str) -> None:
         await run_in_threadpool(self._delete_sync, object_key)

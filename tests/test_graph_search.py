@@ -79,8 +79,15 @@ async def collect_events(provider: LangGraphProvider, request: MediaChatRequest)
 def test_langgraph_provider_routes_topic_planning_through_search():
     inner_provider = SearchRecordingProvider()
 
-    async def fake_search(request: MediaChatRequest) -> list[str]:
+    async def fake_route(_: MediaChatRequest) -> dict[str, object]:
+        return {
+            "needs_search": True,
+            "search_query": "2026 理财内容趋势 小红书 热点",
+        }
+
+    async def fake_search(request: MediaChatRequest, search_query: str) -> list[str]:
         assert request.task_type.value == "topic_planning"
+        assert search_query == "2026 理财内容趋势 小红书 热点"
         return [
             "Search summary: creators are discussing tax-season portfolio reviews.",
             "1. April portfolio review trend | People want actionable checklists.",
@@ -88,6 +95,7 @@ def test_langgraph_provider_routes_topic_planning_through_search():
 
     provider = LangGraphProvider(
         inner_provider=inner_provider,
+        route_analyzer=fake_route,
         search_analyzer=fake_search,
     )
     request = MediaChatRequest.model_validate(
@@ -107,24 +115,39 @@ def test_langgraph_provider_routes_topic_planning_through_search():
         for event in events
         if event["event"] == "tool_call"
     ]
-    assert "search" in tool_call_names
-    assert tool_call_names.index("parse_materials") < tool_call_names.index("search")
-    assert tool_call_names.index("search") < tool_call_names.index("generate_draft")
+    assert "web_search" in tool_call_names
+    assert tool_call_names.index("parse_materials") < tool_call_names.index("web_search")
+    assert tool_call_names.index("web_search") < tool_call_names.index("generate_draft")
+    assert "<search_context>" in inner_provider.last_request_message
     assert "Search summary:" in inner_provider.last_request_message
     assert any(event["event"] == "artifact" for event in events)
+    web_search_event = next(
+        event
+        for event in events
+        if event["event"] == "tool_call" and event.get("name") == "web_search"
+    )
+    assert web_search_event["message"] == "正在搜索全网热点: 2026 理财内容趋势 小红书 热点"
 
 
 def test_langgraph_provider_routes_hot_post_analysis_through_search():
     inner_provider = SearchRecordingProvider()
 
-    async def fake_search(request: MediaChatRequest) -> list[str]:
+    async def fake_route(_: MediaChatRequest) -> dict[str, object]:
+        return {
+            "needs_search": True,
+            "search_query": "近期 投资类爆款内容 传播趋势",
+        }
+
+    async def fake_search(request: MediaChatRequest, search_query: str) -> list[str]:
         assert request.task_type.value == "hot_post_analysis"
+        assert "投资类爆款内容" in search_query
         return [
             "Search summary: short-form investing explainers are trending again.",
         ]
 
     provider = LangGraphProvider(
         inner_provider=inner_provider,
+        route_analyzer=fake_route,
         search_analyzer=fake_search,
     )
     request = MediaChatRequest.model_validate(
@@ -139,9 +162,10 @@ def test_langgraph_provider_routes_hot_post_analysis_through_search():
 
     events = asyncio.run(collect_events(provider, request))
 
+    assert "<search_context>" in inner_provider.last_request_message
     assert "short-form investing explainers" in inner_provider.last_request_message
     assert any(
-        event["event"] == "tool_call" and event.get("name") == "search"
+        event["event"] == "tool_call" and event.get("name") == "web_search"
         for event in events
     )
     assert any(event["event"] == "artifact" for event in events)
@@ -150,11 +174,18 @@ def test_langgraph_provider_routes_hot_post_analysis_through_search():
 def test_langgraph_provider_degrades_gracefully_when_search_fails():
     inner_provider = SearchRecordingProvider()
 
-    async def failing_search(_: MediaChatRequest) -> list[str]:
+    async def fake_route(_: MediaChatRequest) -> dict[str, object]:
+        return {
+            "needs_search": True,
+            "search_query": "失败搜索回退测试",
+        }
+
+    async def failing_search(_: MediaChatRequest, __: str) -> list[str]:
         raise ValueError("search boom")
 
     provider = LangGraphProvider(
         inner_provider=inner_provider,
+        route_analyzer=fake_route,
         search_analyzer=failing_search,
     )
     request = MediaChatRequest.model_validate(
@@ -175,9 +206,18 @@ def test_langgraph_provider_degrades_gracefully_when_search_fails():
     assert events[-1] == {"event": "done", "thread_id": "thread-search-fallback"}
 
 
-def test_langgraph_provider_skips_search_when_api_key_is_missing():
+def test_langgraph_provider_uses_mock_search_results_when_api_key_is_missing():
     inner_provider = SearchRecordingProvider()
-    provider = LangGraphProvider(inner_provider=inner_provider)
+    async def fake_route(_: MediaChatRequest) -> dict[str, object]:
+        return {
+            "needs_search": True,
+            "search_query": "未配置真实搜索服务时的模拟热点",
+        }
+
+    provider = LangGraphProvider(
+        inner_provider=inner_provider,
+        route_analyzer=fake_route,
+    )
     provider.search_api_key = ""
     request = MediaChatRequest.model_validate(
         {
@@ -194,9 +234,34 @@ def test_langgraph_provider_skips_search_when_api_key_is_missing():
     search_statuses = [
         str(event["status"])
         for event in events
-        if event["event"] == "tool_call" and event.get("name") == "search"
+        if event["event"] == "tool_call" and event.get("name") == "web_search"
     ]
     assert "processing" in search_statuses
-    assert "skipped" in search_statuses
+    assert "completed" in search_statuses
     assert not any(event["event"] == "error" for event in events)
     assert any(event["event"] == "artifact" for event in events)
+    assert "<search_context>" in inner_provider.last_request_message
+    assert "模拟联网检索上下文" in inner_provider.last_request_message
+
+
+def test_langgraph_provider_heuristic_router_can_trigger_search_for_latest_requests():
+    inner_provider = SearchRecordingProvider()
+    provider = LangGraphProvider(inner_provider=inner_provider)
+    provider.search_api_key = ""
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-search-latest",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "帮我写一篇关于今天最新发布手机的小红书评测",
+            "materials": [],
+        }
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    assert any(
+        event["event"] == "tool_call" and event.get("name") == "web_search"
+        for event in events
+    )
+    assert "<search_context>" in inner_provider.last_request_message
