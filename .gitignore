@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.tmp_pytest/
+.idea/
+.venv/
+.venv1/
+*.db
+*.sqlite
+*.sqlite3
+uploads/*
+!uploads/.gitkeep
+frontend/node_modules/
+frontend/dist/

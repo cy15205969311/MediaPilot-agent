@@ -1,0 +1,1062 @@
+import asyncio
+import json
+import logging
+from pathlib import Path
+from asyncio import tasks as asyncio_tasks
+
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+import app.services.agent as agent_module
+import app.services.providers as providers_module
+from app.db.database import Base, get_db
+from app.main import app
+from app.models.schemas import (
+    CommentReplyArtifactPayload,
+    ContentGenerationArtifactPayload,
+    HotPostAnalysisArtifactPayload,
+    TopicPlanningArtifactPayload,
+)
+from app.services.graph import LangGraphProvider
+
+
+def parse_sse_events(raw_stream: str) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+
+    for block in raw_stream.replace("\r\n", "\n").split("\n\n"):
+        if not block.strip():
+            continue
+
+        event_name = ""
+        data_payload = ""
+
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data_payload += line.split(":", 1)[1].strip()
+
+        if not event_name or not data_payload:
+            continue
+
+        payload = json.loads(data_payload)
+        payload["event"] = event_name
+        events.append(payload)
+
+    return events
+
+
+def register_user(
+    client: TestClient,
+    *,
+    username: str,
+    password: str = "super-secret-123",
+) -> dict[str, str]:
+    payload = register_auth_response(client, username=username, password=password)
+    token = payload["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def register_auth_response(
+    client: TestClient,
+    *,
+    username: str,
+    password: str = "super-secret-123",
+) -> dict[str, object]:
+    response = client.post(
+        "/api/v1/auth/register",
+        json={"username": username, "password": password},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def login_user(
+    client: TestClient,
+    *,
+    username: str,
+    password: str = "super-secret-123",
+) -> dict[str, str]:
+    response = client.post(
+        "/api/v1/auth/login",
+        data={"username": username, "password": password},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def collect_stream_events(
+    client: TestClient,
+    payload: dict[str, object],
+    *,
+    headers: dict[str, str],
+) -> list[dict[str, object]]:
+    with client.stream(
+        "POST",
+        "/api/v1/media/chat/stream",
+        json=payload,
+        headers=headers,
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        raw_stream = "".join(response.iter_text())
+
+    events = parse_sse_events(raw_stream)
+    event_names = [str(event["event"]) for event in events]
+    message_count = event_names.count("message")
+
+    assert message_count >= 1
+    assert event_names == [
+        "start",
+        *(["message"] * message_count),
+        "tool_call",
+        "artifact",
+        "done",
+    ]
+
+    return events
+
+
+def collect_raw_stream_events(
+    client: TestClient,
+    payload: dict[str, object],
+    *,
+    headers: dict[str, str],
+) -> list[dict[str, object]]:
+    with client.stream(
+        "POST",
+        "/api/v1/media/chat/stream",
+        json=payload,
+        headers=headers,
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        raw_stream = "".join(response.iter_text())
+
+    return parse_sse_events(raw_stream)
+
+
+def assert_artifact_matches_schema(
+    client: TestClient,
+    payload: dict[str, object],
+    *,
+    headers: dict[str, str],
+    schema: type[BaseModel],
+    expected_artifact_type: str,
+) -> BaseModel:
+    events = collect_stream_events(client, payload, headers=headers)
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = schema.model_validate(artifact_event["artifact"])
+    assert getattr(artifact, "artifact_type") == expected_artifact_type
+    return artifact
+
+
+@pytest.fixture()
+def no_sleep(monkeypatch: pytest.MonkeyPatch):
+    async def immediate_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(providers_module.asyncio, "sleep", immediate_sleep)
+
+
+@pytest.fixture()
+def client(tmp_path: Path, no_sleep: None):
+    database_path = tmp_path / "test_chat.db"
+    engine = create_engine(
+        f"sqlite:///{database_path.as_posix()}",
+        connect_args={"check_same_thread": False, "timeout": 20},
+    )
+    testing_session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    def override_get_db():
+        db = testing_session_local()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    original_provider = agent_module.media_agent_workflow.provider
+    agent_module.media_agent_workflow.provider = providers_module.MockLLMProvider()
+
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        agent_module.media_agent_workflow.provider = original_provider
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_auth_register_and_login(client: TestClient):
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={"username": "alice", "password": "super-secret-123"},
+    )
+    assert register_response.status_code == 200
+    register_payload = register_response.json()
+    assert register_payload["token_type"] == "bearer"
+    assert isinstance(register_payload["access_token"], str)
+    assert isinstance(register_payload["refresh_token"], str)
+    assert register_payload["user"]["username"] == "alice"
+    assert register_payload["user"]["nickname"] is None
+    assert register_payload["user"]["bio"] is None
+    assert register_payload["user"]["created_at"].endswith("Z")
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice", "password": "super-secret-123"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert login_response.status_code == 200
+    assert isinstance(login_response.json()["refresh_token"], str)
+    assert login_response.json()["user"]["username"] == "alice"
+
+
+def test_refresh_token_issues_new_session_tokens(client: TestClient):
+    register_payload = register_auth_response(client, username="alice-refresh")
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": register_payload["refresh_token"]},
+    )
+
+    assert refresh_response.status_code == 200
+    refresh_payload = refresh_response.json()
+    assert refresh_payload["token_type"] == "bearer"
+    assert refresh_payload["user"]["username"] == "alice-refresh"
+    assert refresh_payload["access_token"] != register_payload["access_token"]
+    assert refresh_payload["refresh_token"] != register_payload["refresh_token"]
+
+
+def test_refresh_endpoint_rejects_access_token(client: TestClient):
+    register_payload = register_auth_response(client, username="alice-refresh-invalid")
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": register_payload["access_token"]},
+    )
+
+    assert refresh_response.status_code == 401
+
+
+def test_refresh_token_rotation_revokes_previous_session(client: TestClient):
+    register_payload = register_auth_response(client, username="alice-rotation")
+
+    first_refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": register_payload["refresh_token"]},
+    )
+    assert first_refresh_response.status_code == 200
+    rotated_payload = first_refresh_response.json()
+
+    reused_refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": register_payload["refresh_token"]},
+    )
+    assert reused_refresh_response.status_code == 401
+
+    latest_refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": rotated_payload["refresh_token"]},
+    )
+    assert latest_refresh_response.status_code == 200
+
+
+def test_logout_revokes_refresh_session(client: TestClient):
+    register_payload = register_auth_response(client, username="alice-logout")
+
+    logout_response = client.post(
+        "/api/v1/auth/logout",
+        json={"refresh_token": register_payload["refresh_token"]},
+        headers={"Authorization": f"Bearer {register_payload['access_token']}"},
+    )
+
+    assert logout_response.status_code == 200
+    assert logout_response.json() == {"logged_out": True}
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": register_payload["refresh_token"]},
+    )
+    assert refresh_response.status_code == 401
+
+
+def test_session_listing_marks_current_device_and_supports_targeted_revoke(
+    client: TestClient,
+):
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={"username": "alice-sessions", "password": "super-secret-123"},
+        headers={
+            "User-Agent": "Mozilla/5.0 Chrome/123.0 Windows",
+            "X-Forwarded-For": "10.0.0.1",
+        },
+    )
+    assert register_response.status_code == 200
+    first_payload = register_response.json()
+    first_access_token = first_payload["access_token"]
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-sessions", "password": "super-secret-123"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 Firefox/124.0 Mac OS X",
+            "X-Forwarded-For": "10.0.0.2",
+        },
+    )
+    assert login_response.status_code == 200
+    second_payload = login_response.json()
+    second_access_token = second_payload["access_token"]
+
+    sessions_response = client.get(
+        "/api/v1/auth/sessions",
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert sessions_response.status_code == 200
+    sessions_payload = sessions_response.json()
+    assert len(sessions_payload["items"]) == 2
+
+    current_session = next(
+        item for item in sessions_payload["items"] if item["is_current"] is True
+    )
+    revoked_candidate = next(
+        item for item in sessions_payload["items"] if item["is_current"] is False
+    )
+
+    assert current_session["ip_address"] == "10.0.0.2"
+    assert "Firefox" in (current_session["device_info"] or "")
+    assert revoked_candidate["ip_address"] == "10.0.0.1"
+    assert "Chrome" in (revoked_candidate["device_info"] or "")
+
+    revoke_response = client.delete(
+        f"/api/v1/auth/sessions/{revoked_candidate['id']}",
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert revoke_response.status_code == 200
+    assert revoke_response.json() == {
+        "id": revoked_candidate["id"],
+        "revoked": True,
+    }
+
+    sessions_after_revoke = client.get(
+        "/api/v1/auth/sessions",
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert sessions_after_revoke.status_code == 200
+    remaining_items = sessions_after_revoke.json()["items"]
+    assert len(remaining_items) == 1
+    assert remaining_items[0]["id"] == current_session["id"]
+    assert remaining_items[0]["is_current"] is True
+
+    revoked_session_response = client.get(
+        "/api/v1/media/threads",
+        headers={"Authorization": f"Bearer {first_access_token}"},
+    )
+    assert revoked_session_response.status_code == 401
+
+
+def test_reset_password_revokes_other_sessions_and_rotates_login_secret(
+    client: TestClient,
+):
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={"username": "alice-password-reset", "password": "super-secret-123"},
+        headers={
+            "User-Agent": "Mozilla/5.0 Chrome/123.0 Windows",
+            "X-Forwarded-For": "10.0.0.1",
+        },
+    )
+    assert register_response.status_code == 200
+    first_payload = register_response.json()
+    first_access_token = first_payload["access_token"]
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-password-reset", "password": "super-secret-123"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 Firefox/124.0 Mac OS X",
+            "X-Forwarded-For": "10.0.0.2",
+        },
+    )
+    assert login_response.status_code == 200
+    second_payload = login_response.json()
+    second_access_token = second_payload["access_token"]
+
+    reset_response = client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "old_password": "super-secret-123",
+            "new_password": "new-secret-456",
+        },
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert reset_response.status_code == 200
+    assert reset_response.json() == {
+        "password_reset": True,
+        "revoked_sessions": 1,
+    }
+
+    sessions_response = client.get(
+        "/api/v1/auth/sessions",
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert sessions_response.status_code == 200
+    sessions_payload = sessions_response.json()
+    assert len(sessions_payload["items"]) == 1
+    assert sessions_payload["items"][0]["is_current"] is True
+
+    revoked_device_response = client.get(
+        "/api/v1/media/threads",
+        headers={"Authorization": f"Bearer {first_access_token}"},
+    )
+    assert revoked_device_response.status_code == 401
+
+    old_password_login = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-password-reset", "password": "super-secret-123"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert old_password_login.status_code == 401
+
+    new_password_login = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-password-reset", "password": "new-secret-456"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert new_password_login.status_code == 200
+
+
+def test_reset_password_rejects_wrong_current_password(client: TestClient):
+    register_payload = register_auth_response(
+        client,
+        username="alice-password-reset-invalid",
+    )
+
+    reset_response = client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "old_password": "wrong-secret-000",
+            "new_password": "new-secret-456",
+        },
+        headers={"Authorization": f"Bearer {register_payload['access_token']}"},
+    )
+    assert reset_response.status_code == 400
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        data={
+            "username": "alice-password-reset-invalid",
+            "password": "super-secret-123",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert login_response.status_code == 200
+
+
+def test_profile_update_returns_updated_user_payload(client: TestClient):
+    headers = register_user(client, username="alice-profile")
+
+    response = client.patch(
+        "/api/v1/auth/profile",
+        json={
+            "nickname": "Ada Planner",
+            "bio": "专注高净值客户资产配置与内容运营。",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["username"] == "alice-profile"
+    assert payload["nickname"] == "Ada Planner"
+    assert payload["bio"] == "专注高净值客户资产配置与内容运营。"
+    assert payload["created_at"].endswith("Z")
+
+
+def test_profile_update_can_store_avatar_url(client: TestClient):
+    headers = register_user(client, username="alice-avatar")
+
+    response = client.patch(
+        "/api/v1/auth/profile",
+        json={"avatar_url": "/uploads/alice-avatar/avatar.webp"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["username"] == "alice-avatar"
+    assert payload["avatar_url"] == "/uploads/alice-avatar/avatar.webp"
+
+
+def test_protected_chat_requires_token(client: TestClient):
+    payload = {
+        "thread_id": "thread-without-token",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "没有 token 时不应允许访问。",
+        "materials": [],
+    }
+
+    response = client.post("/api/v1/media/chat/stream", json=payload)
+    assert response.status_code == 401
+
+
+def test_media_chat_stream_logs_request_entry(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+):
+    headers = register_user(client, username="alice-log")
+    payload = {
+        "thread_id": "thread-log-entry",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请记录一次流式聊天请求日志",
+        "materials": [],
+    }
+
+    with caplog.at_level(logging.INFO):
+        collect_stream_events(client, payload, headers=headers)
+
+    stderr = capsys.readouterr().err
+    assert any(
+        record.message
+        == "收到 Chat 请求: thread_id=thread-log-entry, task_type=content_generation"
+        for record in caplog.records
+    )
+
+
+def test_media_chat_stream_logs_request_lifecycle(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+):
+    headers = register_user(client, username="alice-log-lifecycle")
+    payload = {
+        "thread_id": "thread-log-lifecycle",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "trace the request lifecycle",
+        "materials": [],
+    }
+
+    with caplog.at_level(logging.INFO):
+        collect_stream_events(client, payload, headers=headers)
+
+    stderr = capsys.readouterr().err
+    assert any(
+        record.message.startswith("request.start method=POST path=/api/v1/media/chat/stream")
+        for record in caplog.records
+    )
+    assert any(
+        record.message.startswith(
+            "chat.stream route entered thread_id=thread-log-lifecycle task_type=content_generation user_id="
+        )
+        for record in caplog.records
+    )
+    assert any(
+        record.message.startswith(
+            "request.response method=POST path=/api/v1/media/chat/stream status=200 elapsed_ms="
+        )
+        for record in caplog.records
+    )
+
+
+def test_providers_create_clients_with_strict_http_timeouts(monkeypatch: pytest.MonkeyPatch):
+    captured_kwargs: list[dict[str, object]] = []
+
+    class DummyAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured_kwargs.append(kwargs)
+
+    monkeypatch.setattr(providers_module, "AsyncOpenAI", DummyAsyncOpenAI)
+
+    openai_provider = providers_module.OpenAIProvider(
+        api_key="openai-key",
+        timeout_seconds=42.0,
+    )
+    compatible_provider = providers_module.CompatibleLLMProvider(
+        api_key="compatible-key",
+        base_url="https://example.com/v1",
+        timeout_seconds=55.0,
+    )
+
+    openai_provider._get_client()
+    compatible_provider._get_client()
+
+    assert len(captured_kwargs) == 2
+
+    openai_timeout = captured_kwargs[0]["timeout"]
+    compatible_timeout = captured_kwargs[1]["timeout"]
+
+    assert isinstance(openai_timeout, providers_module.httpx.Timeout)
+    assert openai_timeout.connect == 10.0
+    assert openai_timeout.read == 42.0
+
+    assert isinstance(compatible_timeout, providers_module.httpx.Timeout)
+    assert compatible_timeout.connect == 10.0
+    assert compatible_timeout.read == 55.0
+
+
+def test_media_chat_stream_emits_content_generation_artifact(client: TestClient):
+    headers = register_user(client, username="alice-content")
+    payload = {
+        "thread_id": "thread-content-generation",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请帮我策划一篇年度财务复盘的小红书笔记",
+        "materials": [],
+    }
+
+    artifact = assert_artifact_matches_schema(
+        client,
+        payload,
+        headers=headers,
+        schema=ContentGenerationArtifactPayload,
+        expected_artifact_type="content_draft",
+    )
+
+    assert len(artifact.title_candidates) == 3
+    assert "年度复盘" in artifact.body
+
+
+def test_media_chat_stream_emits_topic_planning_artifact(client: TestClient):
+    headers = register_user(client, username="alice-topic")
+    payload = {
+        "thread_id": "thread-topic-planning",
+        "platform": "xiaohongshu",
+        "task_type": "topic_planning",
+        "message": "请给我一组选题策划方向",
+        "materials": [],
+    }
+
+    artifact = assert_artifact_matches_schema(
+        client,
+        payload,
+        headers=headers,
+        schema=TopicPlanningArtifactPayload,
+        expected_artifact_type="topic_list",
+    )
+
+    assert len(artifact.topics) >= 1
+    assert artifact.topics[0].title
+
+
+def test_media_chat_stream_emits_hot_post_analysis_artifact(client: TestClient):
+    headers = register_user(client, username="alice-analysis")
+    payload = {
+        "thread_id": "thread-hot-post-analysis",
+        "platform": "xiaohongshu",
+        "task_type": "hot_post_analysis",
+        "message": "请拆解一篇爆款内容",
+        "materials": [],
+    }
+
+    artifact = assert_artifact_matches_schema(
+        client,
+        payload,
+        headers=headers,
+        schema=HotPostAnalysisArtifactPayload,
+        expected_artifact_type="hot_post_analysis",
+    )
+
+    assert len(artifact.analysis_dimensions) >= 1
+    assert len(artifact.reusable_templates) >= 1
+
+
+def test_media_chat_stream_emits_comment_reply_artifact(client: TestClient):
+    headers = register_user(client, username="alice-reply")
+    payload = {
+        "thread_id": "thread-comment-reply",
+        "platform": "xiaohongshu",
+        "task_type": "comment_reply",
+        "message": "请给我一组合规的评论回复话术",
+        "materials": [],
+    }
+
+    artifact = assert_artifact_matches_schema(
+        client,
+        payload,
+        headers=headers,
+        schema=CommentReplyArtifactPayload,
+        expected_artifact_type="comment_reply",
+    )
+
+    assert len(artifact.suggestions) >= 1
+    assert artifact.suggestions[0].reply
+
+
+def test_langgraph_provider_emits_review_step_without_ocr_for_text_materials(
+    client: TestClient,
+):
+    headers = register_user(client, username="alice-langgraph")
+    original_provider = agent_module.media_agent_workflow.provider
+    agent_module.media_agent_workflow.provider = LangGraphProvider(
+        inner_provider=providers_module.MockLLMProvider(chunk_size=24),
+    )
+
+    payload = {
+        "thread_id": "thread-langgraph",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请基于已上传素材整理一篇适合内容运营复盘的草稿",
+        "materials": [
+            {
+                "type": "text_link",
+                "url": "https://example.com/report",
+                "text": "素材重点：目标用户为 28-35 岁，希望兼顾稳健与流动性。",
+            }
+        ],
+    }
+
+    try:
+        events = collect_raw_stream_events(client, payload, headers=headers)
+    finally:
+        agent_module.media_agent_workflow.provider = original_provider
+
+    assert events[0]["event"] == "start"
+    assert events[-1]["event"] == "done"
+
+    tool_calls = [event for event in events if event["event"] == "tool_call"]
+    tool_call_names = [str(event["name"]) for event in tool_calls]
+    assert "ocr" not in tool_call_names
+    assert tool_call_names.count("generate_draft") == 1
+    assert tool_call_names.index("parse_materials") < tool_call_names.index("generate_draft")
+    assert tool_call_names.index("generate_draft") < tool_call_names.index("review_draft")
+    assert tool_call_names.index("review_draft") < tool_call_names.index("format_artifact")
+
+    review_statuses = [
+        str(event["status"])
+        for event in tool_calls
+        if event["name"] == "review_draft"
+    ]
+    assert review_statuses[-1] == "passed"
+
+    message_events = [event for event in events if event["event"] == "message"]
+    assert len(message_events) >= 1
+
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    assert artifact.artifact_type == "content_draft"
+
+
+def test_langgraph_provider_branches_to_ocr_and_retries_on_review_failure(
+    client: TestClient,
+):
+    headers = register_user(client, username="alice-langgraph-ocr")
+    original_provider = agent_module.media_agent_workflow.provider
+
+    async def fake_vision(_: object) -> list[str]:
+        return ["视觉解析#1：提取文字：年度复盘；画面描述：资产配置四象限封面。"]
+
+    agent_module.media_agent_workflow.provider = LangGraphProvider(
+        inner_provider=providers_module.MockLLMProvider(chunk_size=24),
+        vision_analyzer=fake_vision,
+    )
+
+    payload = {
+        "thread_id": "thread-langgraph-ocr-retry",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请基于图片素材整理一篇适合复盘分享的内容草稿",
+        "system_prompt": "请务必加入风险提示，并以分点形式输出。",
+        "materials": [
+            {
+                "type": "image",
+                "url": "https://example.com/cover.png",
+                "text": "封面图展示了资产配置四象限和年度复盘关键词",
+            }
+        ],
+    }
+
+    try:
+        events = collect_raw_stream_events(client, payload, headers=headers)
+    finally:
+        agent_module.media_agent_workflow.provider = original_provider
+
+    tool_calls = [event for event in events if event["event"] == "tool_call"]
+    tool_call_names = [str(event["name"]) for event in tool_calls]
+    assert "ocr" in tool_call_names
+    assert tool_call_names.index("parse_materials") < tool_call_names.index("ocr")
+    assert tool_call_names.index("ocr") < tool_call_names.index("generate_draft")
+    assert tool_call_names.count("generate_draft") == 3
+
+    review_statuses = [
+        str(event["status"])
+        for event in tool_calls
+        if event["name"] == "review_draft"
+    ]
+    assert "retry" in review_statuses
+    assert review_statuses[-1] == "max_retries"
+
+    message_events = [event for event in events if event["event"] == "message"]
+    assert len(message_events) >= 1
+
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    assert artifact.artifact_type == "content_draft"
+
+
+def test_langgraph_provider_degrades_gracefully_when_ocr_times_out(
+    client: TestClient,
+):
+    headers = register_user(client, username="alice-langgraph-timeout")
+    original_provider = agent_module.media_agent_workflow.provider
+
+    async def slow_vision(_: object) -> list[str]:
+        await asyncio_tasks.sleep(0.02)
+        return ["unexpected"]
+
+    agent_module.media_agent_workflow.provider = LangGraphProvider(
+        inner_provider=providers_module.MockLLMProvider(chunk_size=24),
+        vision_analyzer=slow_vision,
+        vision_timeout_seconds=0.001,
+    )
+
+    payload = {
+        "thread_id": "thread-langgraph-timeout",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请在视觉提取超时时继续完成内容生成",
+        "materials": [
+            {
+                "type": "image",
+                "url": "https://example.com/timeout.png",
+                "text": "一张用于模拟 OCR 超时的图片素材",
+            }
+        ],
+    }
+
+    try:
+        events = collect_raw_stream_events(client, payload, headers=headers)
+    finally:
+        agent_module.media_agent_workflow.provider = original_provider
+
+    assert events[0]["event"] == "start"
+    assert events[-1]["event"] == "done"
+
+    ocr_statuses = [
+        str(event["status"])
+        for event in events
+        if event["event"] == "tool_call" and event["name"] == "ocr"
+    ]
+    assert "processing" in ocr_statuses
+    assert "timeout" in ocr_statuses
+
+    timeout_error = next(event for event in events if event["event"] == "error")
+    assert timeout_error["code"] == "LANGGRAPH_RUNTIME_ERROR"
+    assert "timed out" in str(timeout_error["message"]).lower()
+    assert not any(event["event"] == "artifact" for event in events)
+
+
+def test_history_endpoints_are_isolated_by_user_and_store_system_prompt(client: TestClient):
+    alice_headers = register_user(client, username="alice-history")
+    bob_headers = register_user(client, username="bob-history")
+
+    payload = {
+        "thread_id": "thread-history",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请生成一篇关于年度复盘的内容草稿",
+        "materials": [
+            {
+                "type": "text_link",
+                "url": "https://example.com/report",
+                "text": "年度复盘素材",
+            }
+        ],
+        "system_prompt": "你是一名理财规划师品牌顾问，输出风格要稳重可信。",
+        "thread_title": "年度复盘工作台",
+    }
+
+    collect_stream_events(client, payload, headers=alice_headers)
+
+    alice_threads_response = client.get("/api/v1/media/threads", headers=alice_headers)
+    assert alice_threads_response.status_code == 200
+    alice_threads_payload = alice_threads_response.json()
+    assert alice_threads_payload["total"] == 1
+    assert alice_threads_payload["items"][0]["title"] == "年度复盘工作台"
+    assert alice_threads_payload["items"][0]["updated_at"].endswith("Z")
+
+    bob_threads_response = client.get("/api/v1/media/threads", headers=bob_headers)
+    assert bob_threads_response.status_code == 200
+    assert bob_threads_response.json()["total"] == 0
+
+    alice_messages_response = client.get(
+        "/api/v1/media/threads/thread-history/messages",
+        headers=alice_headers,
+    )
+    assert alice_messages_response.status_code == 200
+    alice_messages_payload = alice_messages_response.json()
+    assert alice_messages_payload["thread_id"] == "thread-history"
+    assert alice_messages_payload["title"] == "年度复盘工作台"
+    assert alice_messages_payload["system_prompt"] == payload["system_prompt"]
+    assert alice_messages_payload["materials"] == []
+    user_message = alice_messages_payload["messages"][0]
+    assert user_message["created_at"].endswith("Z")
+    assert len(user_message["materials"]) == 1
+    assert user_message["materials"][0]["type"] == "text_link"
+    assert user_message["materials"][0]["message_id"] == user_message["id"]
+    assert user_message["materials"][0]["created_at"].endswith("Z")
+
+    artifact_messages = [
+        item
+        for item in alice_messages_payload["messages"]
+        if item["message_type"] == "artifact"
+    ]
+    assert len(artifact_messages) == 1
+    artifact = ContentGenerationArtifactPayload.model_validate(
+        artifact_messages[0]["artifact"],
+    )
+    assert artifact.artifact_type == "content_draft"
+
+    bob_messages_response = client.get(
+        "/api/v1/media/threads/thread-history/messages",
+        headers=bob_headers,
+    )
+    assert bob_messages_response.status_code == 404
+
+
+def test_thread_history_returns_user_message_image_material(client: TestClient):
+    headers = register_user(client, username="alice-image-history")
+    image_url = "https://media-bucket.oss-cn-hangzhou.aliyuncs.com/uploads/alice/sample.jpg"
+    payload = {
+        "thread_id": "thread-image-history",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请分析图片中的是什么",
+        "materials": [
+            {
+                "type": "image",
+                "url": image_url,
+                "text": "sample.jpg",
+            }
+        ],
+    }
+
+    collect_stream_events(client, payload, headers=headers)
+
+    response = client.get(
+        "/api/v1/media/threads/thread-image-history/messages",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    response_payload = response.json()
+    user_message = response_payload["messages"][0]
+
+    assert response_payload["materials"] == []
+    assert user_message["role"] == "user"
+    assert user_message["materials"] == [
+        {
+            "id": user_message["materials"][0]["id"],
+            "thread_id": "thread-image-history",
+            "message_id": user_message["id"],
+            "type": "image",
+            "url": image_url,
+            "text": "sample.jpg",
+            "created_at": user_message["materials"][0]["created_at"],
+        }
+    ]
+def test_thread_update_archive_and_delete_flow(client: TestClient):
+    register_user(client, username="alice-manage")
+    headers = login_user(client, username="alice-manage")
+    payload = {
+        "thread_id": "thread-manage",
+        "platform": "xiaohongshu",
+        "task_type": "topic_planning",
+        "message": "请给我一组年度复盘主题",
+        "materials": [],
+    }
+
+    collect_stream_events(client, payload, headers=headers)
+
+    rename_response = client.patch(
+        "/api/v1/media/threads/thread-manage",
+        json={"title": "高净值客户年度复盘专题"},
+        headers=headers,
+    )
+    assert rename_response.status_code == 200
+    renamed_payload = rename_response.json()
+    assert renamed_payload["title"] == "高净值客户年度复盘专题"
+
+    archive_response = client.patch(
+        "/api/v1/media/threads/thread-manage",
+        json={"is_archived": True},
+        headers=headers,
+    )
+    assert archive_response.status_code == 200
+    archived_payload = archive_response.json()
+    assert archived_payload["is_archived"] is True
+
+    default_threads_response = client.get("/api/v1/media/threads", headers=headers)
+    assert default_threads_response.status_code == 200
+    default_ids = [item["id"] for item in default_threads_response.json()["items"]]
+    assert "thread-manage" not in default_ids
+
+    archived_threads_response = client.get(
+        "/api/v1/media/threads?include_archived=true",
+        headers=headers,
+    )
+    assert archived_threads_response.status_code == 200
+    archived_item = next(
+        item
+        for item in archived_threads_response.json()["items"]
+        if item["id"] == "thread-manage"
+    )
+    assert archived_item["is_archived"] is True
+
+    delete_response = client.delete("/api/v1/media/threads/thread-manage", headers=headers)
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"id": "thread-manage", "deleted": True}
+
+    missing_response = client.get(
+        "/api/v1/media/threads/thread-manage/messages",
+        headers=headers,
+    )
+    assert missing_response.status_code == 404
+
+
+def test_thread_update_can_change_system_prompt(client: TestClient):
+    headers = register_user(client, username="alice-thread-settings")
+    payload = {
+        "thread_id": "thread-settings",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "请帮我生成一篇关于年度资产配置复盘的笔记",
+        "materials": [],
+    }
+
+    collect_stream_events(client, payload, headers=headers)
+
+    update_response = client.patch(
+        "/api/v1/media/threads/thread-settings",
+        json={
+            "title": "年度资产配置复盘",
+            "system_prompt": "你是一名稳健克制的理财内容顾问，请优先强调长期主义与风险提示。",
+        },
+        headers=headers,
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["title"] == "年度资产配置复盘"
+
+    history_response = client.get(
+        "/api/v1/media/threads/thread-settings/messages",
+        headers=headers,
+    )
+    assert history_response.status_code == 200
+    history_payload = history_response.json()
+    assert history_payload["title"] == "年度资产配置复盘"
+    assert (
+        history_payload["system_prompt"]
+        == "你是一名稳健克制的理财内容顾问，请优先强调长期主义与风险提示。"
+    )
