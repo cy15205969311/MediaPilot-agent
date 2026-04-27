@@ -10,9 +10,9 @@ export function ArtifactSection({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+    <section className="rounded-2xl border border-border bg-card p-4 shadow-sm">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h4 className="text-sm font-semibold text-slate-800">{title}</h4>
+        <h4 className="text-sm font-semibold text-foreground">{title}</h4>
         {action}
       </div>
       {children}

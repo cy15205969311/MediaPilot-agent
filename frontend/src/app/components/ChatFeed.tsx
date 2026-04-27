@@ -1,4 +1,12 @@
-import { AlertCircle, CheckCircle2, FileText, Image as ImageIcon, Sparkles, User, Video } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  FileText,
+  Image as ImageIcon,
+  Sparkles,
+  User,
+  Video,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import type { RefObject } from "react";
 
@@ -27,8 +35,12 @@ function renderMessageMaterials(item: ConversationMessage) {
     return null;
   }
 
-  const imageMaterials = materials.filter((material) => material.type === "image" && material.url);
-  const otherMaterials = materials.filter((material) => material.type !== "image" || !material.url);
+  const imageMaterials = materials.filter(
+    (material) => material.type === "image" && material.url,
+  );
+  const otherMaterials = materials.filter(
+    (material) => material.type !== "image" || !material.url,
+  );
   const isUser = item.role === "user";
 
   return (
@@ -37,8 +49,11 @@ function renderMessageMaterials(item: ConversationMessage) {
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {imageMaterials.map((material, index) => (
             <a
-              className={`group overflow-hidden rounded-2xl border ${isUser ? "border-white/25 bg-white/10" : "border-slate-200 bg-slate-50"
-                }`}
+              className={`group overflow-hidden rounded-2xl border ${
+                isUser
+                  ? "border-user-bubble-subtle-border bg-user-bubble-subtle"
+                  : "border-border bg-muted"
+              }`}
               href={material.url}
               key={`${material.url}-${index}`}
               rel="noreferrer"
@@ -58,8 +73,11 @@ function renderMessageMaterials(item: ConversationMessage) {
         <div className="flex flex-wrap gap-2">
           {otherMaterials.map((material, index) => (
             <a
-              className={`inline-flex max-w-full items-center gap-2 rounded-full px-3 py-1 text-xs ${isUser ? "bg-white/15 text-white" : "bg-slate-100 text-slate-600"
-                }`}
+              className={`inline-flex max-w-full items-center gap-2 rounded-full px-3 py-1 text-xs ${
+                isUser
+                  ? "border border-user-bubble-subtle-border bg-user-bubble-subtle text-user-bubble-subtle-foreground"
+                  : "bg-secondary text-secondary-foreground"
+              }`}
               href={material.url || undefined}
               key={`${material.type}-${material.url || material.text}-${index}`}
               rel="noreferrer"
@@ -103,13 +121,15 @@ export function ChatFeed({
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
       {isLoadingHistory ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="mb-3 text-sm font-semibold text-slate-700">正在加载历史会话</div>
+        <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
+          <div className="mb-3 text-sm font-semibold text-foreground">
+            正在加载历史会话
+          </div>
           <div className="space-y-3">
             {Array.from({ length: 3 }).map((_, index) => (
               <div key={`history-loading-${index}`} className="space-y-2">
-                <div className="h-4 w-2/3 animate-pulse rounded bg-slate-200" />
-                <div className="h-4 w-full animate-pulse rounded bg-slate-100" />
+                <div className="h-4 w-2/3 animate-pulse rounded bg-surface-subtle" />
+                <div className="h-4 w-full animate-pulse rounded bg-muted" />
               </div>
             ))}
           </div>
@@ -125,25 +145,25 @@ export function ChatFeed({
               key={item.id}
               className={`rounded-2xl border px-4 py-3 shadow-sm ${
                 item.role === "error"
-                  ? "border-red-200 bg-red-50"
+                  ? "border-danger-foreground/20 bg-danger-surface"
                   : item.role === "tool"
-                    ? "border-amber-200 bg-amber-50"
-                    : "border-slate-200 bg-slate-50"
+                    ? "border-warning-foreground/20 bg-warning-surface"
+                    : "border-border bg-muted"
               }`}
             >
-              <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-foreground">
                 {item.role === "tool" ? (
-                  <Sparkles className="h-4 w-4 text-amber-500" />
+                  <Sparkles className="h-4 w-4 text-warning-foreground" />
                 ) : item.role === "error" ? (
-                  <AlertCircle className="h-4 w-4 text-red-500" />
+                  <AlertCircle className="h-4 w-4 text-danger-foreground" />
                 ) : (
-                  <CheckCircle2 className="h-4 w-4 text-slate-500" />
+                  <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
                 )}
                 {item.title}
               </div>
-              <div className="text-sm leading-6 text-slate-600">{item.content}</div>
+              <div className="text-sm leading-6 text-muted-foreground">{item.content}</div>
               {timestamp ? (
-                <div className="mt-2 text-[11px] text-slate-400">{timestamp}</div>
+                <div className="mt-2 text-[11px] text-muted-foreground/80">{timestamp}</div>
               ) : null}
             </div>
           );
@@ -155,33 +175,32 @@ export function ChatFeed({
             className={`flex gap-3 ${item.role === "user" ? "justify-end" : "justify-start"}`}
           >
             {item.role === "assistant" ? (
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-orange-500 text-white shadow-sm">
+              <div
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-brand-foreground shadow-sm"
+                style={{ background: "var(--brand-gradient)" }}
+              >
                 <Sparkles className="h-5 w-5" />
               </div>
             ) : null}
 
             <div
-              className={`max-w-[85%] rounded-[24px] px-5 py-4 shadow-sm md:max-w-[70%] ${
+              className={`max-w-[85%] rounded-[24px] border px-5 py-4 shadow-sm md:max-w-[70%] ${
                 item.role === "user"
-                  ? "bg-gradient-to-br from-rose-500 to-orange-500 text-white"
-                  : "border border-slate-200 bg-white"
+                  ? "border-user-bubble-subtle-border bg-user-bubble text-user-foreground"
+                  : "border-border bg-ai-bubble text-ai-foreground"
               }`}
             >
               {renderMessageMaterials(item)}
-              <div
-                className={`whitespace-pre-wrap text-sm leading-7 ${
-                  item.role === "user" ? "text-white" : "text-slate-800"
-                }`}
-              >
+              <div className="whitespace-pre-wrap text-sm leading-7">
                 {item.content || (
                   <span className="inline-flex gap-1">
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-rose-400" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-brand" />
                     <span
-                      className="h-2 w-2 animate-bounce rounded-full bg-rose-400"
+                      className="h-2 w-2 animate-bounce rounded-full bg-brand"
                       style={{ animationDelay: "120ms" }}
                     />
                     <span
-                      className="h-2 w-2 animate-bounce rounded-full bg-rose-400"
+                      className="h-2 w-2 animate-bounce rounded-full bg-brand"
                       style={{ animationDelay: "240ms" }}
                     />
                   </span>
@@ -190,7 +209,9 @@ export function ChatFeed({
               {timestamp ? (
                 <div
                   className={`mt-3 text-xs ${
-                    item.role === "user" ? "text-white/70" : "text-slate-400"
+                    item.role === "user"
+                      ? "text-user-bubble-timestamp"
+                      : "text-muted-foreground/80"
                   }`}
                 >
                   {timestamp}
@@ -199,7 +220,7 @@ export function ChatFeed({
             </div>
 
             {item.role === "user" ? (
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-slate-600">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-secondary-foreground">
                 {showUserAvatar ? (
                   <img
                     alt={`${userDisplayName} avatar`}
@@ -217,19 +238,19 @@ export function ChatFeed({
       })}
 
       {isStreaming ? (
-        <div className="flex items-center gap-3 text-sm text-slate-500">
+        <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <div className="flex gap-1">
-            <div className="h-2 w-2 animate-bounce rounded-full bg-rose-400" />
+            <div className="h-2 w-2 animate-bounce rounded-full bg-brand" />
             <div
-              className="h-2 w-2 animate-bounce rounded-full bg-rose-400"
+              className="h-2 w-2 animate-bounce rounded-full bg-brand"
               style={{ animationDelay: "120ms" }}
             />
             <div
-              className="h-2 w-2 animate-bounce rounded-full bg-rose-400"
+              className="h-2 w-2 animate-bounce rounded-full bg-brand"
               style={{ animationDelay: "240ms" }}
             />
           </div>
-          <span>Agent 正在生成内容和结构化结果…</span>
+          <span>Agent 正在生成内容和结构化结果...</span>
         </div>
       ) : null}
 

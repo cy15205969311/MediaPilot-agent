@@ -97,9 +97,7 @@ export function UserProfileModal({
     });
   };
 
-  const handleAvatarChange = async (
-    event: ChangeEvent<HTMLInputElement>,
-  ): Promise<void> => {
+  const handleAvatarChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
 
@@ -122,7 +120,7 @@ export function UserProfileModal({
     }
   };
 
-  const handlePasswordReset = async (): Promise<void> => {
+  const handlePasswordReset = async () => {
     setPasswordError("");
     setPasswordSuccess("");
 
@@ -159,21 +157,20 @@ export function UserProfileModal({
   const previewUrl = avatarUrl ? buildAbsoluteUrl(avatarUrl) : "";
   const disableProfileActions = isSubmitting || isUploadingAvatar;
   const disableSecurityAction = isResettingPassword;
+  const currentInitial = (nickname || user?.username || "U").slice(0, 1).toUpperCase();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 p-4">
-      <div className="w-full max-w-3xl rounded-[28px] border border-white/70 bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4">
+      <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
         <div className="mb-5 flex items-start justify-between gap-4">
           <div>
-            <div className="text-xl font-semibold text-slate-900">
-              个人资料与安全
-            </div>
-            <div className="mt-1 text-sm text-slate-500">
+            <div className="text-xl font-semibold text-foreground">个人资料与安全</div>
+            <div className="mt-1 text-sm text-muted-foreground">
               维护公开资料、管理登录设备，并在需要时更新密码。
             </div>
           </div>
           <button
-            className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            className="rounded-xl p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground"
             onClick={onClose}
             type="button"
           >
@@ -181,12 +178,12 @@ export function UserProfileModal({
           </button>
         </div>
 
-        <div className="mb-6 grid grid-cols-3 gap-2 rounded-2xl bg-slate-100 p-1">
+        <div className="mb-6 grid grid-cols-3 gap-2 rounded-2xl bg-secondary p-1">
           <button
             className={`flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === "profile"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
             }`}
             onClick={() => setActiveTab("profile")}
             type="button"
@@ -197,8 +194,8 @@ export function UserProfileModal({
           <button
             className={`flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === "sessions"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
             }`}
             onClick={() => setActiveTab("sessions")}
             type="button"
@@ -209,8 +206,8 @@ export function UserProfileModal({
           <button
             className={`flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === "security"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
             }`}
             onClick={() => setActiveTab("security")}
             type="button"
@@ -222,9 +219,12 @@ export function UserProfileModal({
 
         {activeTab === "profile" ? (
           <div className="space-y-5">
-            <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-4">
+            <div className="rounded-[24px] border border-border bg-surface-muted p-4">
               <div className="flex items-center gap-4">
-                <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-rose-400 to-orange-400 text-2xl font-semibold text-white shadow-sm">
+                <div
+                  className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-full text-2xl font-semibold text-brand-foreground shadow-sm"
+                  style={{ background: "var(--brand-gradient)" }}
+                >
                   {previewUrl ? (
                     <img
                       alt="头像预览"
@@ -232,19 +232,19 @@ export function UserProfileModal({
                       src={previewUrl}
                     />
                   ) : (
-                    (nickname || user?.username || "U").slice(0, 1).toUpperCase()
+                    currentInitial
                   )}
                 </div>
 
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-slate-800">头像</div>
-                  <div className="mt-1 text-xs leading-5 text-slate-500">
+                  <div className="text-sm font-medium text-card-foreground">头像</div>
+                  <div className="mt-1 text-xs leading-5 text-muted-foreground">
                     支持 JPG、PNG、WEBP。上传后会保存到当前账号的隔离目录。
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
-                      className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-70"
+                      className="inline-flex items-center gap-2 rounded-2xl border border-border bg-card px-3 py-2 text-sm font-medium text-card-foreground transition hover:border-brand/40 hover:text-brand disabled:cursor-not-allowed disabled:opacity-70"
                       disabled={disableProfileActions}
                       onClick={() => fileInputRef.current?.click()}
                       type="button"
@@ -258,7 +258,7 @@ export function UserProfileModal({
                     </button>
 
                     <button
-                      className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex items-center gap-2 rounded-2xl border border-border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={disableProfileActions || !avatarUrl}
                       onClick={() => setAvatarUrl("")}
                       type="button"
@@ -279,16 +279,16 @@ export function UserProfileModal({
               />
 
               {uploadError ? (
-                <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
+                <div className="mt-3 rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
                   {uploadError}
                 </div>
               ) : null}
             </div>
 
             <label className="block">
-              <div className="mb-2 text-sm font-medium text-slate-700">昵称</div>
+              <div className="mb-2 text-sm font-medium text-card-foreground">昵称</div>
               <input
-                className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
                 maxLength={64}
                 onChange={(event) => setNickname(event.target.value)}
                 placeholder="例如：Ada 内容顾问"
@@ -297,9 +297,9 @@ export function UserProfileModal({
             </label>
 
             <label className="block">
-              <div className="mb-2 text-sm font-medium text-slate-700">简介</div>
+              <div className="mb-2 text-sm font-medium text-card-foreground">简介</div>
               <textarea
-                className="min-h-28 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm leading-7 outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                className="min-h-28 w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm leading-7 text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
                 maxLength={280}
                 onChange={(event) => setBio(event.target.value)}
                 placeholder="例如：专注小红书、抖音内容策划与结构化生产。"
@@ -311,17 +311,15 @@ export function UserProfileModal({
 
         {activeTab === "sessions" ? (
           <div className="space-y-4">
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-2xl border border-border bg-surface-muted px-4 py-3">
               <div>
-                <div className="text-sm font-medium text-slate-800">
-                  活跃登录设备
-                </div>
-                <div className="mt-1 text-xs text-slate-500">
+                <div className="text-sm font-medium text-card-foreground">活跃登录设备</div>
+                <div className="mt-1 text-xs text-muted-foreground">
                   你可以查看当前在线设备，并手动下线非当前设备。
                 </div>
               </div>
               <button
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-2xl border border-border bg-card px-3 py-2 text-sm font-medium text-card-foreground transition hover:border-brand/40 hover:text-brand disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={isLoadingSessions}
                 onClick={() => void onRefreshSessions()}
                 type="button"
@@ -338,18 +336,18 @@ export function UserProfileModal({
                 {Array.from({ length: 3 }).map((_, index) => (
                   <div
                     key={`session-skeleton-${index}`}
-                    className="rounded-2xl border border-slate-200 p-4"
+                    className="rounded-2xl border border-border bg-card p-4"
                   >
-                    <div className="mb-3 h-4 w-1/2 animate-pulse rounded bg-slate-200" />
-                    <div className="mb-2 h-3 w-2/3 animate-pulse rounded bg-slate-200" />
-                    <div className="h-3 w-1/3 animate-pulse rounded bg-slate-200" />
+                    <div className="mb-3 h-4 w-1/2 animate-pulse rounded bg-surface-subtle" />
+                    <div className="mb-2 h-3 w-2/3 animate-pulse rounded bg-surface-subtle" />
+                    <div className="h-3 w-1/3 animate-pulse rounded bg-surface-subtle" />
                   </div>
                 ))}
               </div>
             ) : null}
 
             {!isLoadingSessions && sessions.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+              <div className="rounded-2xl border border-dashed border-border bg-surface-muted px-4 py-6 text-sm text-muted-foreground">
                 当前没有可展示的活跃设备记录。
               </div>
             ) : null}
@@ -359,25 +357,25 @@ export function UserProfileModal({
                 {sessions.map((session) => (
                   <div
                     key={session.id}
-                    className="rounded-2xl border border-slate-200 bg-white p-4"
+                    className="rounded-2xl border border-border bg-card p-4"
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <div className="inline-flex items-center gap-2 text-sm font-medium text-slate-800">
-                            <Monitor className="h-4 w-4 text-slate-500" />
+                          <div className="inline-flex items-center gap-2 text-sm font-medium text-card-foreground">
+                            <Monitor className="h-4 w-4 text-muted-foreground" />
                             <span className="truncate">
                               {session.device_info || "未知设备"}
                             </span>
                           </div>
                           {session.is_current ? (
-                            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                            <span className="rounded-full bg-success-surface px-2.5 py-1 text-xs font-medium text-success-foreground">
                               当前设备
                             </span>
                           ) : null}
                         </div>
 
-                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                           <span>IP：{session.ip_address || "未知"}</span>
                           <span>
                             最近活跃：
@@ -391,7 +389,7 @@ export function UserProfileModal({
                       </div>
 
                       <button
-                        className="rounded-2xl border border-rose-200 px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="rounded-2xl border border-danger-foreground/20 px-3 py-2 text-sm font-medium text-danger-foreground transition hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-50"
                         disabled={session.is_current || revokingSessionId === session.id}
                         onClick={() => void onRevokeSession(session.id)}
                         type="button"
@@ -408,16 +406,14 @@ export function UserProfileModal({
 
         {activeTab === "security" ? (
           <div className="space-y-5">
-            <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-4">
+            <div className="rounded-[24px] border border-border bg-surface-muted p-4">
               <div className="flex items-start gap-3">
-                <div className="rounded-2xl bg-slate-900 p-2 text-white">
+                <div className="rounded-2xl bg-foreground p-2 text-background">
                   <LockKeyhole className="h-4 w-4" />
                 </div>
                 <div>
-                  <div className="text-sm font-medium text-slate-800">
-                    修改密码
-                  </div>
-                  <div className="mt-1 text-xs leading-5 text-slate-500">
+                  <div className="text-sm font-medium text-card-foreground">修改密码</div>
+                  <div className="mt-1 text-xs leading-5 text-muted-foreground">
                     修改成功后，系统会自动吊销其他设备的登录会话，降低账号被盗用的风险。
                   </div>
                 </div>
@@ -425,12 +421,10 @@ export function UserProfileModal({
             </div>
 
             <label className="block">
-              <div className="mb-2 text-sm font-medium text-slate-700">
-                当前密码
-              </div>
+              <div className="mb-2 text-sm font-medium text-card-foreground">当前密码</div>
               <input
                 autoComplete="current-password"
-                className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
                 onChange={(event) => setOldPassword(event.target.value)}
                 placeholder="请输入当前密码"
                 type="password"
@@ -439,12 +433,10 @@ export function UserProfileModal({
             </label>
 
             <label className="block">
-              <div className="mb-2 text-sm font-medium text-slate-700">
-                新密码
-              </div>
+              <div className="mb-2 text-sm font-medium text-card-foreground">新密码</div>
               <input
                 autoComplete="new-password"
-                className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
                 onChange={(event) => setNewPassword(event.target.value)}
                 placeholder="至少 8 位"
                 type="password"
@@ -453,12 +445,12 @@ export function UserProfileModal({
             </label>
 
             <label className="block">
-              <div className="mb-2 text-sm font-medium text-slate-700">
+              <div className="mb-2 text-sm font-medium text-card-foreground">
                 确认新密码
               </div>
               <input
                 autoComplete="new-password"
-                className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
                 onChange={(event) => setConfirmPassword(event.target.value)}
                 placeholder="请再次输入新密码"
                 type="password"
@@ -467,13 +459,13 @@ export function UserProfileModal({
             </label>
 
             {passwordError ? (
-              <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
+              <div className="rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
                 {passwordError}
               </div>
             ) : null}
 
             {passwordSuccess ? (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+              <div className="rounded-2xl border border-success-foreground/20 bg-success-surface px-4 py-3 text-sm text-success-foreground">
                 {passwordSuccess}
               </div>
             ) : null}
@@ -482,7 +474,7 @@ export function UserProfileModal({
 
         <div className="mt-6 flex justify-end gap-3">
           <button
-            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+            className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-medium text-card-foreground transition hover:bg-muted"
             disabled={disableProfileActions || disableSecurityAction}
             onClick={onClose}
             type="button"
@@ -492,7 +484,7 @@ export function UserProfileModal({
 
           {activeTab === "profile" ? (
             <button
-              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-rose-500 to-orange-500 px-4 py-3 text-sm font-medium text-white transition hover:from-rose-600 hover:to-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
               disabled={disableProfileActions}
               onClick={() => void handleSave()}
               type="button"
@@ -504,7 +496,7 @@ export function UserProfileModal({
 
           {activeTab === "security" ? (
             <button
-              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-slate-900 to-slate-700 px-4 py-3 text-sm font-medium text-white transition hover:from-slate-800 hover:to-slate-600 disabled:cursor-not-allowed disabled:opacity-70"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-foreground px-4 py-3 text-sm font-medium text-background transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
               disabled={disableSecurityAction}
               onClick={() => void handlePasswordReset()}
               type="button"

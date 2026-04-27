@@ -1,5 +1,14 @@
-import { Download, Menu, Search, User, Zap } from "lucide-react";
+import {
+  Download,
+  Menu,
+  Moon,
+  Search,
+  Sun,
+  User,
+  Zap,
+} from "lucide-react";
 
+import { useTheme } from "../ThemeContext";
 import { taskOptions } from "../data";
 import type { UiPlatform, UiTaskType } from "../types";
 
@@ -13,6 +22,28 @@ type AppHeaderProps = {
   onOpenRightPanel: () => void;
 };
 
+const platformOptions: Array<{ id: UiPlatform; label: string }> = [
+  { id: "xiaohongshu", label: "小红书" },
+  { id: "douyin", label: "抖音" },
+  { id: "both", label: "双平台" },
+];
+
+function getPlatformButtonClass(id: UiPlatform, activePlatform: UiPlatform) {
+  if (activePlatform !== id) {
+    return "bg-secondary text-secondary-foreground hover:bg-muted";
+  }
+
+  if (id === "douyin") {
+    return "bg-foreground text-background shadow-sm";
+  }
+
+  if (id === "both") {
+    return "bg-brand-soft text-brand shadow-sm";
+  }
+
+  return "bg-brand text-brand-foreground shadow-sm";
+}
+
 export function AppHeader({
   platform,
   taskType,
@@ -22,10 +53,17 @@ export function AppHeader({
   onOpenLeftSidebar,
   onOpenRightPanel,
 }: AppHeaderProps) {
+  const { theme, toggleTheme } = useTheme();
+  const isLightTheme = theme === "light";
+  const ThemeIcon = isLightTheme ? Moon : Sun;
+  const themeButtonLabel = isLightTheme ? "夜间" : "日间";
+  const themeButtonAriaLabel = isLightTheme ? "切换到夜间模式" : "切换到日间模式";
+
   return (
-    <header className="flex h-16 items-center border-b border-slate-200 bg-white/85 px-4 backdrop-blur-md lg:px-6">
+    <header className="flex h-16 items-center border-b border-border bg-surface-elevated px-4 backdrop-blur-md lg:px-6">
       <button
-        className="mr-3 rounded-lg p-2 text-slate-600 hover:bg-slate-100 lg:hidden"
+        aria-label="打开左侧边栏"
+        className="mr-3 rounded-lg p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground lg:hidden"
         onClick={onOpenLeftSidebar}
         type="button"
       >
@@ -33,44 +71,40 @@ export function AppHeader({
       </button>
 
       <div className="mr-6 flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-rose-500 to-orange-500 shadow-sm">
-          <Zap className="h-5 w-5 text-white" />
+        <div
+          className="flex h-10 w-10 items-center justify-center rounded-xl shadow-sm"
+          style={{ background: "var(--brand-gradient)" }}
+        >
+          <Zap className="h-5 w-5 text-brand-foreground" />
         </div>
         <div className="hidden sm:block">
-          <div className="text-2xl font-bold tracking-tight">MediaPilot</div>
+          <div className="text-2xl font-bold tracking-tight text-foreground">
+            MediaPilot
+          </div>
         </div>
       </div>
 
       <div className="hidden items-center gap-2 md:flex">
-        {[
-          ["xiaohongshu", "小红书"],
-          ["douyin", "抖音"],
-          ["both", "双平台"],
-        ].map(([id, label]) => (
+        {platformOptions.map((option) => (
           <button
-            key={id}
-            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-              platform === id
-                ? id === "douyin"
-                  ? "bg-slate-800 text-white shadow-sm"
-                  : id === "both"
-                    ? "bg-gradient-to-r from-rose-500 to-slate-800 text-white shadow-sm"
-                    : "bg-rose-500 text-white shadow-sm"
-                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-            }`}
-            onClick={() => onPlatformChange(id as UiPlatform)}
+            key={option.id}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${getPlatformButtonClass(
+              option.id,
+              platform,
+            )}`}
+            onClick={() => onPlatformChange(option.id)}
             type="button"
           >
-            {label}
+            {option.label}
           </button>
         ))}
       </div>
 
       <div className="hidden px-4 md:block">
         <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <select
-            className="rounded-xl border border-slate-200 bg-white py-2 pl-10 pr-4 text-sm font-medium text-slate-700 outline-none transition hover:bg-slate-50"
+            className="rounded-xl border border-border bg-card py-2 pl-10 pr-4 text-sm font-medium text-foreground outline-none transition hover:bg-muted focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
             onChange={(event) => onTaskTypeChange(event.target.value as UiTaskType)}
             value={taskType}
           >
@@ -85,20 +119,30 @@ export function AppHeader({
 
       <div className="ml-auto flex items-center gap-3">
         <button
-          className="hidden items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 sm:flex"
+          className="hidden items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition hover:bg-muted sm:flex"
           type="button"
         >
           <Download className="h-4 w-4" />
           导出
         </button>
         <button
-          className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 xl:hidden"
+          aria-label={themeButtonAriaLabel}
+          className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground"
+          onClick={toggleTheme}
+          type="button"
+        >
+          <ThemeIcon className="h-4 w-4" />
+          <span className="hidden sm:inline">{themeButtonLabel}</span>
+        </button>
+        <button
+          aria-label="打开结果面板"
+          className="rounded-xl border border-border bg-card px-3 py-2 text-sm font-medium text-foreground transition hover:bg-muted xl:hidden"
           onClick={onOpenRightPanel}
           type="button"
         >
           结果
         </button>
-        <div className="flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-600">
+        <div className="flex items-center gap-2 rounded-xl bg-secondary px-3 py-2 text-sm text-secondary-foreground">
           <User className="h-4 w-4" />
           <span className="hidden max-w-32 truncate sm:inline">{currentDisplayName}</span>
         </div>

@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.12.3`
+- Current version: `v1.13.1`
 - Updated on: `2026-04-27`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, tenant isolation, tracked user-scoped uploads, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration, UTC timestamp normalization, user profile management, session visibility, frontend workspace, documentation baseline, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, tenant isolation, tracked user-scoped uploads, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, documentation baseline, and verification baseline
 
 Document set:
 
@@ -68,6 +68,7 @@ The current baseline includes:
 26. Frontend chat bubbles can now sync the authenticated user's avatar state and render user-facing avatars in a circular presentation with safe fallback behavior.
 27. FastAPI now supports environment-variable-driven CORS origin configuration for local frontend-backend integration.
 28. Vite development server now binds to `0.0.0.0` so devices on the same LAN can access the frontend workspace directly.
+29. Frontend workspace now supports persisted Light / Dark themes through CSS variables, semantic chat-bubble tokens, and root HTML theme classes.
 
 ### 3.2 Out of Scope
 
@@ -168,8 +169,11 @@ omnimedia-agent/
 |  |- vite.config.ts
 |  '- src/
 |     |- main.tsx
+|     |- styles/
+|     |  '- theme.css
 |     '- app/
 |        |- App.tsx
+|        |- ThemeContext.tsx
 |        |- api.ts
 |        |- data.ts
 |        |- types.ts
@@ -182,6 +186,7 @@ omnimedia-agent/
 |           |- CopyButton.tsx
 |           |- LeftSidebar.tsx
 |           |- RightPanel.tsx
+|           |- ThreadSettingsModal.tsx
 |           |- UserProfileModal.tsx
 |           '- artifacts/
 |              |- CommentReplyArtifact.tsx
@@ -722,6 +727,12 @@ Superseding note for `v1.12.3`:
 2. when `CORS_ALLOWED_ORIGINS` is unset, backend CORS falls back to localhost development defaults.
 3. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the environment-variable-based LAN access setup.
 
+Superseding note for `v1.13.1`:
+
+1. `frontend/src/styles/theme.css` now defines semantic CSS-variable tokens for Light and Dark workspace themes through `:root` and `.dark`, including dedicated user-bubble and AI-bubble color tokens.
+2. `frontend/src/app/ThemeContext.tsx` now persists `mediapilot-theme`, falls back to `prefers-color-scheme`, and applies the active Light or Dark theme class to the root `html` element.
+3. the workspace shell, header, sidebars, chat surfaces, artifact panel, thread settings modal, and profile modal now consume semantic theme tokens instead of relying on hardcoded grayscale utility classes.
+
 ### 11.4 Dynamic Persona Rule
 
 The current provider baseline MUST follow these rules:
@@ -791,6 +802,9 @@ Current enforced boundaries:
 16. optimistic user messages that preserve submitted material attachments for immediate preview
 17. `/chat/stream` payload assembly that maps ready uploads into backend `materials`
 18. chat-bubble user avatar sync from the persisted authenticated user profile with immediate React state refresh after profile updates
+19. global theme state persistence for `light` and `dark`
+20. root-level HTML class switching that keeps Tailwind semantic color tokens in sync with the active theme
+21. themed workspace surfaces across the header, sidebars, feed, composer, right panel, and modal overlays
 
 ### 13.2 Composer and Chat Material Flow
 
@@ -847,6 +861,15 @@ The current frontend material flow is:
 7. profile updates MUST refresh both React state and `localStorage` immediately
 8. opening the profile modal SHOULD fetch active sessions so the device list stays fresh
 9. non-current devices MAY be revoked directly from the profile modal
+
+### 13.6 Frontend Theme System
+
+1. `ThemeProvider` MUST persist the active workspace theme under the `mediapilot-theme` localStorage key.
+2. when no saved theme exists, the frontend SHOULD fall back to `prefers-color-scheme` and default to Light when the system preference is not dark.
+3. only one root theme class MAY be active at a time: `dark` or neither for the Light baseline.
+4. semantic color tokens in `frontend/src/styles/theme.css` SHOULD be the default source of truth for workspace backgrounds, text, borders, overlays, and status surfaces.
+5. new workspace UI SHOULD prefer semantic theme utilities such as `bg-card`, `bg-muted`, `text-foreground`, and `border-border` instead of hardcoded grayscale palettes.
+6. theme transitions SHOULD remain smooth, but the implementation MUST continue to respect reduced-motion user preferences.
 
 ## 14. Database Baseline
 
@@ -994,23 +1017,16 @@ Covered cases:
 
 ### 15.2 Latest Verification Result
 
-The following checks were executed on `2026-04-27` and passed:
+The following check was executed for the current `v1.13.1` theme-system change set on `2026-04-27` and passed:
 
 ```bash
 cd frontend && npm run build
-python -m pytest tests/test_graph_vision.py -q
-python -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('verify'))"
-python -c "from app.main import app; print([middleware.cls.__name__ for middleware in app.user_middleware])"
-python -c "from app.main import load_cors_allowed_origins; print(load_cors_allowed_origins())"
 ```
 
 Observed result baseline:
 
-- `tests/test_graph_vision.py`: `9 passed`
-- `passlib + bcrypt` smoke check: success
-- application middleware smoke check: `CORSMiddleware` present
-- CORS env loader smoke check: defaults resolve successfully
 - frontend production build: success
+- the Light / Dark dual-theme system compiles successfully with `ThemeProvider`, root HTML class switching, and CSS-variable-backed semantic Tailwind tokens
 
 ### 15.3 Current Warning
 
@@ -1018,29 +1034,17 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.12.3
+### 16.1 Completed in v1.13.1
 
 This version adds or solidifies:
 
-1. `RefreshSession` now records `device_info`, `ip_address`, and `last_seen_at`
-2. access tokens are now bound to the active refresh-session chain and protected routes reject revoked session chains
-3. `GET /api/v1/auth/sessions` and `DELETE /api/v1/auth/sessions/{session_id}` now provide device visibility and targeted revocation
-4. the frontend profile modal now includes a device-management tab with refresh and revoke actions
-5. APScheduler now runs hourly abandoned-material cleanup in the FastAPI lifespan
-6. `LangGraphProvider` now supports real multimodal vision analysis for image materials with safe degradation when credentials or requests fail
-7. the frontend workspace header can be collapsed to preserve chat viewport height
-8. uploaded image attachments now remain attached to optimistic user messages and `/chat/stream` request payloads
-9. `ChatFeed` now renders submitted image materials as clickable thumbnails inside user bubbles
-10. backend history replay now returns message-level materials so refreshed chat bubbles keep their images
-11. backend coverage now validates device-session management, scheduler job setup, OSS credential routing, vision payload construction, and message-level material replay
-12. refreshed development documentation
-13. frontend user chat bubbles now sync the authenticated user's persisted avatar state
-14. user and assistant chat avatars now render with circular styling
-15. a root-level Chinese `README.md` now provides project onboarding and startup guidance
-16. documentation maintenance expectations are now explicitly recorded for future change sets
-17. FastAPI local-development CORS handling now explicitly whitelists the Vite frontend origins used during local联调
-18. Vite frontend now listens on `0.0.0.0` to support same-LAN device access during local development
-19. backend CORS LAN access is now driven by the environment variable `CORS_ALLOWED_ORIGINS` instead of a hardcoded machine-specific IP
+1. the frontend workspace now supports two global visual modes: `light` and `dark`
+2. `frontend/src/styles/theme.css` now exposes semantic CSS-variable tokens for shell backgrounds, cards, muted surfaces, overlays, status colors, and dedicated user/AI chat bubbles across both themes
+3. `frontend/src/app/ThemeContext.tsx` now manages theme initialization, persistence, root HTML class updates, and one-click Light / Dark toggling
+4. `frontend/src/main.tsx` now wraps the application in `ThemeProvider`
+5. the workspace header now includes a theme switcher that toggles between Light and Dark modes with `lucide-react` sun/moon icons
+6. the app shell, chat feed, composer, sidebars, right panel, artifact renderers, thread settings modal, and profile modal now consume semantic theme tokens for cross-theme consistency
+7. `README.md` and `DEVELOPMENT.md` now document the dual-theme UX baseline and the latest frontend verification result
 
 ### 16.2 Current Non-Blocking Gaps
 

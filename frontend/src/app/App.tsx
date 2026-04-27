@@ -195,10 +195,13 @@ function AuthCard(props: {
   } = props;
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_rgba(251,113,133,0.18),_transparent_35%),linear-gradient(135deg,_rgba(255,247,237,1),_rgba(255,255,255,1),_rgba(255,241,242,0.72))] p-4">
-      <div className="w-full max-w-md rounded-[28px] border border-white/70 bg-white/90 p-8 shadow-[0_24px_80px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+    <div className="flex min-h-screen items-center justify-center bg-background p-4 [background-image:var(--shell-background)]">
+      <div className="w-full max-w-md rounded-[28px] border border-border bg-surface-elevated p-8 shadow-[0_24px_80px_rgba(15,23,42,0.12)] backdrop-blur-xl">
         <div className="mb-6 flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-rose-500 to-orange-500 text-white shadow-sm">
+          <div
+            className="flex h-12 w-12 items-center justify-center rounded-2xl text-brand-foreground shadow-sm"
+            style={{ background: "var(--brand-gradient)" }}
+          >
             {mode === "login" ? (
               <LockKeyhole className="h-6 w-6" />
             ) : (
@@ -206,8 +209,8 @@ function AuthCard(props: {
             )}
           </div>
           <div>
-            <div className="text-2xl font-semibold text-slate-900">MediaPilot</div>
-            <div className="text-sm text-slate-500">
+            <div className="text-2xl font-semibold text-foreground">MediaPilot</div>
+            <div className="text-sm text-muted-foreground">
               {mode === "login"
                 ? "登录你的内容工作台"
                 : "创建一个新的工作台账号"}
@@ -215,13 +218,13 @@ function AuthCard(props: {
           </div>
         </div>
 
-        <div className="mb-5 flex rounded-2xl bg-slate-100 p-1">
+        <div className="mb-5 flex rounded-2xl bg-secondary p-1">
           {(["login", "register"] as const).map((item) => (
             <button
               key={item}
               className={`flex-1 rounded-xl px-4 py-2 text-sm font-medium transition ${mode === item
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
                 }`}
               onClick={() => onModeChange(item)}
               type="button"
@@ -233,9 +236,9 @@ function AuthCard(props: {
 
         <form className="space-y-4" onSubmit={onSubmit}>
           <label className="block">
-            <div className="mb-2 text-sm font-medium text-slate-700">用户名</div>
+            <div className="mb-2 text-sm font-medium text-card-foreground">用户名</div>
             <input
-              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+              className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
               autoComplete="username"
               onChange={(event) => onUsernameChange(event.target.value)}
               placeholder="请输入用户名"
@@ -244,9 +247,9 @@ function AuthCard(props: {
           </label>
 
           <label className="block">
-            <div className="mb-2 text-sm font-medium text-slate-700">密码</div>
+            <div className="mb-2 text-sm font-medium text-card-foreground">密码</div>
             <input
-              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+              className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
               autoComplete={mode === "login" ? "current-password" : "new-password"}
               onChange={(event) => onPasswordChange(event.target.value)}
               placeholder="请输入密码"
@@ -256,13 +259,13 @@ function AuthCard(props: {
           </label>
 
           {errorText ? (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
+            <div className="rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
               {errorText}
             </div>
           ) : null}
 
           <button
-            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-rose-500 to-orange-500 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:from-rose-600 hover:to-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
+            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
             disabled={isSubmitting}
             type="submit"
           >
@@ -299,17 +302,17 @@ function NewThreadModal(props: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 p-4">
-      <div className="w-full max-w-xl rounded-[28px] border border-white/70 bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4">
+      <div className="w-full max-w-xl rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
         <div className="mb-5 flex items-start justify-between gap-4">
           <div>
-            <div className="text-xl font-semibold text-slate-900">新建会话</div>
-            <div className="mt-1 text-sm text-slate-500">
+            <div className="text-xl font-semibold text-foreground">新建会话</div>
+            <div className="mt-1 text-sm text-muted-foreground">
               为这次会话设置标题和机器人人设。留空时将使用默认助手。
             </div>
           </div>
           <button
-            className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            className="rounded-xl p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground"
             onClick={onClose}
             type="button"
           >
@@ -319,9 +322,9 @@ function NewThreadModal(props: {
 
         <div className="space-y-4">
           <label className="block">
-            <div className="mb-2 text-sm font-medium text-slate-700">会话标题</div>
+            <div className="mb-2 text-sm font-medium text-card-foreground">会话标题</div>
             <input
-              className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+              className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
               onChange={(event) => onTitleChange(event.target.value)}
               placeholder="For example: Annual portfolio review ideas"
               value={title}
@@ -329,11 +332,11 @@ function NewThreadModal(props: {
           </label>
 
           <label className="block">
-            <div className="mb-2 text-sm font-medium text-slate-700">
+            <div className="mb-2 text-sm font-medium text-card-foreground">
               机器人人设 / 品牌定位
             </div>
             <textarea
-              className="min-h-36 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm leading-7 outline-none transition focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+              className="min-h-36 w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm leading-7 text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
               onChange={(event) => onSystemPromptChange(event.target.value)}
               placeholder="请输入你希望我扮演的角色，留空则使用通用助手。"
               value={systemPrompt}
@@ -343,14 +346,14 @@ function NewThreadModal(props: {
 
         <div className="mt-6 flex justify-end gap-3">
           <button
-            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+            className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-medium text-card-foreground transition hover:bg-muted"
             onClick={onClose}
             type="button"
           >
             取消
           </button>
           <button
-            className="rounded-2xl bg-gradient-to-r from-rose-500 to-orange-500 px-4 py-3 text-sm font-medium text-white transition hover:from-rose-600 hover:to-orange-600"
+            className="rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90"
             onClick={onConfirm}
             type="button"
           >
@@ -1401,7 +1404,7 @@ function App() {
 
   return (
     <>
-      <div className="flex h-screen flex-col bg-gradient-to-br from-orange-50/40 via-white to-rose-50/30 text-slate-900">
+      <div className="flex h-screen flex-col bg-background text-foreground [background-image:var(--shell-background)]">
         <AppHeader
           currentDisplayName={currentDisplayName}
           onOpenLeftSidebar={() => {
@@ -1441,20 +1444,20 @@ function App() {
 
           {leftSidebarOpen ? (
             <button
-              className="fixed inset-0 top-16 z-30 bg-slate-950/20 lg:hidden"
+              className="fixed inset-0 top-16 z-30 bg-overlay lg:hidden"
               onClick={() => setLeftSidebarOpen(false)}
               type="button"
             />
           ) : null}
 
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-            <div className="border-b border-slate-200 bg-white/60 px-4 py-4 backdrop-blur-sm lg:px-6">
+            <div className="border-b border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex min-w-0 items-center gap-3">
                   {isLeftSidebarCollapsed ? (
                     <button
                       aria-label="展开左侧边栏"
-                      className="hidden h-12 w-12 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-slate-600 transition hover:border-rose-300 hover:text-rose-600 lg:inline-flex"
+                      className="hidden h-12 w-12 items-center justify-center rounded-2xl border border-border bg-muted text-muted-foreground transition hover:border-brand/40 hover:text-foreground lg:inline-flex"
                       onClick={() => setIsLeftSidebarCollapsed(false)}
                       type="button"
                     >
@@ -1463,7 +1466,7 @@ function App() {
                   ) : null}
 
                   <div className="min-w-0">
-                    <h2 className="text-2xl font-bold tracking-tight text-slate-800">
+                    <h2 className="text-2xl font-bold tracking-tight text-foreground">
                       {workspaceTitle}
                     </h2>
                   </div>
@@ -1471,7 +1474,7 @@ function App() {
 
                 <div className="ml-auto flex items-center gap-3">
                   <div
-                    className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${isStreaming ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"
+                    className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${isStreaming ? "bg-warning-surface text-warning-foreground" : "bg-success-surface text-success-foreground"
                       }`}
                   >
                     {isStreaming ? (
@@ -1485,7 +1488,7 @@ function App() {
                   <button
                     aria-expanded={isWorkspaceHeaderExpanded}
                     aria-label={isWorkspaceHeaderExpanded ? "收起快捷操作区" : "展开快捷操作区"}
-                    className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:text-rose-600"
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground transition hover:border-brand/40 hover:text-foreground"
                     onClick={() => setIsWorkspaceHeaderExpanded((expanded) => !expanded)}
                     type="button"
                   >
@@ -1503,20 +1506,20 @@ function App() {
                   }`}
               >
                 <div className="min-h-0">
-                  <div className="mb-4 text-sm text-slate-500">
+                  <div className="mb-4 text-sm text-muted-foreground">
                     当前任务：{activeTaskLabel} · 线程：{activeThreadTitle} · ID：
                     {activeThreadId}
                   </div>
 
                   <div className="mb-4 flex flex-wrap items-center gap-2">
-                    <div className="inline-flex max-w-3xl items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
+                    <div className="inline-flex max-w-3xl items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
                       <Sparkles className="h-3.5 w-3.5" />
                       <span className="truncate">
                         当前人设：{activeSystemPrompt || "通用助手"}
                       </span>
                     </div>
                     <button
-                      className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700 transition hover:border-rose-300 hover:text-rose-600"
+                      className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-card-foreground transition hover:border-brand/40 hover:text-brand"
                       onClick={() => setIsThreadSettingsOpen(true)}
                       type="button"
                     >
@@ -1529,7 +1532,7 @@ function App() {
                     {quickActions.map((action) => (
                       <button
                         key={action}
-                        className="rounded-2xl border border-slate-200 bg-white p-4 text-left text-sm font-medium text-slate-700 transition hover:border-rose-300 hover:shadow-sm"
+                        className="rounded-2xl border border-border bg-card p-4 text-left text-sm font-medium text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft hover:shadow-sm"
                         onClick={() => setMessage(action)}
                         type="button"
                       >
@@ -1552,7 +1555,7 @@ function App() {
                 />
               </div>
 
-              <div className="border-t border-slate-200 bg-white/85 px-4 py-4 backdrop-blur-sm lg:px-6">
+              <div className="border-t border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
                 <Composer
                   imageInputRef={imageInputRef}
                   isStreaming={isStreaming}

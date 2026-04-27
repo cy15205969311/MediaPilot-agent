@@ -63,7 +63,7 @@ export function LeftSidebar({
 
   return (
     <aside
-      className={`fixed inset-y-16 left-0 z-40 w-80 border-r border-slate-200 bg-white transition-transform duration-300 lg:static lg:shrink-0 lg:translate-x-0 lg:transition-[width,border-color] lg:duration-300 ${
+      className={`fixed inset-y-16 left-0 z-40 w-80 border-r border-border bg-card shadow-sm transition-transform duration-300 lg:static lg:shrink-0 lg:translate-x-0 lg:transition-[width,border-color] lg:duration-300 ${
         open ? "translate-x-0" : "-translate-x-full"
       } ${isDesktopCollapsed ? "lg:w-0 lg:border-r-transparent" : "lg:w-80"}`}
     >
@@ -72,13 +72,13 @@ export function LeftSidebar({
           isDesktopCollapsed ? "lg:pointer-events-none lg:opacity-0" : "opacity-100"
         }`}
       >
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-5">
-          <div className="text-2xl font-bold tracking-tight text-slate-900">工作区</div>
+        <div className="flex items-center justify-between border-b border-border px-5 py-5">
+          <div className="text-2xl font-bold tracking-tight text-foreground">工作区</div>
           <div className="flex items-center gap-2">
             <button
               aria-expanded={!isDesktopCollapsed}
               aria-label="折叠左侧边栏"
-              className="hidden h-10 w-10 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:text-rose-600 lg:inline-flex"
+              className="hidden h-10 w-10 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground transition hover:border-brand/40 hover:text-foreground lg:inline-flex"
               onClick={onToggleDesktopCollapse}
               type="button"
             >
@@ -86,7 +86,7 @@ export function LeftSidebar({
             </button>
             <button
               aria-label="关闭左侧边栏"
-              className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50 lg:hidden"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground transition hover:bg-muted lg:hidden"
               onClick={onClose}
               type="button"
             >
@@ -95,14 +95,17 @@ export function LeftSidebar({
           </div>
         </div>
 
-        <div className="border-b border-slate-200 p-4">
+        <div className="border-b border-border p-4">
           <button
-            className="w-full rounded-[24px] bg-gradient-to-br from-rose-50 via-white to-orange-50 p-4 text-left transition hover:shadow-sm"
+            className="w-full rounded-[24px] bg-surface-tint p-4 text-left transition hover:shadow-sm"
             onClick={onOpenProfile}
             type="button"
           >
             <div className="mb-3 flex items-center gap-3">
-              <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-rose-400 to-orange-400 text-white shadow-sm">
+              <div
+                className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-full text-brand-foreground shadow-sm"
+                style={{ background: "var(--brand-gradient)" }}
+              >
                 {avatarUrl ? (
                   <img
                     alt={`${displayName} avatar`}
@@ -115,16 +118,20 @@ export function LeftSidebar({
               </div>
 
               <div className="min-w-0 flex-1">
-                <div className="truncate text-xl font-semibold text-slate-900">{displayName}</div>
-                <div className="truncate text-sm text-slate-500">@{currentUser.username}</div>
+                <div className="truncate text-xl font-semibold text-foreground">
+                  {displayName}
+                </div>
+                <div className="truncate text-sm text-muted-foreground">
+                  @{currentUser.username}
+                </div>
               </div>
 
-              <div className="rounded-2xl bg-white/80 p-2.5 text-slate-500">
+              <div className="rounded-2xl bg-card p-2.5 text-muted-foreground">
                 <Settings className="h-4 w-4" />
               </div>
             </div>
 
-            <div className="text-sm leading-6 text-slate-500">
+            <div className="text-sm leading-6 text-muted-foreground">
               {currentUser.bio?.trim()
                 ? currentUser.bio
                 : "点击这里补充昵称、头像与简介，让工作台更贴近你的品牌身份。"}
@@ -134,9 +141,9 @@ export function LeftSidebar({
 
         <div className="flex-1 overflow-y-auto p-4">
           <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-800">最近会话</h3>
+            <h3 className="text-sm font-semibold text-foreground">最近会话</h3>
             <button
-              className="flex h-11 w-11 items-center justify-center rounded-2xl bg-rose-500 text-white transition hover:bg-rose-600"
+              className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
               onClick={onCreateThread}
               type="button"
             >
@@ -150,17 +157,17 @@ export function LeftSidebar({
                 {Array.from({ length: 3 }).map((_, index) => (
                   <div
                     key={`thread-skeleton-${index}`}
-                    className="rounded-2xl border border-slate-200 bg-slate-50 p-3"
+                    className="rounded-2xl border border-border bg-muted p-3"
                   >
-                    <div className="mb-2 h-4 w-3/4 animate-pulse rounded bg-slate-200" />
-                    <div className="h-3 w-1/3 animate-pulse rounded bg-slate-200" />
+                    <div className="mb-2 h-4 w-3/4 animate-pulse rounded bg-surface-subtle" />
+                    <div className="h-3 w-1/3 animate-pulse rounded bg-surface-subtle" />
                   </div>
                 ))}
               </div>
             ) : null}
 
             {!isLoading && threads.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-500">
+              <div className="rounded-2xl border border-dashed border-border bg-muted p-4 text-sm leading-6 text-muted-foreground">
                 暂无历史会话。点击右上角的加号，创建一个带标题和人设配置的新会话。
               </div>
             ) : null}
@@ -173,7 +180,7 @@ export function LeftSidebar({
                 <div
                   key={thread.id}
                   className={`group rounded-2xl p-1 transition ${
-                    isActive ? "bg-slate-100" : "hover:bg-slate-50"
+                    isActive ? "bg-secondary" : "hover:bg-muted"
                   }`}
                 >
                   <button
@@ -183,23 +190,25 @@ export function LeftSidebar({
                     type="button"
                   >
                     <div className="mb-1 flex items-start justify-between gap-3">
-                      <div className="truncate text-sm font-medium text-slate-800">
+                      <div className="truncate text-sm font-medium text-foreground">
                         {thread.title}
                       </div>
                       {thread.platform ? (
                         <span
                           className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
-                            thread.platform === "xiaohongshu" ? "bg-rose-400" : "bg-slate-700"
+                            thread.platform === "xiaohongshu"
+                              ? "bg-brand"
+                              : "bg-secondary-foreground"
                           }`}
                         />
                       ) : null}
                     </div>
-                    <div className="text-xs text-slate-500">{thread.time}</div>
+                    <div className="text-xs text-muted-foreground">{thread.time}</div>
                   </button>
 
                   <div className="flex items-center gap-1 px-2 pb-2 opacity-0 transition group-hover:opacity-100">
                     <button
-                      className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2 text-xs text-slate-600 transition hover:border-slate-300 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2 text-xs text-muted-foreground transition hover:bg-card hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={isMutating}
                       onClick={() => onRenameThread(thread)}
                       type="button"
@@ -208,7 +217,7 @@ export function LeftSidebar({
                       重命名
                     </button>
                     <button
-                      className="inline-flex h-8 items-center gap-1 rounded-lg border border-rose-200 px-2 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-8 items-center gap-1 rounded-lg border border-danger-foreground/20 px-2 text-xs text-danger-foreground transition hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={isMutating}
                       onClick={() => onDeleteThread(thread)}
                       type="button"
@@ -222,19 +231,19 @@ export function LeftSidebar({
             })}
           </div>
 
-          <div className="mt-8 border-t border-slate-200 pt-6">
-            <h3 className="mb-3 text-sm font-semibold text-slate-800">快捷入口</h3>
+          <div className="mt-8 border-t border-border pt-6">
+            <h3 className="mb-3 text-sm font-semibold text-foreground">快捷入口</h3>
             <div className="space-y-2">
               {shortcuts.map((item) => (
                 <button
                   key={item.label}
-                  className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-sm text-slate-700 transition hover:bg-slate-50"
+                  className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-sm text-card-foreground transition hover:bg-muted"
                   type="button"
                 >
                   <item.icon className="h-4 w-4" />
                   <span className="flex-1 text-left">{item.label}</span>
                   {item.count ? (
-                    <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-600">
+                    <span className="rounded-full bg-secondary px-2.5 py-0.5 text-xs text-secondary-foreground">
                       {item.count}
                     </span>
                   ) : null}
@@ -244,9 +253,9 @@ export function LeftSidebar({
           </div>
         </div>
 
-        <div className="border-t border-slate-200 p-4">
+        <div className="border-t border-border p-4">
           <button
-            className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+            className="flex w-full items-center justify-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm font-medium text-card-foreground transition hover:bg-muted"
             onClick={onLogout}
             type="button"
           >

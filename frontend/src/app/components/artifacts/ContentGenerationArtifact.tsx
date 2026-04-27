@@ -26,8 +26,8 @@ export function ContentGenerationArtifact({
   if (!artifact) {
     return (
       <ArtifactSection title="内容生成结果">
-        <div className="rounded-2xl bg-slate-50 p-4 text-sm leading-6 text-slate-600">
-          流式生成完成后，这里会根据后端返回的 `content_draft` Artifact 自动展示标题候选、正文草稿和平台引导语。
+        <div className="rounded-2xl bg-muted p-4 text-sm leading-6 text-muted-foreground">
+          流式生成完成后，这里会根据后端返回的 `content_draft` artifact 自动展示标题候选、正文草稿和平台引导语。
         </div>
       </ArtifactSection>
     );
@@ -36,14 +36,14 @@ export function ContentGenerationArtifact({
   return (
     <div className="space-y-4">
       <ArtifactSection
-        action={<WandSparkles className="h-4 w-4 text-rose-400" />}
+        action={<WandSparkles className="h-4 w-4 text-brand" />}
         title={artifact.title}
       >
         <div className="space-y-3">
           {artifact.title_candidates.map((title) => (
-            <div key={title} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div key={title} className="rounded-2xl border border-border bg-muted p-4">
               <div className="flex items-start justify-between gap-3">
-                <div className="text-sm font-medium leading-6 text-slate-800">{title}</div>
+                <div className="text-sm font-medium leading-6 text-foreground">{title}</div>
                 <CopyButton text={title} />
               </div>
             </div>
@@ -52,19 +52,19 @@ export function ContentGenerationArtifact({
       </ArtifactSection>
 
       <ArtifactSection title="正文草稿">
-        <div className="whitespace-pre-wrap rounded-2xl bg-slate-50 p-4 text-sm leading-7 text-slate-700">
+        <div className="whitespace-pre-wrap rounded-2xl bg-muted p-4 text-sm leading-7 text-card-foreground">
           {artifact.body}
         </div>
       </ArtifactSection>
 
       <ArtifactSection title="平台引导语">
         <div className="space-y-3">
-          <div className="rounded-2xl bg-rose-50 p-4 text-sm leading-7 text-slate-800">
+          <div className="rounded-2xl bg-brand-soft p-4 text-sm leading-7 text-brand-soft-foreground">
             {artifact.platform_cta}
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-600">
-            <div className="mb-2 flex items-center gap-2 font-semibold text-slate-800">
-              <MessageSquareQuote className="h-4 w-4 text-slate-500" />
+          <div className="rounded-2xl border border-border bg-card p-4 text-sm leading-6 text-muted-foreground">
+            <div className="mb-2 flex items-center gap-2 font-semibold text-foreground">
+              <MessageSquareQuote className="h-4 w-4 text-muted-foreground" />
               当前平台提示
             </div>
             {getPlatformHint(platform)}

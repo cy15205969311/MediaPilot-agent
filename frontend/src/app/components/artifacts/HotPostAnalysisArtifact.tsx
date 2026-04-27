@@ -14,7 +14,7 @@ export function HotPostAnalysisArtifact({
   if (!artifact) {
     return (
       <ArtifactSection title="爆款分析结果">
-        <div className="rounded-2xl bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+        <div className="rounded-2xl bg-muted p-4 text-sm leading-6 text-muted-foreground">
           流式生成完成后，这里会展示后端返回的结构化拆解维度和可复用表达模板。
         </div>
       </ArtifactSection>
@@ -24,20 +24,20 @@ export function HotPostAnalysisArtifact({
   return (
     <div className="space-y-4">
       <ArtifactSection
-        action={<LineChart className="h-4 w-4 text-rose-400" />}
+        action={<LineChart className="h-4 w-4 text-brand" />}
         title={artifact.title}
       >
         <div className="space-y-3">
           {artifact.analysis_dimensions.map((item) => (
             <div
               key={item.dimension}
-              className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+              className="rounded-2xl border border-border bg-muted p-4"
             >
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-rose-500">
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand">
                 <BadgeAlert className="h-3.5 w-3.5" />
                 {item.dimension}
               </div>
-              <div className="text-sm leading-6 text-slate-700">{item.insight}</div>
+              <div className="text-sm leading-6 text-card-foreground">{item.insight}</div>
             </div>
           ))}
         </div>
@@ -48,10 +48,10 @@ export function HotPostAnalysisArtifact({
           {artifact.reusable_templates.map((template) => (
             <div
               key={template}
-              className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+              className="rounded-2xl border border-border bg-muted p-4"
             >
               <div className="flex items-start justify-between gap-3">
-                <div className="text-sm leading-6 text-slate-700">{template}</div>
+                <div className="text-sm leading-6 text-card-foreground">{template}</div>
                 <CopyButton text={template} />
               </div>
             </div>
