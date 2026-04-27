@@ -210,7 +210,7 @@ omnimedia-agent/
 - `langchain-core==1.3.1`
 - `PyJWT==2.10.1`
 - `passlib[bcrypt]==1.7.4`
-- `bcrypt==4.3.0`
+- `bcrypt==4.0.1`
 - `APScheduler==3.10.4`
 
 ### 6.2 Frontend
