@@ -3,11 +3,16 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.11.0`
+- Current version: `v1.12.3`
 - Updated on: `2026-04-27`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, tenant isolation, tracked user-scoped uploads, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration, UTC timestamp normalization, user profile management, session visibility, frontend workspace, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, tenant isolation, tracked user-scoped uploads, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration, UTC timestamp normalization, user profile management, session visibility, frontend workspace, documentation baseline, and verification baseline
 
-This document is the authoritative engineering baseline for the repository. Contract changes, route changes, persistence changes, and frontend/backend interface changes SHOULD be reflected here in the same change set.
+Document set:
+
+- `README.md`: Chinese project overview, quick start, and operational onboarding entrypoint
+- `DEVELOPMENT.md`: engineering baseline, contract source of truth, implementation status, and change-control rules
+
+This document is the authoritative engineering baseline for the repository. Contract changes, route changes, persistence changes, frontend/backend interface changes, and important UX interaction changes SHOULD be reflected here in the same change set.
 
 Terminology:
 
@@ -60,6 +65,9 @@ The current baseline includes:
 23. Hourly scheduled abandoned-material cleanup via APScheduler.
 24. Frontend material attachments are preserved from upload completion through optimistic chat bubbles and `/chat/stream` payloads.
 25. Automated backend tests for auth-protected SSE, history isolation, thread prompt updates, profile updates, avatar persistence, upload tracking, cleanup, upload retention, refresh rotation, logout revocation, session management, scheduler behavior, and LangGraph branching behavior.
+26. Frontend chat bubbles can now sync the authenticated user's avatar state and render user-facing avatars in a circular presentation with safe fallback behavior.
+27. FastAPI now supports environment-variable-driven CORS origin configuration for local frontend-backend integration.
+28. Vite development server now binds to `0.0.0.0` so devices on the same LAN can access the frontend workspace directly.
 
 ### 3.2 Out of Scope
 
@@ -154,7 +162,9 @@ omnimedia-agent/
 |     '- 20260425_06_refresh_session_metadata.py
 |- frontend/
 |  |- index.html
+|  |- package-lock.json
 |  |- package.json
+|  |- pnpm-lock.yaml
 |  |- vite.config.ts
 |  '- src/
 |     |- main.tsx
@@ -189,6 +199,7 @@ omnimedia-agent/
 |- omnimedia_agent.db
 |- alembic.ini
 |- requirements.txt
+'- README.md
 '- DEVELOPMENT.md
 ```
 
@@ -252,6 +263,7 @@ Current supported runtime variables:
 - `LLM_ARTIFACT_MODEL`
 - `LLM_VISION_MODEL`
 - `LLM_TIMEOUT_SECONDS`
+- `CORS_ALLOWED_ORIGINS`
 
 The committed `.env.example` now includes:
 
@@ -287,9 +299,17 @@ Run:
 uvicorn app.main:app --reload
 ```
 
+Local frontend-backend integration rule:
+
+- `app/main.py` MUST register `CORSMiddleware` immediately after `FastAPI(...)` initialization and before any router registration
+- local development origins default to `http://localhost:5173` and `http://127.0.0.1:5173`
+- `CORS_ALLOWED_ORIGINS` MAY override and extend local development origins through a comma-separated environment variable
+- `allow_credentials` remains enabled so authenticated frontend requests can carry tokens or cookies when needed
+
 ### 7.2 Frontend
 
 - Node.js `18+` recommended
+- Vite dev server currently binds to `0.0.0.0` for same-LAN access
 
 Install:
 
@@ -307,6 +327,7 @@ npm run dev
 ### 7.3 Access Points
 
 - Frontend workspace: `http://127.0.0.1:5173`
+- Frontend workspace on LAN host: `http://<your-lan-ip>:5173`
 - Backend root info: `http://127.0.0.1:8000/`
 - Backend health: `http://127.0.0.1:8000/health`
 - Backend docs: `http://127.0.0.1:8000/docs`
@@ -679,6 +700,28 @@ Superseding note for `v1.11.0`:
 7. `generate_draft_node` now rewrites the effective user message with a smooth XML-style `<image_context>` block when OCR clues are present, while keeping `system_prompt` limited to the thread persona or request prompt without adding extra vision guardrails.
 8. When LangGraph delegates draft generation to a text-only inner provider, image materials are stripped from the delegated request so the downstream model only sees OCR-derived text clues instead of raw image URLs or filenames.
 
+Superseding note for `v1.12.0`:
+
+1. `ChatFeed` now consumes the authenticated frontend user state so user-side chat bubbles can render the persisted avatar consistently with the sidebar and profile modal.
+2. User and assistant chat avatars now use circular rendering instead of rounded-square rendering to match mainstream profile-avatar expectations.
+3. The repository now includes a root-level Chinese `README.md` for onboarding, startup, and day-to-day development entry.
+
+Superseding note for `v1.12.1`:
+
+1. `app/main.py` now restricts local-development CORS origins to the Vite frontend endpoints `http://localhost:5173` and `http://127.0.0.1:5173` instead of using a wildcard origin.
+2. CORS middleware registration remains before router inclusion so preflight handling is applied consistently during frontend-backend local integration.
+
+Superseding note for `v1.12.2`:
+
+1. `frontend/vite.config.ts` now binds the Vite development server to `0.0.0.0` so devices on the same LAN can open the workspace directly.
+2. the backend local-development CORS whitelist was temporarily expanded for same-LAN access verification.
+
+Superseding note for `v1.12.3`:
+
+1. `app/main.py` no longer relies on a hardcoded LAN origin and now reads optional comma-separated CORS origins from `CORS_ALLOWED_ORIGINS`.
+2. when `CORS_ALLOWED_ORIGINS` is unset, backend CORS falls back to localhost development defaults.
+3. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the environment-variable-based LAN access setup.
+
 ### 11.4 Dynamic Persona Rule
 
 The current provider baseline MUST follow these rules:
@@ -747,6 +790,7 @@ Current enforced boundaries:
 15. collapsible workspace header for task metadata, persona controls, and quick actions
 16. optimistic user messages that preserve submitted material attachments for immediate preview
 17. `/chat/stream` payload assembly that maps ready uploads into backend `materials`
+18. chat-bubble user avatar sync from the persisted authenticated user profile with immediate React state refresh after profile updates
 
 ### 13.2 Composer and Chat Material Flow
 
@@ -758,6 +802,8 @@ The current frontend material flow is:
 4. `ChatFeed` MUST render image materials as thumbnails in the user bubble and non-image materials as compact attachment chips.
 5. Composer text and upload state MUST be cleared after a successful local submit handoff, while in-flight uploads still block submission.
 6. This flow is required for LangGraph image routing because the backend only enters `ocr_node` when `MediaChatRequest.materials` contains image entries.
+7. User-side chat bubbles SHOULD render `currentUser.avatar_url` when available, and MUST fall back to the default user icon when the avatar is missing or fails to load.
+8. User-facing chat avatars SHOULD use circular rendering to stay visually aligned with common profile-avatar expectations across the workspace.
 
 ### 13.3 Frontend API Layer
 
@@ -948,18 +994,22 @@ Covered cases:
 
 ### 15.2 Latest Verification Result
 
-The following checks were executed on `2026-04-25` and passed:
+The following checks were executed on `2026-04-27` and passed:
 
 ```bash
-alembic upgrade head
-python -m pytest -q
 cd frontend && npm run build
+python -m pytest tests/test_graph_vision.py -q
+python -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('verify'))"
+python -c "from app.main import app; print([middleware.cls.__name__ for middleware in app.user_middleware])"
+python -c "from app.main import load_cors_allowed_origins; print(load_cors_allowed_origins())"
 ```
 
 Observed result baseline:
 
-- `pytest`: `32 passed`
-- `alembic upgrade head`: success
+- `tests/test_graph_vision.py`: `9 passed`
+- `passlib + bcrypt` smoke check: success
+- application middleware smoke check: `CORSMiddleware` present
+- CORS env loader smoke check: defaults resolve successfully
 - frontend production build: success
 
 ### 15.3 Current Warning
@@ -968,7 +1018,7 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.11.0
+### 16.1 Completed in v1.12.3
 
 This version adds or solidifies:
 
@@ -984,6 +1034,13 @@ This version adds or solidifies:
 10. backend history replay now returns message-level materials so refreshed chat bubbles keep their images
 11. backend coverage now validates device-session management, scheduler job setup, OSS credential routing, vision payload construction, and message-level material replay
 12. refreshed development documentation
+13. frontend user chat bubbles now sync the authenticated user's persisted avatar state
+14. user and assistant chat avatars now render with circular styling
+15. a root-level Chinese `README.md` now provides project onboarding and startup guidance
+16. documentation maintenance expectations are now explicitly recorded for future change sets
+17. FastAPI local-development CORS handling now explicitly whitelists the Vite frontend origins used during local联调
+18. Vite frontend now listens on `0.0.0.0` to support same-LAN device access during local development
+19. backend CORS LAN access is now driven by the environment variable `CORS_ALLOWED_ORIGINS` instead of a hardcoded machine-specific IP
 
 ### 16.2 Current Non-Blocking Gaps
 
@@ -1014,3 +1071,5 @@ When updating this project:
 4. persistence changes MUST include an Alembic migration or an explicit migration note
 5. frontend UX rules that affect message timing or session state SHOULD be documented here
 6. this document SHOULD be updated in the same change set as the implementation
+7. root-level onboarding or usage changes SHOULD be reflected in `README.md` in the same change set
+8. any completed feature, contract, workflow, persistence, or important UI change MUST update at least one repository document, and SHOULD update both `README.md` and `DEVELOPMENT.md` when both onboarding and engineering baselines are affected

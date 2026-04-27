@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,7 +22,20 @@ from app.services.scheduler import create_scheduler, run_material_cleanup_job
 
 APP_LOGGER_NAME = "app"
 STREAM_TRACE_PATHS = frozenset({"/api/v1/media/chat/stream"})
+DEFAULT_LOCAL_DEV_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 logger = logging.getLogger(f"{APP_LOGGER_NAME}.main")
+
+
+def load_cors_allowed_origins() -> list[str]:
+    raw_value = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+    if not raw_value:
+        return DEFAULT_LOCAL_DEV_CORS_ORIGINS
+
+    origins = [item.strip().rstrip("/") for item in raw_value.split(",") if item.strip()]
+    return origins or DEFAULT_LOCAL_DEV_CORS_ORIGINS
 
 
 def configure_application_logging() -> None:
@@ -72,7 +86,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=load_cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
