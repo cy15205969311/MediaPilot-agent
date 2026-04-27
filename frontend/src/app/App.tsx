@@ -6,6 +6,7 @@ import {
   ChevronUp,
   CheckCircle2,
   LockKeyhole,
+  Menu,
   RefreshCw,
   Settings2,
   Sparkles,
@@ -372,9 +373,11 @@ function App() {
   );
 
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(false);
+  const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(
     typeof window !== "undefined" ? window.innerWidth >= 1280 : true,
   );
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [platform, setPlatform] = useState<UiPlatform>("xiaohongshu");
   const [taskType, setTaskType] = useState<UiTaskType>("content_generation");
   const [message, setMessage] = useState(
@@ -1401,8 +1404,14 @@ function App() {
       <div className="flex h-screen flex-col bg-gradient-to-br from-orange-50/40 via-white to-rose-50/30 text-slate-900">
         <AppHeader
           currentDisplayName={currentDisplayName}
-          onOpenLeftSidebar={() => setLeftSidebarOpen(true)}
-          onOpenRightPanel={() => setRightPanelOpen(true)}
+          onOpenLeftSidebar={() => {
+            setIsLeftSidebarCollapsed(false);
+            setLeftSidebarOpen(true);
+          }}
+          onOpenRightPanel={() => {
+            setIsRightPanelCollapsed(false);
+            setRightPanelOpen(true);
+          }}
           onPlatformChange={setPlatform}
           onTaskTypeChange={setTaskType}
           platform={platform}
@@ -1413,14 +1422,19 @@ function App() {
           <LeftSidebar
             activeThreadId={activeThreadId}
             currentUser={currentUser}
+            isDesktopCollapsed={isLeftSidebarCollapsed}
             isLoading={isLoadingThreads}
             mutatingThreadId={mutatingThreadId}
             onCreateThread={openNewThreadModal}
             onDeleteThread={(thread) => void handleDeleteThread(thread)}
             onLogout={() => void handleLogout()}
+            onClose={() => setLeftSidebarOpen(false)}
             onOpenProfile={() => void handleOpenProfile()}
             onRenameThread={(thread) => void handleRenameThread(thread)}
             onSelectThread={(thread) => void loadThreadHistory(thread)}
+            onToggleDesktopCollapse={() =>
+              setIsLeftSidebarCollapsed((collapsed) => !collapsed)
+            }
             open={leftSidebarOpen}
             threads={threads}
           />
@@ -1436,37 +1450,51 @@ function App() {
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
             <div className="border-b border-slate-200 bg-white/60 px-4 py-4 backdrop-blur-sm lg:px-6">
               <div className="flex flex-wrap items-center gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                <div className="flex min-w-0 items-center gap-3">
+                  {isLeftSidebarCollapsed ? (
+                    <button
+                      aria-label="展开左侧边栏"
+                      className="hidden h-12 w-12 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-slate-600 transition hover:border-rose-300 hover:text-rose-600 lg:inline-flex"
+                      onClick={() => setIsLeftSidebarCollapsed(false)}
+                      type="button"
+                    >
+                      <Menu className="h-5 w-5" />
+                    </button>
+                  ) : null}
+
+                  <div className="min-w-0">
                     <h2 className="text-2xl font-bold tracking-tight text-slate-800">
                       {workspaceTitle}
                     </h2>
-                    <button
-                      aria-expanded={isWorkspaceHeaderExpanded}
-                      aria-label={isWorkspaceHeaderExpanded ? "收起工作台信息" : "展开工作台信息"}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:text-rose-600"
-                      onClick={() => setIsWorkspaceHeaderExpanded((expanded) => !expanded)}
-                      type="button"
-                    >
-                      {isWorkspaceHeaderExpanded ? (
-                        <ChevronUp className="h-4 w-4" />
-                      ) : (
-                        <ChevronDown className="h-4 w-4" />
-                      )}
-                    </button>
                   </div>
                 </div>
 
-                <div
-                  className={`ml-auto inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm font-medium ${isStreaming ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"
-                    }`}
-                >
-                  {isStreaming ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="h-4 w-4" />
-                  )}
-                  {statusText}
+                <div className="ml-auto flex items-center gap-3">
+                  <div
+                    className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${isStreaming ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"
+                      }`}
+                  >
+                    {isStreaming ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4" />
+                    )}
+                    {statusText}
+                  </div>
+
+                  <button
+                    aria-expanded={isWorkspaceHeaderExpanded}
+                    aria-label={isWorkspaceHeaderExpanded ? "收起快捷操作区" : "展开快捷操作区"}
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:text-rose-600"
+                    onClick={() => setIsWorkspaceHeaderExpanded((expanded) => !expanded)}
+                    type="button"
+                  >
+                    {isWorkspaceHeaderExpanded ? (
+                      <ChevronUp className="h-4 w-4" />
+                    ) : (
+                      <ChevronDown className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
               </div>
 
@@ -1547,8 +1575,15 @@ function App() {
             activeTaskLabel={activeTaskLabel}
             artifact={artifact}
             artifactActions={artifactActions}
+            isDesktopCollapsed={isRightPanelCollapsed}
             onClose={() => setRightPanelOpen(false)}
-            onOpen={() => setRightPanelOpen(true)}
+            onOpen={() => {
+              setIsRightPanelCollapsed(false);
+              setRightPanelOpen(true);
+            }}
+            onToggleDesktopCollapse={() =>
+              setIsRightPanelCollapsed((collapsed) => !collapsed)
+            }
             open={rightPanelOpen}
             platform={platform}
             taskType={taskType}

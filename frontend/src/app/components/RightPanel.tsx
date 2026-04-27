@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronRight, RefreshCw, X } from "lucide-react";
+import { AlertCircle, ChevronLeft, ChevronRight, RefreshCw, X } from "lucide-react";
 
 import type {
   ArtifactAction,
@@ -13,6 +13,7 @@ import { TopicPlanningArtifact } from "./artifacts/TopicPlanningArtifact";
 
 type RightPanelProps = {
   open: boolean;
+  isDesktopCollapsed: boolean;
   platform: UiPlatform;
   taskType: UiTaskType;
   activeTaskLabel: string;
@@ -20,6 +21,7 @@ type RightPanelProps = {
   artifactActions: ArtifactAction[];
   onClose: () => void;
   onOpen: () => void;
+  onToggleDesktopCollapse: () => void;
 };
 
 function renderArtifactPanel(
@@ -72,6 +74,7 @@ function getPlatformLabel(platform: UiPlatform) {
 
 export function RightPanel({
   open,
+  isDesktopCollapsed,
   platform,
   taskType,
   activeTaskLabel,
@@ -79,33 +82,50 @@ export function RightPanel({
   artifactActions,
   onClose,
   onOpen,
+  onToggleDesktopCollapse,
 }: RightPanelProps) {
   return (
     <>
       <aside
-        className={`fixed inset-y-16 right-0 z-40 w-full max-w-md border-l border-slate-200 bg-white transition-transform duration-300 xl:static xl:translate-x-0 ${
+        className={`fixed inset-y-16 right-0 z-40 w-full max-w-md border-l border-slate-200 bg-white transition-transform duration-300 xl:static xl:shrink-0 xl:translate-x-0 xl:transition-[width,border-color] xl:duration-300 ${
           open ? "translate-x-0" : "translate-x-full"
-        }`}
+        } ${isDesktopCollapsed ? "xl:w-0 xl:max-w-none xl:border-l-transparent" : "xl:w-[28rem] xl:max-w-[28rem]"}`}
       >
-        <div className="flex h-full flex-col">
-          <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+        <div
+          className={`flex h-full flex-col overflow-hidden transition-opacity duration-200 ${
+            isDesktopCollapsed ? "xl:pointer-events-none xl:opacity-0" : "opacity-100"
+          }`}
+        >
+          <div className="flex items-start justify-between border-b border-slate-200 px-5 py-5">
             <div>
-              <div className="text-2xl font-bold tracking-tight text-slate-800">生成结果</div>
+              <div className="text-2xl font-bold tracking-tight text-slate-900">生成结果</div>
               <div className="mt-1 text-sm text-slate-500">
                 {activeTaskLabel} · {getPlatformLabel(platform)}
               </div>
             </div>
-            <button
-              className="rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 xl:hidden"
-              onClick={onClose}
-              type="button"
-            >
-              <X className="h-5 w-5" />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                aria-expanded={!isDesktopCollapsed}
+                aria-label="折叠右侧结果面板"
+                className="hidden h-10 w-10 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:text-rose-600 xl:inline-flex"
+                onClick={onToggleDesktopCollapse}
+                type="button"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+              <button
+                aria-label="关闭结果面板"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50 xl:hidden"
+                onClick={onClose}
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto px-5 py-5">
-            <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <div className="mb-4 rounded-[28px] border border-amber-200 bg-amber-50 p-4">
               <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-amber-800">
                 <AlertCircle className="h-4 w-4" />
                 建议人工确认
@@ -118,13 +138,13 @@ export function RightPanel({
             {renderArtifactPanel(platform, taskType, artifact)}
 
             {artifact ? (
-              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mt-4 rounded-[28px] border border-slate-200 bg-slate-50 p-4">
                 <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-800">
                   <RefreshCw className="h-4 w-4 text-slate-500" />
                   协议状态
                 </div>
                 <div className="text-sm leading-6 text-slate-600">
-                  当前右侧面板已经基于后端 `artifact` 事件进行渲染，不再依赖组件内的硬编码主数据。
+                  当前右侧面板已经基于后端 `artifact` 事件进行渲染，不再依赖组件内部的硬编码模拟数据。
                 </div>
               </div>
             ) : null}
@@ -135,7 +155,7 @@ export function RightPanel({
               {artifactActions.map((action) => (
                 <button
                   key={action.label}
-                  className={`rounded-xl px-4 py-3 text-sm font-medium transition ${
+                  className={`rounded-2xl px-4 py-3 text-sm font-medium transition ${
                     action.variant === "primary"
                       ? "bg-slate-900 text-white hover:bg-slate-800"
                       : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
@@ -161,11 +181,23 @@ export function RightPanel({
 
       {!open ? (
         <button
+          aria-label="展开结果面板"
           className="fixed bottom-24 right-4 z-20 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-orange-500 text-white shadow-lg xl:hidden"
           onClick={onOpen}
           type="button"
         >
-          <ChevronRight className="h-5 w-5" />
+          <ChevronLeft className="h-5 w-5" />
+        </button>
+      ) : null}
+
+      {isDesktopCollapsed ? (
+        <button
+          aria-label="展开右侧结果面板"
+          className="fixed bottom-24 right-6 z-20 hidden h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-orange-500 text-white shadow-[0_20px_45px_rgba(249,115,22,0.28)] transition hover:scale-[1.02] xl:flex"
+          onClick={onOpen}
+          type="button"
+        >
+          <ChevronLeft className="h-6 w-6" />
         </button>
       ) : null}
     </>
