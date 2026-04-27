@@ -1,10 +1,16 @@
 import { AlertCircle, CheckCircle2, FileText, Image as ImageIcon, Sparkles, User, Video } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { RefObject } from "react";
 
-import type { ConversationMessage, MediaChatMaterialPayload } from "../types";
-import { formatChatTimestamp } from "../utils";
+import type {
+  AuthenticatedUser,
+  ConversationMessage,
+  MediaChatMaterialPayload,
+} from "../types";
+import { buildAbsoluteUrl, formatChatTimestamp, getDisplayName } from "../utils";
 
 type ChatFeedProps = {
+  currentUser: AuthenticatedUser | null;
   messages: ConversationMessage[];
   isStreaming: boolean;
   isLoadingHistory?: boolean;
@@ -76,11 +82,24 @@ function renderMessageMaterials(item: ConversationMessage) {
 }
 
 export function ChatFeed({
+  currentUser,
   messages,
   isStreaming,
   isLoadingHistory = false,
   endRef,
 }: ChatFeedProps) {
+  const resolvedUserAvatarUrl = currentUser?.avatar_url
+    ? buildAbsoluteUrl(currentUser.avatar_url)
+    : "";
+  const [hasUserAvatarError, setHasUserAvatarError] = useState(false);
+
+  useEffect(() => {
+    setHasUserAvatarError(false);
+  }, [resolvedUserAvatarUrl]);
+
+  const userDisplayName = getDisplayName(currentUser) || "User";
+  const showUserAvatar = Boolean(resolvedUserAvatarUrl) && !hasUserAvatarError;
+
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
       {isLoadingHistory ? (
@@ -136,7 +155,7 @@ export function ChatFeed({
             className={`flex gap-3 ${item.role === "user" ? "justify-end" : "justify-start"}`}
           >
             {item.role === "assistant" ? (
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-rose-500 to-orange-500 text-white shadow-sm">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-orange-500 text-white shadow-sm">
                 <Sparkles className="h-5 w-5" />
               </div>
             ) : null}
@@ -180,8 +199,17 @@ export function ChatFeed({
             </div>
 
             {item.role === "user" ? (
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-200 text-slate-600">
-                <User className="h-5 w-5" />
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-slate-600">
+                {showUserAvatar ? (
+                  <img
+                    alt={`${userDisplayName} avatar`}
+                    className="h-full w-full object-cover"
+                    onError={() => setHasUserAvatarError(true)}
+                    src={resolvedUserAvatarUrl}
+                  />
+                ) : (
+                  <User className="h-5 w-5" />
+                )}
               </div>
             ) : null}
           </div>
