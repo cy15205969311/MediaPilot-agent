@@ -463,6 +463,138 @@ def test_reset_password_rejects_wrong_current_password(client: TestClient):
     assert login_response.status_code == 200
 
 
+def test_password_reset_request_and_token_reset_revoke_all_sessions(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+):
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={"username": "alice-password-forgot", "password": "super-secret-123"},
+        headers={
+            "User-Agent": "Mozilla/5.0 Chrome/123.0 Windows",
+            "X-Forwarded-For": "10.0.0.1",
+        },
+    )
+    assert register_response.status_code == 200
+    first_access_token = register_response.json()["access_token"]
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-password-forgot", "password": "super-secret-123"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 Firefox/124.0 Mac OS X",
+            "X-Forwarded-For": "10.0.0.2",
+        },
+    )
+    assert login_response.status_code == 200
+    second_access_token = login_response.json()["access_token"]
+
+    caplog.set_level(logging.INFO)
+    request_response = client.post(
+        "/api/v1/auth/password-reset-request",
+        json={"username": "alice-password-forgot"},
+    )
+    assert request_response.status_code == 200
+    assert request_response.json() == {
+        "accepted": True,
+        "expires_in_minutes": 15,
+    }
+
+    reset_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if "Password reset requested username=alice-password-forgot reset_link=" in record.getMessage()
+    )
+    reset_link = reset_log.split("reset_link=", 1)[1]
+    reset_token = reset_link.split("token=", 1)[1]
+
+    reset_response = client.post(
+        "/api/v1/auth/password-reset",
+        json={
+            "token": reset_token,
+            "new_password": "new-secret-456",
+        },
+    )
+    assert reset_response.status_code == 200
+    assert reset_response.json() == {
+        "password_reset": True,
+        "revoked_sessions": 2,
+    }
+
+    first_device_response = client.get(
+        "/api/v1/media/threads",
+        headers={"Authorization": f"Bearer {first_access_token}"},
+    )
+    assert first_device_response.status_code == 401
+
+    second_device_response = client.get(
+        "/api/v1/media/threads",
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert second_device_response.status_code == 401
+
+    old_password_login = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-password-forgot", "password": "super-secret-123"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert old_password_login.status_code == 401
+
+    new_password_login = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-password-forgot", "password": "new-secret-456"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert new_password_login.status_code == 200
+
+
+def test_password_reset_request_for_unknown_user_is_still_accepted(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.INFO)
+    response = client.post(
+        "/api/v1/auth/password-reset-request",
+        json={"username": "missing-user"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "accepted": True,
+        "expires_in_minutes": 15,
+    }
+    assert any(
+        "Password reset requested for unknown username=missing-user" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_password_reset_rejects_invalid_reset_token(client: TestClient):
+    register_auth_response(client, username="alice-password-reset-token-invalid")
+
+    response = client.post(
+        "/api/v1/auth/password-reset",
+        json={
+            "token": "not-a-valid-reset-token",
+            "new_password": "new-secret-456",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "重置令牌无效或已过期。"
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        data={
+            "username": "alice-password-reset-token-invalid",
+            "password": "super-secret-123",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert login_response.status_code == 200
+
+
 def test_profile_update_returns_updated_user_payload(client: TestClient):
     headers = register_user(client, username="alice-profile")
 

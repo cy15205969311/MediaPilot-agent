@@ -194,6 +194,31 @@ class RegisterRequest(SchemaModel):
     password: str = Field(..., max_length=128, description="Password.")
 
 
+class PasswordResetRequestCreate(SchemaModel):
+    username: str = Field(..., max_length=64, description="Username for password reset.")
+
+
+class PasswordResetRequestResponse(SchemaModel):
+    accepted: Literal[True] = True
+    expires_in_minutes: int = Field(
+        ...,
+        description="Reset token lifetime in minutes.",
+    )
+
+
+class PasswordResetConfirmRequest(SchemaModel):
+    token: str = Field(..., min_length=1, description="Password reset JWT.")
+    new_password: str = Field(..., max_length=128, description="Replacement password.")
+
+
+class PasswordResetConfirmResponse(SchemaModel):
+    password_reset: Literal[True] = True
+    revoked_sessions: int = Field(
+        default=0,
+        description="Number of active sessions revoked after the reset completed.",
+    )
+
+
 class AuthTokenResponse(SchemaModel):
     access_token: str = Field(..., description="JWT access token.")
     refresh_token: str = Field(..., description="JWT refresh token.")

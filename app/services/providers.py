@@ -2,11 +2,17 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from json import JSONDecodeError
+from typing import Any, Callable
 
 import httpx
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from openai import (
     APIConnectionError,
     APIError,
@@ -56,6 +62,155 @@ def _build_http_timeout(seconds: float) -> httpx.Timeout:
     return httpx.Timeout(seconds, connect=connect_timeout)
 
 
+class _OpenAIToolBindingAdapter:
+    def __init__(
+        self,
+        *,
+        client_factory,
+        model: str,
+        timeout: httpx.Timeout,
+    ) -> None:
+        self._client_factory = client_factory
+        self._model = model
+        self._timeout = timeout
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        tool_specs = [convert_to_openai_tool(tool) for tool in tools]
+        temperature = kwargs.get("temperature", 0)
+
+        async def _invoke(messages_input: Any) -> AIMessage:
+            messages = _coerce_tool_binding_messages(messages_input)
+            response = await self._client_factory().chat.completions.create(
+                model=self._model,
+                messages=[_serialize_tool_binding_message(message) for message in messages],
+                tools=tool_specs,
+                tool_choice=tool_choice or "auto",
+                temperature=temperature,
+                timeout=self._timeout,
+            )
+            return _normalize_tool_binding_response_message(response.choices[0].message)
+
+        return RunnableLambda(afunc=_invoke, name=f"bound_tools_{self._model}")
+
+
+def _coerce_tool_binding_messages(messages_input: Any) -> list[BaseMessage]:
+    if isinstance(messages_input, BaseMessage):
+        return [messages_input]
+    if (
+        isinstance(messages_input, list)
+        and all(isinstance(message, BaseMessage) for message in messages_input)
+    ):
+        return list(messages_input)
+    raise TypeError("Tool-bound chat model expects LangChain BaseMessage inputs.")
+
+
+def _serialize_tool_binding_message(message: BaseMessage) -> dict[str, object]:
+    if isinstance(message, SystemMessage):
+        return {"role": "system", "content": _coerce_message_content(message.content)}
+    if isinstance(message, HumanMessage):
+        return {"role": "user", "content": _coerce_message_content(message.content)}
+    if isinstance(message, ToolMessage):
+        return {
+            "role": "tool",
+            "content": _coerce_message_content(message.content),
+            "tool_call_id": message.tool_call_id,
+        }
+    if isinstance(message, AIMessage):
+        payload: dict[str, object] = {
+            "role": "assistant",
+            "content": _coerce_message_content(message.content),
+        }
+        serialized_tool_calls = []
+        for tool_call in message.tool_calls or []:
+            tool_name = str(tool_call.get("name", "")).strip()
+            if not tool_name:
+                continue
+            serialized_tool_calls.append(
+                {
+                    "id": str(tool_call.get("id") or f"call_{uuid.uuid4().hex}"),
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(
+                            tool_call.get("args", {}),
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+            )
+        if serialized_tool_calls:
+            payload["tool_calls"] = serialized_tool_calls
+        return payload
+    raise TypeError(f"Unsupported LangChain message type for tool binding: {type(message)!r}")
+
+
+def _coerce_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(item) for item in content)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _normalize_tool_binding_response_message(message: Any) -> AIMessage:
+    content = _coerce_message_content(getattr(message, "content", ""))
+    raw_tool_calls = getattr(message, "tool_calls", None) or []
+    normalized_tool_calls: list[dict[str, object]] = []
+
+    for raw_call in raw_tool_calls:
+        function = getattr(raw_call, "function", None)
+        if function is None and isinstance(raw_call, dict):
+            function = raw_call.get("function")
+        if function is None:
+            continue
+
+        if isinstance(function, dict):
+            name = str(function.get("name", "")).strip()
+            raw_arguments = function.get("arguments", {})
+        else:
+            name = str(getattr(function, "name", "")).strip()
+            raw_arguments = getattr(function, "arguments", {})
+        if not name:
+            continue
+
+        if isinstance(raw_arguments, str):
+            try:
+                arguments = json.loads(raw_arguments) if raw_arguments.strip() else {}
+            except json.JSONDecodeError:
+                arguments = {}
+        elif isinstance(raw_arguments, dict):
+            arguments = raw_arguments
+        else:
+            arguments = {}
+
+        tool_call_id = ""
+        if isinstance(raw_call, dict):
+            tool_call_id = str(raw_call.get("id", ""))
+        else:
+            tool_call_id = str(getattr(raw_call, "id", ""))
+        if not tool_call_id:
+            tool_call_id = f"call_{uuid.uuid4().hex}"
+
+        normalized_tool_calls.append(
+            {
+                "name": name,
+                "args": arguments,
+                "id": tool_call_id,
+                "type": "tool_call",
+            }
+        )
+
+    return AIMessage(content=content, tool_calls=normalized_tool_calls)
+
+
 class BaseLLMProvider(ABC):
     @abstractmethod
     async def generate_stream(
@@ -67,6 +222,17 @@ class BaseLLMProvider(ABC):
         user_id: str | None = None,
     ) -> AsyncGenerator[dict[str, object], None]:
         """Yield structured stream events before SSE formatting."""
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support LangChain tool binding.",
+        )
 
 
 class MockLLMProvider(BaseLLMProvider):
@@ -365,6 +531,24 @@ class OpenAIProvider(BaseLLMProvider):
             self._client = AsyncOpenAI(**client_kwargs)
         return self._client
 
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        adapter = _OpenAIToolBindingAdapter(
+            client_factory=self._get_client,
+            model=self.model,
+            timeout=self.request_timeout,
+        )
+        return adapter.bind_tools(
+            tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        )
+
     async def _build_structured_artifact(
         self,
         request: MediaChatRequest,
@@ -565,6 +749,24 @@ class CompatibleLLMProvider(BaseLLMProvider):
                 timeout=self.request_timeout,
             )
         return self._client
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        adapter = _OpenAIToolBindingAdapter(
+            client_factory=self._get_client,
+            model=self.model,
+            timeout=self.request_timeout,
+        )
+        return adapter.bind_tools(
+            tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        )
 
     async def _build_structured_artifact(
         self,

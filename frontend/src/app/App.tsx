@@ -19,6 +19,7 @@ import {
   clearStoredRefreshToken,
   clearStoredToken,
   clearStoredUser,
+  completePasswordReset,
   createChatStream,
   deleteThread,
   fetchSessions,
@@ -30,6 +31,7 @@ import {
   isUnauthorizedError,
   login,
   logoutAPI,
+  requestPasswordReset,
   register,
   revokeSession,
   resetPassword,
@@ -76,7 +78,11 @@ import {
   mapTaskToBackend,
 } from "./utils";
 
-type AuthMode = "login" | "register";
+type AuthMode =
+  | "login"
+  | "register"
+  | "forgot-password"
+  | "reset-password";
 
 type ConversationMessageDraft = Omit<ConversationMessage, "createdAt"> & {
   createdAt?: string;
@@ -175,34 +181,66 @@ function AuthCard(props: {
   mode: AuthMode;
   username: string;
   password: string;
+  confirmPassword: string;
+  resetToken: string;
   isSubmitting: boolean;
   errorText: string;
+  successText: string;
   onModeChange: (mode: AuthMode) => void;
   onUsernameChange: (value: string) => void;
   onPasswordChange: (value: string) => void;
+  onConfirmPasswordChange: (value: string) => void;
+  onResetTokenChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const {
     mode,
     username,
     password,
+    confirmPassword,
+    resetToken,
     isSubmitting,
     errorText,
+    successText,
     onModeChange,
     onUsernameChange,
     onPasswordChange,
+    onConfirmPasswordChange,
+    onResetTokenChange,
     onSubmit,
   } = props;
+  const isCredentialMode = mode === "login" || mode === "register";
+  const isForgotPasswordMode = mode === "forgot-password";
+  const isResetPasswordMode = mode === "reset-password";
+
+  const titleText = isCredentialMode
+    ? mode === "login"
+      ? "登录你的内容工作台"
+      : "创建一个新的工作台账号"
+    : isForgotPasswordMode
+      ? "申请密码重置令牌"
+      : "输入令牌设置新密码";
+
+  const submitLabel = isCredentialMode
+    ? mode === "login"
+      ? "登录并进入工作台"
+      : "注册并进入工作台"
+    : isForgotPasswordMode
+      ? "生成重置令牌"
+      : "重置密码并返回登录";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4 [background-image:var(--shell-background)]">
-      <div className="w-full max-w-md rounded-[28px] border border-border bg-surface-elevated p-8 shadow-[0_24px_80px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+      <div
+        className="w-full max-w-md rounded-[28px] border border-border bg-surface-elevated p-8 shadow-[0_24px_80px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+        data-testid="auth-card"
+      >
         <div className="mb-6 flex items-center gap-3">
           <div
             className="flex h-12 w-12 items-center justify-center rounded-2xl text-brand-foreground shadow-sm"
             style={{ background: "var(--brand-gradient)" }}
           >
-            {mode === "login" ? (
+            {mode === "login" || mode === "forgot-password" ? (
               <LockKeyhole className="h-6 w-6" />
             ) : (
               <UserRoundPlus className="h-6 w-6" />
@@ -210,53 +248,121 @@ function AuthCard(props: {
           </div>
           <div>
             <div className="text-2xl font-semibold text-foreground">MediaPilot</div>
-            <div className="text-sm text-muted-foreground">
-              {mode === "login"
-                ? "登录你的内容工作台"
-                : "创建一个新的工作台账号"}
-            </div>
+            <div className="text-sm text-muted-foreground">{titleText}</div>
           </div>
         </div>
 
-        <div className="mb-5 flex rounded-2xl bg-secondary p-1">
-          {(["login", "register"] as const).map((item) => (
-            <button
-              key={item}
-              className={`flex-1 rounded-xl px-4 py-2 text-sm font-medium transition ${mode === item
-                ? "bg-card text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
+        {isCredentialMode ? (
+          <div className="mb-5 flex rounded-2xl bg-secondary p-1">
+            {(["login", "register"] as const).map((item) => (
+              <button
+                key={item}
+                className={`flex-1 rounded-xl px-4 py-2 text-sm font-medium transition ${
+                  mode === item
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
                 }`}
-              onClick={() => onModeChange(item)}
+                onClick={() => onModeChange(item)}
+                type="button"
+              >
+                {item === "login" ? "登录" : "注册"}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="mb-5 flex items-center justify-between rounded-2xl bg-secondary px-4 py-3 text-sm text-secondary-foreground">
+            <span>
+              {isForgotPasswordMode
+                ? "第一步：申请重置令牌"
+                : "第二步：使用令牌重置密码"}
+            </span>
+            <button
+              className="font-medium text-foreground transition hover:text-brand"
+              onClick={() => onModeChange("login")}
               type="button"
             >
-              {item === "login" ? "登录" : "注册"}
+              返回登录
             </button>
-          ))}
-        </div>
+          </div>
+        )}
 
         <form className="space-y-4" onSubmit={onSubmit}>
-          <label className="block">
-            <div className="mb-2 text-sm font-medium text-card-foreground">用户名</div>
-            <input
-              className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
-              autoComplete="username"
-              onChange={(event) => onUsernameChange(event.target.value)}
-              placeholder="请输入用户名"
-              value={username}
-            />
-          </label>
+          {(isCredentialMode || isForgotPasswordMode) ? (
+            <label className="block">
+              <div className="mb-2 text-sm font-medium text-card-foreground">用户名</div>
+              <input
+                className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                autoComplete="username"
+                onChange={(event) => onUsernameChange(event.target.value)}
+                placeholder="请输入用户名"
+                value={username}
+              />
+            </label>
+          ) : null}
 
-          <label className="block">
-            <div className="mb-2 text-sm font-medium text-card-foreground">密码</div>
-            <input
-              className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              onChange={(event) => onPasswordChange(event.target.value)}
-              placeholder="请输入密码"
-              type="password"
-              value={password}
-            />
-          </label>
+          {isCredentialMode ? (
+            <label className="block">
+              <div className="mb-2 text-sm font-medium text-card-foreground">密码</div>
+              <input
+                className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+                onChange={(event) => onPasswordChange(event.target.value)}
+                placeholder="请输入密码"
+                type="password"
+                value={password}
+              />
+            </label>
+          ) : null}
+
+          {isResetPasswordMode ? (
+            <>
+              <label className="block">
+                <div className="mb-2 text-sm font-medium text-card-foreground">
+                  重置 Token
+                </div>
+                <textarea
+                  className="min-h-28 w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                  onChange={(event) => onResetTokenChange(event.target.value)}
+                  placeholder="请粘贴后端控制台输出的重置 Token"
+                  value={resetToken}
+                />
+              </label>
+
+              <label className="block">
+                <div className="mb-2 text-sm font-medium text-card-foreground">
+                  新密码
+                </div>
+                <input
+                  className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                  autoComplete="new-password"
+                  onChange={(event) => onPasswordChange(event.target.value)}
+                  placeholder="请输入新的登录密码"
+                  type="password"
+                  value={password}
+                />
+              </label>
+
+              <label className="block">
+                <div className="mb-2 text-sm font-medium text-card-foreground">
+                  确认新密码
+                </div>
+                <input
+                  className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                  autoComplete="new-password"
+                  onChange={(event) => onConfirmPasswordChange(event.target.value)}
+                  placeholder="请再次输入新的登录密码"
+                  type="password"
+                  value={confirmPassword}
+                />
+              </label>
+            </>
+          ) : null}
+
+          {successText ? (
+            <div className="rounded-2xl border border-success-foreground/20 bg-success-surface px-4 py-3 text-sm text-success-foreground">
+              {successText}
+            </div>
+          ) : null}
 
           {errorText ? (
             <div className="rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
@@ -270,9 +376,41 @@ function AuthCard(props: {
             type="submit"
           >
             {isSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
-            {mode === "login" ? "登录并进入工作台" : "注册并进入工作台"}
+            {submitLabel}
           </button>
         </form>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+          {mode === "login" ? (
+            <button
+              className="font-medium text-muted-foreground transition hover:text-brand"
+              onClick={() => onModeChange("forgot-password")}
+              type="button"
+            >
+              忘记密码？
+            </button>
+          ) : null}
+
+          {isForgotPasswordMode ? (
+            <button
+              className="font-medium text-muted-foreground transition hover:text-brand"
+              onClick={() => onModeChange("reset-password")}
+              type="button"
+            >
+              我已经拿到重置 Token
+            </button>
+          ) : null}
+
+          {isResetPasswordMode ? (
+            <button
+              className="font-medium text-muted-foreground transition hover:text-brand"
+              onClick={() => onModeChange("forgot-password")}
+              type="button"
+            >
+              先返回申请令牌
+            </button>
+          ) : null}
+        </div>
       </div>
     </div>
   );
@@ -303,7 +441,10 @@ function NewThreadModal(props: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4">
-      <div className="w-full max-w-xl rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+      <div
+        className="w-full max-w-xl rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
+        data-testid="new-thread-modal"
+      >
         <div className="mb-5 flex items-start justify-between gap-4">
           <div>
             <div className="text-xl font-semibold text-foreground">新建会话</div>
@@ -312,6 +453,7 @@ function NewThreadModal(props: {
             </div>
           </div>
           <button
+            aria-label="关闭新建会话弹窗"
             className="rounded-xl p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground"
             onClick={onClose}
             type="button"
@@ -369,7 +511,10 @@ function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authUsername, setAuthUsername] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authConfirmPassword, setAuthConfirmPassword] = useState("");
+  const [authResetToken, setAuthResetToken] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authSuccess, setAuthSuccess] = useState("");
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(() =>
     getStoredUser(),
@@ -425,6 +570,19 @@ function App() {
     currentUser && (getStoredToken() || getStoredRefreshToken()),
   );
   const currentDisplayName = useMemo(() => getDisplayName(currentUser), [currentUser]);
+
+  const handleAuthModeChange = (mode: AuthMode) => {
+    setAuthMode(mode);
+    setAuthError("");
+    setAuthSuccess("");
+    if (mode !== "reset-password") {
+      setAuthResetToken("");
+      setAuthConfirmPassword("");
+    }
+    if (mode === "login" || mode === "register" || mode === "forgot-password") {
+      setAuthPassword("");
+    }
+  };
 
   useEffect(() => {
     if (currentUser === null && (getStoredToken() || getStoredRefreshToken())) {
@@ -522,12 +680,18 @@ function App() {
 
   const upsertThreadInList = (nextThread: ThreadItem) => {
     setThreads((current) => {
-      const existingIndex = current.findIndex((thread) => thread.id === nextThread.id);
+      const normalizedCurrent =
+        nextThread.id === "thread-new"
+          ? current
+          : current.filter((thread) => thread.id !== "thread-new");
+      const existingIndex = normalizedCurrent.findIndex(
+        (thread) => thread.id === nextThread.id,
+      );
       if (existingIndex === -1) {
-        return [nextThread, ...current].slice(0, 20);
+        return [nextThread, ...normalizedCurrent].slice(0, 20);
       }
 
-      const cloned = [...current];
+      const cloned = [...normalizedCurrent];
       cloned[existingIndex] = { ...cloned[existingIndex], ...nextThread };
       return cloned;
     });
@@ -564,7 +728,12 @@ function App() {
     replaceUploadedMaterials([]);
     setArtifact(null);
     setStatusText("请重新登录");
+    setAuthMode("login");
     setAuthError(fallbackMessage);
+    setAuthSuccess("");
+    setAuthPassword("");
+    setAuthConfirmPassword("");
+    setAuthResetToken("");
     setIsProfileModalOpen(false);
     setIsThreadSettingsOpen(false);
     setRevokingSessionId(null);
@@ -871,11 +1040,19 @@ function App() {
   };
 
   const handleConfirmNewThread = () => {
+    const normalizedTitle = draftThreadTitle.trim() || "New thread";
+    const normalizedSystemPrompt = draftSystemPrompt.trim();
+
     abortRef.current?.abort();
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
-    resetWorkspace(draftThreadTitle.trim() || "New thread", draftSystemPrompt.trim());
+    resetWorkspace(normalizedTitle, normalizedSystemPrompt);
+    upsertThreadInList({
+      id: "thread-new",
+      title: normalizedTitle,
+      time: "草稿",
+    });
     setStatusText("准备新的内容任务");
     setRightPanelOpen(true);
     setLeftSidebarOpen(false);
@@ -1334,7 +1511,11 @@ function App() {
       clearStoredUser();
       setCurrentUser(null);
       setAuthSessions([]);
+      setAuthMode("login");
       setAuthPassword("");
+      setAuthConfirmPassword("");
+      setAuthResetToken("");
+      setAuthSuccess("");
       setThreads([]);
       resetWorkspace();
       setIsProfileModalOpen(false);
@@ -1350,16 +1531,73 @@ function App() {
 
     const username = authUsername.trim();
     const password = authPassword;
+    const resetToken = authResetToken.trim();
 
-    if (!username || !password) {
-      setAuthError("请输入用户名和密码。");
-      return;
+    if (authMode === "login" || authMode === "register") {
+      if (!username || !password) {
+        setAuthError("请输入用户名和密码。");
+        return;
+      }
+    } else if (authMode === "forgot-password") {
+      if (!username) {
+        setAuthError("请输入需要重置密码的用户名。");
+        return;
+      }
+    } else {
+      if (!resetToken || !password || !authConfirmPassword) {
+        setAuthError("请完整填写重置 Token、新密码和确认密码。");
+        return;
+      }
+      if (password.length < 8) {
+        setAuthError("新密码至少需要 8 个字符。");
+        return;
+      }
+      if (password !== authConfirmPassword) {
+        setAuthError("两次输入的新密码不一致。");
+        return;
+      }
     }
 
     setIsAuthSubmitting(true);
     setAuthError("");
+    setAuthSuccess("");
 
     try {
+      if (authMode === "forgot-password") {
+        const response = await requestPasswordReset({ username });
+        setAuthPassword("");
+        setAuthConfirmPassword("");
+        setAuthResetToken("");
+        setAuthMode("reset-password");
+        setAuthSuccess(
+          `如果账号存在，系统已生成一个 ${response.expires_in_minutes} 分钟内有效的重置令牌。请查看后端控制台日志并复制 Token。`,
+        );
+        setStatusText("请根据控制台中的令牌完成密码重置");
+        return;
+      }
+
+      if (authMode === "reset-password") {
+        const response = await completePasswordReset({
+          token: resetToken,
+          new_password: password,
+        });
+        clearStoredToken();
+        clearStoredRefreshToken();
+        clearStoredUser();
+        setCurrentUser(null);
+        setAuthMode("login");
+        setAuthPassword("");
+        setAuthConfirmPassword("");
+        setAuthResetToken("");
+        setAuthSuccess(
+          response.revoked_sessions > 0
+            ? `密码已重置，已强制下线 ${response.revoked_sessions} 台设备，请使用新密码重新登录。`
+            : "密码已重置，请使用新密码重新登录。",
+        );
+        setStatusText("密码已重置，请重新登录");
+        return;
+      }
+
       const response =
         authMode === "login"
           ? await login(username, password)
@@ -1367,6 +1605,8 @@ function App() {
 
       setCurrentUser(response.user);
       setAuthPassword("");
+      setAuthConfirmPassword("");
+      setAuthResetToken("");
       setStatusText("登录成功，正在加载工作台");
       hasInitializedHistoryRef.current = false;
       resetWorkspace();
@@ -1387,16 +1627,18 @@ function App() {
     return (
       <AuthCard
         errorText={authError}
+        successText={authSuccess}
+        confirmPassword={authConfirmPassword}
         isSubmitting={isAuthSubmitting}
         mode={authMode}
-        onModeChange={(mode) => {
-          setAuthMode(mode);
-          setAuthError("");
-        }}
+        onConfirmPasswordChange={setAuthConfirmPassword}
+        onModeChange={handleAuthModeChange}
         onPasswordChange={setAuthPassword}
+        onResetTokenChange={setAuthResetToken}
         onSubmit={handleAuthSubmit}
         onUsernameChange={setAuthUsername}
         password={authPassword}
+        resetToken={authResetToken}
         username={authUsername}
       />
     );
@@ -1404,7 +1646,10 @@ function App() {
 
   return (
     <>
-      <div className="flex h-screen flex-col bg-background text-foreground [background-image:var(--shell-background)]">
+      <div
+        className="flex h-screen flex-col bg-background text-foreground [background-image:var(--shell-background)]"
+        data-testid="workspace-shell"
+      >
         <AppHeader
           currentDisplayName={currentDisplayName}
           onOpenLeftSidebar={() => {
@@ -1434,7 +1679,13 @@ function App() {
             onClose={() => setLeftSidebarOpen(false)}
             onOpenProfile={() => void handleOpenProfile()}
             onRenameThread={(thread) => void handleRenameThread(thread)}
-            onSelectThread={(thread) => void loadThreadHistory(thread)}
+            onSelectThread={(thread) => {
+              if (thread.id === "thread-new") {
+                resetWorkspace(thread.title);
+                return;
+              }
+              void loadThreadHistory(thread);
+            }}
             onToggleDesktopCollapse={() =>
               setIsLeftSidebarCollapsed((collapsed) => !collapsed)
             }

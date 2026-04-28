@@ -292,6 +292,25 @@ export type RegisterPayload = {
   password: string;
 };
 
+export type PasswordResetRequestPayload = {
+  username: string;
+};
+
+export type PasswordResetRequestApiResponse = {
+  accepted: true;
+  expires_in_minutes: number;
+};
+
+export type PasswordResetConfirmPayload = {
+  token: string;
+  new_password: string;
+};
+
+export type PasswordResetConfirmResponse = {
+  password_reset: true;
+  revoked_sessions: number;
+};
+
 export type UserProfileUpdatePayload = {
   nickname?: string | null;
   bio?: string | null;

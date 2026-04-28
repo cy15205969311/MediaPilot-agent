@@ -5,6 +5,10 @@ import type {
   ChatStreamEvent,
   LogoutResponse,
   MediaChatRequestPayload,
+  PasswordResetConfirmPayload,
+  PasswordResetConfirmResponse,
+  PasswordResetRequestApiResponse,
+  PasswordResetRequestPayload,
   RegisterPayload,
   ResetPasswordPayload,
   ResetPasswordResponse,
@@ -434,6 +438,52 @@ export async function login(username: string, password: string): Promise<AuthRes
   const authPayload = (await response.json()) as AuthResponse;
   persistAuthSession(authPayload);
   return authPayload;
+}
+
+export async function requestPasswordReset(
+  payload: PasswordResetRequestPayload,
+): Promise<PasswordResetRequestApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/auth/password-reset-request",
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    {
+      timeoutMs: 15000,
+      skipAuthRefresh: true,
+      attachAuth: false,
+    },
+  );
+
+  return (await response.json()) as PasswordResetRequestApiResponse;
+}
+
+export async function completePasswordReset(
+  payload: PasswordResetConfirmPayload,
+): Promise<PasswordResetConfirmResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/auth/password-reset",
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    {
+      timeoutMs: 15000,
+      skipAuthRefresh: true,
+      attachAuth: false,
+    },
+  );
+
+  return (await response.json()) as PasswordResetConfirmResponse;
 }
 
 export async function logoutAPI(): Promise<LogoutResponse | null> {

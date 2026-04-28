@@ -173,6 +173,7 @@ export function ChatFeed({
           <div
             key={item.id}
             className={`flex gap-3 ${item.role === "user" ? "justify-end" : "justify-start"}`}
+            data-testid={`chat-message-${item.role}`}
           >
             {item.role === "assistant" ? (
               <div
@@ -220,7 +221,10 @@ export function ChatFeed({
             </div>
 
             {item.role === "user" ? (
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-secondary-foreground">
+              <div
+                className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-secondary-foreground"
+                data-testid="chat-message-user-avatar"
+              >
                 {showUserAvatar ? (
                   <img
                     alt={`${userDisplayName} avatar`}

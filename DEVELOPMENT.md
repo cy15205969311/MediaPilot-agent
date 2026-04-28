@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.3`
-- Updated on: `2026-04-27`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration and search routing, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, documentation baseline, and verification baseline
+- Current version: `v1.13.7`
+- Updated on: `2026-04-28`
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, Playwright E2E browser baseline, documentation baseline, and verification baseline
 
 Document set:
 
@@ -42,7 +42,7 @@ The current baseline includes:
 
 1. `FastAPI` backend with `Pydantic v2` contracts.
 2. `React + Vite + TypeScript + Tailwind CSS` frontend workspace.
-3. JWT-based authentication with access token, refresh token, registration, login, session refresh, and server-side refresh-session revocation.
+3. JWT-based authentication with access token, refresh token, registration, login, password-reset request/completion, and server-side refresh-session revocation.
 4. Per-user thread ownership and tenant isolation.
 5. Per-thread dynamic `system_prompt` persistence.
 6. Provider-based SSE streaming chat flow.
@@ -53,7 +53,7 @@ The current baseline includes:
 11. User profile editing for `nickname`, `bio`, and `avatar_url`.
 12. Thread settings editing for persisted `title` and `system_prompt`.
 13. UTC-normalized backend timestamps plus frontend local rendering.
-14. Frontend login view, token storage, authenticated request interception, and local user cache sync.
+14. Frontend login view, password-reset request/reset views, token storage, authenticated request interception, and local user cache sync.
 15. Frontend new-thread setup flow with title and persona configuration.
 16. Authenticated upload storage under per-user object keys with local `/uploads` fallback.
 17. Upload metadata tracking with `UploadRecord`.
@@ -61,15 +61,17 @@ The current baseline includes:
 19. Frontend avatar upload and profile-preview sync.
 20. LangGraph branching orchestration with real vision-model OCR, structured search routing, mock-or-live web search support, safe degradation, and review/retry control.
 21. Thread-linked material upload tracking, backfill, and cleanup on thread deletion.
-22. Active session visibility and targeted device revocation.
+22. Active session visibility, targeted device revocation, and password-reset-triggered global session invalidation.
 23. Hourly scheduled abandoned-material cleanup via APScheduler across the active storage backend.
 24. Frontend material attachments are preserved from upload completion through optimistic chat bubbles and `/chat/stream` payloads.
-25. Automated backend tests for auth-protected SSE, history isolation, thread prompt updates, profile updates, avatar persistence, upload tracking, cleanup, upload retention, refresh rotation, logout revocation, session management, scheduler behavior, and LangGraph branching/search behavior.
+25. Automated backend tests for auth-protected SSE, history isolation, thread prompt updates, profile updates, avatar persistence, upload tracking, cleanup, upload retention, refresh rotation, logout revocation, password-reset recovery, session management, scheduler behavior, and LangGraph branching/search behavior.
 26. Frontend chat bubbles can now sync the authenticated user's avatar state and render user-facing avatars in a circular presentation with safe fallback behavior.
 27. FastAPI now supports environment-variable-driven CORS origin configuration for local frontend-backend integration.
 28. Vite development server now binds to `0.0.0.0` so devices on the same LAN can access the frontend workspace directly.
 29. Frontend workspace now supports persisted Light / Dark themes through CSS variables, semantic chat-bubble tokens, and root HTML theme classes.
 30. Shared storage client abstraction now supports either local disk or Aliyun OSS uploads, public URLs, and deletion.
+31. Playwright end-to-end browser coverage for auth, password reset, logout, new-thread setup, and streamed chat smoke flows.
+32. Extensible LangGraph Business Tools architecture with tool-call routing, local Python tool execution, and `<business_tool_context>` injection before drafting.
 
 ### 3.2 Out of Scope
 
@@ -78,10 +80,10 @@ The following capabilities are intentionally not production-complete yet:
 1. third-party SSO or enterprise identity providers
 2. access-token revocation lists, device fingerprints, or organization-wide session-management dashboards
 3. production observability, rate limiting, or audit logging
-4. advanced LangGraph workflows beyond the current branching vision/review baseline
-5. end-to-end browser automation tests
+4. deeper external business integrations beyond the current mock Business Tools baseline
 6. managed OSS lifecycle policies, signed URLs, CDN invalidation, or bucket-level governance
-7. advanced avatar processing such as cropping, compression, and CDN hosting
+7. real email/SMS delivery for password-reset links and broader account-recovery operations
+8. advanced avatar processing such as cropping, compression, and CDN hosting
 
 ## 4. Architecture Overview
 
@@ -243,6 +245,7 @@ omnimedia-agent/
 - `tailwindcss==4.1.12`
 - `@tailwindcss/vite==4.1.12`
 - `lucide-react==0.487.0`
+- `@playwright/test==1.59.1`
 
 ## 7. Environment and Startup
 
@@ -259,6 +262,7 @@ Current supported runtime variables:
 - `JWT_EXPIRE_MINUTES`
 - `JWT_ACCESS_EXPIRE_MINUTES`
 - `JWT_REFRESH_EXPIRE_DAYS`
+- `JWT_PASSWORD_RESET_EXPIRE_MINUTES`
 - `OMNIMEDIA_LLM_PROVIDER=mock|openai|compatible|langgraph|auto`
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
@@ -291,6 +295,7 @@ The committed `.env.example` now includes:
 - vision-model placeholders for multimodal OCR
 - optional Tavily search placeholders for real-time web retrieval
 - optional OSS storage placeholders with `auto`, `local`, and `oss` backend selection
+- password-reset token lifetime placeholder for local development
 - local SQLite and JWT defaults for development
 
 Current compatible-provider example:
@@ -307,6 +312,7 @@ JWT_SECRET_KEY=change-this-secret-in-production
 JWT_ALGORITHM=HS256
 JWT_ACCESS_EXPIRE_MINUTES=30
 JWT_REFRESH_EXPIRE_DAYS=7
+JWT_PASSWORD_RESET_EXPIRE_MINUTES=15
 ```
 
 Install:
@@ -373,6 +379,9 @@ alembic upgrade head
 | `POST` | `/api/v1/auth/login` | login and receive JWT |
 | `POST` | `/api/v1/auth/refresh` | refresh access token with refresh token |
 | `POST` | `/api/v1/auth/logout` | revoke current refresh session |
+| `POST` | `/api/v1/auth/password-reset-request` | request a short-lived password-reset token |
+| `POST` | `/api/v1/auth/password-reset` | reset password with token and revoke all active sessions |
+| `POST` | `/api/v1/auth/reset-password` | change current password while keeping only the current device session |
 | `GET` | `/api/v1/auth/sessions` | list active login devices for current user |
 | `DELETE` | `/api/v1/auth/sessions/{session_id}` | revoke a specific login device |
 | `PATCH` | `/api/v1/auth/profile` | update current user profile |
@@ -393,10 +402,11 @@ alembic upgrade head
 5. `logout` accepts JSON `refresh_token` and revokes the matching `RefreshSession`.
 6. `GET /api/v1/auth/sessions` returns only active, non-revoked, non-expired sessions for the current user.
 7. `DELETE /api/v1/auth/sessions/{session_id}` revokes an owned refresh session by ID.
-8. `PATCH /api/v1/auth/profile` MUST be called with a valid access token.
-9. `POST /api/v1/media/upload` MUST be called with a valid access token.
-10. Chat and history routes MUST include `Authorization: Bearer <access_token>`.
-11. Missing or invalid tokens return `401`.
+8. `POST /api/v1/auth/password-reset-request` and `POST /api/v1/auth/password-reset` do not require an access token.
+9. `POST /api/v1/auth/reset-password` and `PATCH /api/v1/auth/profile` MUST be called with a valid access token.
+10. `POST /api/v1/media/upload` MUST be called with a valid access token.
+11. Chat and history routes MUST include `Authorization: Bearer <access_token>`.
+12. Missing or invalid tokens return `401`.
 
 ### 8.2 Ownership Rules
 
@@ -454,6 +464,33 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 | --- | --- | --- |
 | `username` | `str` | yes |
 | `password` | `str` | yes |
+
+#### `PasswordResetRequestCreate`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `username` | `str` | yes | target username for recovery flow |
+
+#### `PasswordResetRequestResponse`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `accepted` | `true` | request accepted regardless of whether a matching user was found |
+| `expires_in_minutes` | `int` | reset token lifetime for the current environment |
+
+#### `PasswordResetConfirmRequest`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `token` | `str` | yes | short-lived password-reset JWT |
+| `new_password` | `str` | yes | replacement password, minimum `8` characters |
+
+#### `PasswordResetConfirmResponse`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `password_reset` | `true` | reset completed successfully |
+| `revoked_sessions` | `int` | number of previously active sessions that were revoked |
 
 #### `AuthTokenResponse`
 
@@ -692,8 +729,9 @@ Provider selection is controlled by `OMNIMEDIA_LLM_PROVIDER`:
 3. `ocr_node` when image materials are present
 4. `search_node` when the router decides the request needs live search context
 5. `generate_draft_node`
-6. `review_node`
-7. `format_artifact_node`
+6. `tool_execution_node` when `generate_draft_node` requests business tool calls
+7. `review_node`
+8. `format_artifact_node`
 
 Current execution rules:
 
@@ -702,12 +740,15 @@ Current execution rules:
 3. after parse, the graph conditionally routes to `ocr_node` only when image materials are present
 4. after parse or OCR, the graph conditionally routes to `search_node` only when `needs_search == true`
 5. `search_node` emits `web_search` tool events, prefers real Tavily search when configured, and otherwise falls back to deterministic mock search results
-6. `generate_draft_node` delegates drafting to the configured inner provider and injects XML-style `<image_context>` and `<search_context>` blocks into the user message when those contexts exist
-7. `review_node` emits `tool_call` progress, validates the draft against lightweight structural and persona constraints, and can retry generation up to `2` times
-8. only the accepted or max-retry draft is emitted downstream as `message` events, which keeps persisted assistant output aligned with the final visible draft
-9. `format_artifact_node` emits a `tool_call` event and produces the final `artifact`
-10. when the inner provider returns an invalid artifact payload, the graph falls back to a deterministic local artifact builder
-11. the graph preserves the external SSE contract so the route layer does not need special handling
+6. `generate_draft_node` first invokes a tool-aware planner created via `inner_provider.bind_tools(...)` when the provider supports it, and otherwise falls back to deterministic heuristic planning so Mock and test providers remain stable
+7. the planner appends `AIMessage` entries into `GraphState.messages`; if `AIMessage.tool_calls` are present, the graph routes to `tool_execution_node`, otherwise final drafting proceeds through the configured inner provider with XML-style `<image_context>`, `<search_context>`, and `<business_tool_context>` blocks injected when those contexts exist
+8. `tool_execution_node` emits `tool_call` progress, executes local Python tools from `app/services/tools.py`, stores `ToolMessage` results in graph state, and loops back to `generate_draft_node` until the planner stops requesting tools or `business_tool_max_iterations` is reached
+9. the current mock baseline supports sequential Business Tools such as `analyze_market_trends` followed by `generate_content_outline`, which enables a real ReAct-style "analyze first, draft later" loop before the final draft is streamed
+10. `review_node` emits `tool_call` progress, validates the draft against lightweight structural and persona constraints, and can retry generation up to `2` times
+11. only the accepted or max-retry draft is emitted downstream as `message` events, which keeps persisted assistant output aligned with the final visible draft
+12. `format_artifact_node` emits a `tool_call` event and produces the final `artifact`
+13. when the inner provider returns an invalid artifact payload, the graph falls back to a deterministic local artifact builder
+14. the graph preserves the external SSE contract so the route layer does not need special handling
 
 Superseding note for `v1.10.0`:
 
@@ -815,7 +856,7 @@ Current enforced boundaries:
 [frontend/src/app/App.tsx](/E:/omnimedia-agent/frontend/src/app/App.tsx) now provides:
 
 1. top-level authentication gate
-2. login/register card
+2. login/register card plus password-reset request and token-reset recovery views
 3. token-backed workspace shell
 4. new-thread modal with title and persona fields
 5. thread settings modal for editing persisted `title` and `system_prompt`
@@ -1003,10 +1044,13 @@ Current automated tests are located in:
 - [tests/test_chat.py](/E:/omnimedia-agent/tests/test_chat.py)
 - [tests/test_graph_search.py](/E:/omnimedia-agent/tests/test_graph_search.py)
 - [tests/test_graph_vision.py](/E:/omnimedia-agent/tests/test_graph_vision.py)
+- [tests/test_graph_tools.py](/E:/omnimedia-agent/tests/test_graph_tools.py)
 - [tests/test_oss.py](/E:/omnimedia-agent/tests/test_oss.py)
 - [tests/test_oss_client.py](/E:/omnimedia-agent/tests/test_oss_client.py)
 - [tests/test_config.py](/E:/omnimedia-agent/tests/test_config.py)
 - [tests/test_scheduler.py](/E:/omnimedia-agent/tests/test_scheduler.py)
+- [frontend/e2e/auth.spec.ts](/E:/omnimedia-agent/frontend/e2e/auth.spec.ts)
+- [frontend/e2e/chat.spec.ts](/E:/omnimedia-agent/frontend/e2e/chat.spec.ts)
 
 Covered cases:
 
@@ -1052,55 +1096,122 @@ Covered cases:
 40. local storage and Aliyun OSS clients both support direct stream-based uploads
 41. OSS client V4 auth and bucket wiring use the configured credential set
 42. OSS `.env` configuration reloads after file changes and reports missing required fields clearly
+43. password-reset request logs a short-lived local-development recovery link when the user exists
+44. token-based password reset revokes all active sessions for the user before they log back in
+45. invalid password-reset tokens are rejected without mutating the stored password
+46. Playwright auth coverage verifies browser registration/login token persistence, password-reset form transition, and logout local-storage cleanup
+47. Playwright workspace coverage verifies new-thread modal creation and streamed chat bubble rendering with user-avatar fallback
+48. Business Tool registry exports OpenAI-compatible function schemas and typed mock tool outputs
+49. LangGraph business-tool execution routes from draft generation to local tool execution and loops back with `<business_tool_context>` before review
 
-### 15.2 Latest Verification Result
+### 15.2 E2E Browser Automation
 
-The following checks were executed for the current `v1.13.3` storage-streaming and OSS-baseline change set on `2026-04-27` and passed:
+Frontend Playwright tests live under `frontend/e2e/` and use mocked API responses for deterministic browser smoke coverage without requiring a live backend service.
+
+Run from the frontend directory:
 
 ```bash
-python -m pytest tests/test_chat.py tests/test_graph_search.py tests/test_graph_vision.py tests/test_oss.py tests/test_oss_client.py tests/test_config.py tests/test_scheduler.py -q
+cd frontend
+npx playwright test
+```
+
+Interactive runner:
+
+```bash
+cd frontend
+npx playwright test --ui
+```
+
+The Playwright config starts the Vite dev server automatically with `npm run dev` and uses `http://localhost:5173` as `baseURL`.
+
+### 15.3 Latest Verification Result
+
+The following checks were executed for the current LangGraph Business Tools loop change set on `2026-04-28` and passed:
+
+```bash
+python -m pytest tests/test_graph_tools.py tests/test_graph_search.py tests/test_graph_vision.py -q
+python -m pytest tests/test_chat.py -q
+python -m pytest -q
 ```
 
 Observed result baseline:
 
-- backend targeted regression suite: 58 passed
-- LangGraph search routing, OCR enrichment, upload streaming, OSS cleanup, and scheduler behavior remain compatible with the current workflow baseline
+- Business Tool regression suite: 5 passed
+- LangGraph search/vision regression suites: 14 passed
+- chat route and SSE regression suite: 28 passed
+- full backend test suite: 66 passed
+- covered Business Tools flows: LangChain-style `bind_tools` adapter binding, structured mock trend output, autonomous tool consideration for planning requests, sequential `analyze_market_trends -> generate_content_outline` loopback, targeted single-tool title generation, `<business_tool_context>` injection, and default `pytest` collection constrained to `tests/` via `pytest.ini`
 
-### 15.3 Current Warning
+The previous Playwright E2E baseline remains: `5 passed` for auth, password reset, logout, new-thread setup, and streamed chat rendering.
+
+### 15.4 Current Warning
 
 Current tests still emit a deprecation warning from `httpx` used by `FastAPI TestClient` regarding the deprecated `app` shortcut. This does not block execution but SHOULD be cleaned up during future dependency maintenance.
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.3
+### 16.1 Completed in v1.13.7
 
 This version adds or solidifies:
 
-1. the upload route now validates file size while reading the incoming stream, rewinds the file, and then streams directly into the active storage backend
-2. `app/services/oss_client.py` now exposes a shared stream-upload contract for both local disk and Aliyun OSS storage clients
-3. local and OSS uploads continue to share one `UploadRecord` persistence path through backend-specific stored object keys and public URLs
-4. cleanup routines continue to delete physical files through the resolved storage backend before removing stale avatar or material records
-5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the active storage backend switch plus the required OSS environment variables
-6. backend regression coverage now explicitly includes direct stream-based local and OSS uploads plus OSS configuration reload behavior
+1. `BaseLLMProvider` now exposes optional `bind_tools(...)`, and both `OpenAIProvider` plus `CompatibleLLMProvider` adapt LangChain-style tool binding on top of their existing `AsyncOpenAI` clients.
+2. `LangGraphProvider` now initializes a provider-level tool planner with `inner_provider.bind_tools(get_business_tools())` when available, while preserving heuristic fallback for Mock/test providers.
+3. Business Tool planning now supports autonomous and sequential ReAct loops, so planning-heavy requests can proactively call `analyze_market_trends`, then `generate_content_outline`, and only then hand off to the final drafting provider.
+4. post-draft routing now inspects only the latest `AIMessage.tool_calls`, which prevents stale historical tool-call messages from causing recursive loopbacks.
+5. `pytest.ini` constrains default discovery to `tests/`, so `python -m pytest -q` no longer walks transient `uploads/` directories during collection.
+6. `tests/test_graph_tools.py`, `README.md`, and `DEVELOPMENT.md` now lock the sequential Business Tools baseline, title-only single-tool fallback, and the updated verification entrypoint.
 
-### 16.2 Current Non-Blocking Gaps
+### 16.2 Completed in v1.13.6
+
+This version adds or solidifies:
+
+1. `app/services/tools.py` defines typed LangChain Core Business Tools including `analyze_market_trends` and `generate_content_outline` with deterministic mock JSON outputs.
+2. `LangGraphProvider` now carries normalized tool-call state through `AIMessage` / `ToolMessage` compatible graph messages.
+3. `generate_draft_node` can request Business Tools before final drafting, route to `tool_execution_node`, and loop back with `<business_tool_context>` injected into the final draft request.
+4. `tool_execution_node` emits SSE `tool_call` progress events for `processing`, `completed`, and `failed` states while executing local Python tools.
+5. `tests/test_graph_tools.py` locks the tool schema export, mock tool output, and ReAct loopback behavior without requiring live model credentials.
+6. `README.md` and `DEVELOPMENT.md` now document the Business Tools architecture and preserve the mandatory documentation-update rule.
+
+### 16.3 Completed in v1.13.5
+
+This version adds or solidifies:
+
+1. `frontend/playwright.config.ts` defines the Playwright browser E2E baseline with `http://localhost:5173` as `baseURL` and an automatic `npm run dev` web server.
+2. `frontend/e2e/auth.spec.ts` covers registration/login token persistence, password-reset request-to-reset-form transition, and logout local-storage cleanup.
+3. `frontend/e2e/chat.spec.ts` covers new-thread modal creation and streamed chat rendering for user and assistant bubbles.
+4. `frontend/e2e/fixtures.ts` provides deterministic API mocks so browser smoke tests do not require a live backend during frontend regression runs.
+5. frontend components now expose stable accessibility labels and `data-testid` anchors for critical auth, workspace, composer, and chat-bubble assertions.
+6. `README.md` and `DEVELOPMENT.md` now document E2E setup, commands, coverage scope, and the mandatory documentation-update rule for future changes.
+
+### 16.4 Completed in v1.13.4
+
+This version adds or solidifies:
+
+1. `app/services/auth.py` now supports short-lived password-reset JWT creation and verification through a dedicated `reset` token type
+2. `app/api/v1/auth.py` now exposes `password-reset-request` and `password-reset` routes, logs a local-development recovery link, and revokes every active session after a successful token-based reset
+3. the authenticated `reset-password` route remains available for in-session password changes while preserving only the current device session
+4. the frontend auth card now supports forgot-password request and token-based reset flows, and it clears any cached local session data after a successful recovery reset
+5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the password-reset capability, reset-token lifetime, and global forced sign-out behavior
+6. regression coverage and frontend production build validation now explicitly include account-recovery and password-reset compatibility
+
+### 16.5 Current Non-Blocking Gaps
 
 The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 
-1. access tokens are now tied to the refresh-session chain, but there is still no separate global blacklist or password-reset invalidation flow
-2. no password reset or account recovery flow
+1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
+2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
 3. upload cleanup now covers avatars plus local and OSS-backed material retention, but still lacks managed bucket lifecycle policies, signed URLs, and CDN governance
-4. LangGraph now has branching, real vision integration, search routing, and review retry control, but still lacks deeper retrieval and external business tool execution
-5. no E2E tests covering browser login, stream replay, thread settings, thread mutations, avatar upload, logout flow, refresh rotation, session management, and LangGraph flows
+4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, and sequential mock Business Tools, but still lacks deeper retrieval and live external business-system integrations
+5. E2E smoke coverage now exists for auth, password reset, logout, new-thread setup, and streamed chat rendering, but still needs expansion for replay, uploads, avatar updates, refresh rotation, session management, thread settings, and full LangGraph flows
 
 ## 17. Recommended Next Steps
 
 The next engineering steps SHOULD prioritize:
 
-1. deepen LangGraph with retrieval and business-grade tool nodes beyond the current vision + search + review baseline
+1. deepen LangGraph retrieval and replace the current sequential mock Business Tools baseline with live external business-system integrations
 2. add managed OSS lifecycle rules, signed delivery URLs, and richer production retention controls on top of the current backend-level cleanup
-3. end-to-end browser coverage for auth, replay, uploads, avatar updates, refresh flows, session management, thread settings, and SSE flows
-4. strengthen account recovery, password reset, and broader access-token revocation strategy
+3. expand end-to-end browser coverage beyond the initial Playwright smoke suite to include replay, uploads, avatar updates, refresh flows, session management, thread settings, and deeper SSE/LangGraph flows
+4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain
 
 ## 18. Change Control Principle
 
@@ -1111,6 +1222,6 @@ When updating this project:
 3. new SSE event types MUST be added to this document before being treated as stable
 4. persistence changes MUST include an Alembic migration or an explicit migration note
 5. frontend UX rules that affect message timing or session state SHOULD be documented here
-6. this document SHOULD be updated in the same change set as the implementation
-7. root-level onboarding or usage changes SHOULD be reflected in `README.md` in the same change set
-8. any completed feature, contract, workflow, persistence, or important UI change MUST update at least one repository document, and SHOULD update both `README.md` and `DEVELOPMENT.md` when both onboarding and engineering baselines are affected
+6. every implementation, test-baseline, workflow, or user-facing behavior change MUST update both `README.md` and `DEVELOPMENT.md` in the same change set when relevant
+7. this document SHOULD be updated in the same change set as the implementation
+8. root-level onboarding or usage changes SHOULD be reflected in `README.md` in the same change set

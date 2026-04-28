@@ -6,12 +6,14 @@ import logging
 import mimetypes
 import os
 import traceback
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
 import httpx
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from openai import (
@@ -49,6 +51,7 @@ from app.services.providers import (
     MockLLMProvider,
     OpenAIProvider,
 )
+from app.services.tools import execute_business_tool, get_business_tools
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -126,6 +129,10 @@ class GraphState(TypedDict, total=False):
     needs_ocr: bool
     needs_search: bool
     next_route: str
+    messages: list[BaseMessage]
+    pending_tool_calls: list[dict[str, object]]
+    business_tool_results: list[str]
+    business_tool_iteration: int
 
 
 class SearchRouteDecision(BaseModel):
@@ -162,6 +169,7 @@ class LangGraphProvider(BaseLLMProvider):
         vision_model: str | None = None,
         vision_timeout_seconds: float | None = None,
         search_timeout_seconds: float | None = None,
+        business_tool_max_iterations: int = 2,
     ) -> None:
         load_environment()
         self.inner_provider = inner_provider or create_langgraph_inner_provider()
@@ -180,6 +188,9 @@ class LangGraphProvider(BaseLLMProvider):
             os.getenv("SEARCH_TIMEOUT_SECONDS", "20"),
         )
         self.search_request_timeout = _build_http_timeout(self.search_timeout_seconds)
+        self.business_tools = get_business_tools()
+        self.bound_business_tool_llm = self._bind_business_tool_llm()
+        self.business_tool_max_iterations = business_tool_max_iterations
         self._vision_client: AsyncOpenAI | None = None
         logger.info(
             "LangGraph vision client configured vision_model=%s text_model=%s base_url=%s",
@@ -188,6 +199,25 @@ class LangGraphProvider(BaseLLMProvider):
             self.vision_base_url or "<default>",
         )
         self.graph = self._build_graph()
+
+    def _bind_business_tool_llm(self):
+        if not self.business_tools:
+            return None
+        try:
+            return self.inner_provider.bind_tools(self.business_tools)
+        except NotImplementedError:
+            logger.info(
+                "Inner provider %s does not expose bind_tools; LangGraph business tools will use heuristic routing.",
+                type(self.inner_provider).__name__,
+            )
+            return None
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Failed to bind business tools on inner provider %s: %s",
+                type(self.inner_provider).__name__,
+                exc,
+            )
+            return None
 
     async def generate_stream(
         self,
@@ -231,6 +261,10 @@ class LangGraphProvider(BaseLLMProvider):
             "needs_ocr": False,
             "needs_search": False,
             "next_route": "parse_materials_node",
+            "messages": [],
+            "pending_tool_calls": [],
+            "business_tool_results": [],
+            "business_tool_iteration": 0,
         }
 
         try:
@@ -261,6 +295,7 @@ class LangGraphProvider(BaseLLMProvider):
         graph.add_node("ocr_node", self._ocr_node)
         graph.add_node("search_node", self._search_node)
         graph.add_node("generate_draft_node", self._generate_draft_node)
+        graph.add_node("tool_execution_node", self._tool_execution_node)
         graph.add_node("review_node", self._review_node)
         graph.add_node("format_artifact_node", self._format_artifact_node)
 
@@ -288,7 +323,15 @@ class LangGraphProvider(BaseLLMProvider):
             },
         )
         graph.add_edge("search_node", "generate_draft_node")
-        graph.add_edge("generate_draft_node", "review_node")
+        graph.add_conditional_edges(
+            "generate_draft_node",
+            self._route_after_generate_draft,
+            {
+                "tool_execution_node": "tool_execution_node",
+                "review_node": "review_node",
+            },
+        )
+        graph.add_edge("tool_execution_node", "generate_draft_node")
         graph.add_conditional_edges(
             "review_node",
             self._route_after_review,
@@ -486,13 +529,26 @@ class LangGraphProvider(BaseLLMProvider):
         writer = get_stream_writer()
         _emit_tool_call(writer, name="generate_draft", status="processing")
         logger.info(
-            "langgraph node=generate_draft thread_id=%s retry_count=%s validation_errors=%s",
+            "langgraph node=generate_draft thread_id=%s retry_count=%s validation_errors=%s business_tool_iteration=%s",
             state["request"].thread_id,
             state.get("retry_count", 0),
             len(state.get("validation_errors", [])),
+            state.get("business_tool_iteration", 0),
         )
 
         request = state["request"]
+        pending_tool_calls, planner_message = await self._request_business_tool_calls(state)
+        updated_messages = list(state.get("messages", []))
+        if planner_message is not None:
+            updated_messages.append(planner_message)
+        if pending_tool_calls:
+            return {
+                "pending_tool_calls": pending_tool_calls,
+                "messages": updated_messages,
+                "business_tool_iteration": state.get("business_tool_iteration", 0) + 1,
+                "current_step": "generate_draft:tool_calls_requested",
+            }
+
         draft_system_prompt = _build_draft_system_prompt(
             state=state,
         )
@@ -501,6 +557,7 @@ class LangGraphProvider(BaseLLMProvider):
             materials_parsed=state.get("materials_parsed", []),
             vision_clues=state.get("ocr_clues", []),
             search_results=state.get("search_results", ""),
+            business_tool_results=state.get("business_tool_results", []),
             validation_errors=state.get("validation_errors", []),
             system_prompt=draft_system_prompt,
         )
@@ -545,7 +602,90 @@ class LangGraphProvider(BaseLLMProvider):
             "current_draft": "".join(draft_parts),
             "artifact_candidate": latest_artifact,
             "error": latest_error,
+            "messages": updated_messages,
             "current_step": "generate_draft:completed",
+        }
+
+    def _route_after_generate_draft(self, state: GraphState) -> str:
+        pending_tool_calls = state.get("pending_tool_calls") or _get_latest_ai_tool_calls(state)
+        if pending_tool_calls:
+            logger.info(
+                "langgraph route=after_generate_draft thread_id=%s next=%s tool_calls=%s",
+                state["request"].thread_id,
+                "tool_execution_node",
+                len(pending_tool_calls),
+            )
+            return "tool_execution_node"
+        logger.info(
+            "langgraph route=after_generate_draft thread_id=%s next=%s",
+            state["request"].thread_id,
+            "review_node",
+        )
+        return "review_node"
+
+    async def _tool_execution_node(self, state: GraphState) -> GraphState:
+        writer = get_stream_writer()
+        pending_tool_calls = list(state.get("pending_tool_calls") or _get_latest_ai_tool_calls(state))
+        tool_results = list(state.get("business_tool_results", []))
+        messages = list(state.get("messages", []))
+
+        logger.info(
+            "langgraph node=tool_execution thread_id=%s tool_calls=%s",
+            state["request"].thread_id,
+            len(pending_tool_calls),
+        )
+
+        for tool_call in pending_tool_calls:
+            tool_name = str(tool_call.get("name", ""))
+            raw_args = tool_call.get("args", {})
+            tool_args = raw_args if isinstance(raw_args, dict) else {}
+            tool_call_id = str(tool_call.get("id") or f"call_{uuid.uuid4().hex}")
+            _emit_tool_call(
+                writer,
+                name=tool_name,
+                status="processing",
+                message=f"\u6b63\u5728\u8c03\u7528\u4e1a\u52a1\u5de5\u5177: {tool_name}...",
+            )
+            try:
+                result = execute_business_tool(tool_name, tool_args)
+                formatted_result = _format_business_tool_result(tool_name, result)
+                tool_results.append(formatted_result)
+                messages.append(
+                    ToolMessage(
+                        content=result,
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                    )
+                )
+                _emit_tool_call(
+                    writer,
+                    name=tool_name,
+                    status="completed",
+                    message=f"\u4e1a\u52a1\u5de5\u5177\u8c03\u7528\u5b8c\u6210: {tool_name}",
+                )
+            except Exception as exc:  # pragma: no cover - defensive path
+                logger.exception("Business tool execution failed: %s", exc)
+                error_text = f"\u4e1a\u52a1\u5de5\u5177 {tool_name} \u8c03\u7528\u5931\u8d25\uff1a{exc}"
+                tool_results.append(_format_business_tool_result(tool_name, error_text))
+                messages.append(
+                    ToolMessage(
+                        content=error_text,
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                    )
+                )
+                _emit_tool_call(
+                    writer,
+                    name=tool_name,
+                    status="failed",
+                    message=error_text,
+                )
+
+        return {
+            "business_tool_results": tool_results,
+            "messages": messages,
+            "pending_tool_calls": [],
+            "current_step": "tool_execution:completed",
         }
 
     async def _review_node(self, state: GraphState) -> GraphState:
@@ -657,6 +797,61 @@ class LangGraphProvider(BaseLLMProvider):
             "validation_errors": validation_errors,
             "current_step": "format_artifact:completed",
         }
+
+    async def _request_business_tool_calls(
+        self,
+        state: GraphState,
+    ) -> tuple[list[dict[str, object]], AIMessage | None]:
+        request = state["request"]
+        if not self.business_tools:
+            return [], None
+        if state.get("pending_tool_calls"):
+            return [], None
+        if state.get("retry_count", 0) > 0:
+            return [], None
+        if state.get("business_tool_iteration", 0) >= self.business_tool_max_iterations:
+            return [], None
+        if not _should_attempt_business_tool_loop(state):
+            return [], None
+
+        if self.bound_business_tool_llm is not None:
+            try:
+                tool_calls, ai_message = await self._request_llm_business_tool_calls(state)
+                if tool_calls:
+                    return tool_calls, ai_message
+            except Exception as exc:  # pragma: no cover - model/tool fallback boundary
+                logger.warning(
+                    "Business tool LLM decision failed for thread_id=%s, falling back to heuristic: %s",
+                    request.thread_id,
+                    exc,
+                )
+
+        tool_calls = _infer_business_tool_calls(state)
+        if not tool_calls:
+            return [], None
+        return tool_calls, _build_tool_call_ai_message(tool_calls)
+
+    async def _request_llm_business_tool_calls(
+        self,
+        state: GraphState,
+    ) -> tuple[list[dict[str, object]], AIMessage]:
+        if self.bound_business_tool_llm is None:
+            raise RuntimeError("Business tool LLM is not bound.")
+        request = state["request"]
+        ai_message = await self.bound_business_tool_llm.ainvoke(
+            _build_business_tool_router_messages(state),
+        )
+        normalized_calls: list[dict[str, object]] = []
+        for raw_call in ai_message.tool_calls or []:
+            normalized_call = _normalize_business_tool_call(raw_call)
+            if normalized_call is not None:
+                normalized_calls.append(normalized_call)
+        logger.info(
+            "langgraph business tool decision thread_id=%s tool_calls=%s",
+            request.thread_id,
+            [call["name"] for call in normalized_calls],
+        )
+        return normalized_calls, ai_message
 
     async def _decide_search_route(self, request: MediaChatRequest) -> SearchRouteDecision:
         if self.route_analyzer is not None:
@@ -979,11 +1174,272 @@ def _parse_materials(request: MediaChatRequest) -> tuple[list[str], bool]:
     return parsed, needs_ocr
 
 
+
+
+BUSINESS_TOOL_TRIGGER_KEYWORDS = (
+    "\u5e02\u573a\u70ed\u8bcd",
+    "\u7ade\u54c1\u70ed\u8bcd",
+    "\u70ed\u8bcd",
+    "\u6d41\u91cf\u6570\u636e",
+    "\u5e02\u573a\u8d8b\u52bf",
+    "\u4e1a\u52a1\u5de5\u5177",
+    "\u5148\u62c9\u53d6",
+    "\u62c9\u53d6\u4e00\u4e0b",
+    "tool",
+    "market trend",
+    "keyword",
+)
+
+BUSINESS_TOOL_AUTONOMOUS_KEYWORDS = (
+    "\u5c0f\u7ea2\u4e66",
+    "\u95f2\u9c7c",
+    "\u6587\u65c5",
+    "\u63a2\u5e97",
+    "\u6559\u8f85",
+    "\u6807\u9898",
+    "\u7b56\u5212",
+    "\u7b14\u8bb0",
+    "\u9009\u9898",
+)
+
+BUSINESS_TOOL_OUTLINE_KEYWORDS = (
+    "\u7b56\u5212",
+    "\u5927\u7eb2",
+    "\u63d0\u7eb2",
+    "\u7ed3\u6784",
+    "\u7b14\u8bb0",
+    "\u65b9\u6848",
+    "\u5199\u4e00\u7bc7",
+    "\u5185\u5bb9\u89c4\u5212",
+)
+
+
+def _should_consider_business_tools(request: MediaChatRequest) -> bool:
+    message = request.message.lower()
+    if any(keyword.lower() in message for keyword in BUSINESS_TOOL_TRIGGER_KEYWORDS):
+        return True
+    if request.task_type not in {TaskType.CONTENT_GENERATION, TaskType.TOPIC_PLANNING}:
+        return False
+    return any(keyword.lower() in message for keyword in BUSINESS_TOOL_AUTONOMOUS_KEYWORDS)
+
+
+def _should_attempt_business_tool_loop(state: GraphState) -> bool:
+    if _get_called_business_tool_names(state):
+        return True
+    return _should_consider_business_tools(state["request"])
+
+
+def _infer_business_tool_calls(state: GraphState) -> list[dict[str, object]]:
+    request = state["request"]
+    called_tools = _get_called_business_tool_names(state)
+
+    if "analyze_market_trends" not in called_tools and _should_consider_business_tools(request):
+        return [
+            {
+                "id": f"call_{uuid.uuid4().hex}",
+                "name": "analyze_market_trends",
+                "args": {
+                    "platform": _infer_business_platform(request),
+                    "category": _infer_business_category(request),
+                },
+            }
+        ]
+
+    if "generate_content_outline" not in called_tools and _should_request_outline_tool(
+        state,
+        called_tools=called_tools,
+    ):
+        return [
+            {
+                "id": f"call_{uuid.uuid4().hex}",
+                "name": "generate_content_outline",
+                "args": {
+                    "topic": _infer_business_topic(request),
+                    "audience": _infer_business_audience(request),
+                },
+            }
+        ]
+    return []
+
+
+def _infer_business_platform(request: MediaChatRequest) -> str:
+    message = request.message
+    if "\u95f2\u9c7c" in message or "xianyu" in message.lower():
+        return "xianyu"
+    if "\u6296\u97f3" in message or request.platform.value == "douyin":
+        return "douyin"
+    return request.platform.value
+
+
+def _infer_business_category(request: MediaChatRequest) -> str:
+    message = request.message
+    if any(keyword in message for keyword in ("\u6587\u65c5", "\u63a2\u5e97", "\u5468\u8fb9", "\u798f\u5dde", "\u65c5\u6e38", "Citywalk")):
+        return "\u5730\u57df\u6587\u65c5"
+    if any(keyword in message for keyword in ("\u6559\u8f85", "\u521d\u4e2d", "\u8d44\u6599", "\u6559\u6750", "\u8bd5\u5377")):
+        return "\u6559\u8f85\u8d44\u6599"
+    if any(keyword in message for keyword in ("\u672c\u5730\u751f\u6d3b", "\u95e8\u5e97", "\u5230\u5e97")):
+        return "\u672c\u5730\u751f\u6d3b"
+    return "\u5185\u5bb9\u8fd0\u8425"
+
+
+def _infer_business_topic(request: MediaChatRequest) -> str:
+    message = request.message.strip()
+    if message:
+        return message
+    return f"{request.platform.value} {request.task_type.value}"
+
+
+def _infer_business_audience(request: MediaChatRequest) -> str:
+    message = request.message
+    if any(keyword in message for keyword in ("\u5bb6\u957f", "\u521d\u4e2d", "\u6559\u8f85", "\u6559\u6750")):
+        return "\u521d\u4e2d\u5bb6\u957f\u4e0e\u6559\u8f85\u8d2d\u4e70\u4eba\u7fa4"
+    if any(keyword in message for keyword in ("\u6587\u65c5", "\u63a2\u5e97", "\u5468\u8fb9", "Citywalk", "\u65c5\u6e38")):
+        return "\u5468\u672b\u77ed\u9014\u6e38\u5ba2\u4e0e\u672c\u5730\u751f\u6d3b\u4eba\u7fa4"
+    return "\u6cdb\u5185\u5bb9\u6d88\u8d39\u4eba\u7fa4"
+
+
+def _should_request_outline_tool(
+    state: GraphState,
+    *,
+    called_tools: set[str] | None = None,
+) -> bool:
+    request = state["request"]
+    normalized_called_tools = called_tools or _get_called_business_tool_names(state)
+    if "generate_content_outline" in normalized_called_tools:
+        return False
+    if request.task_type == TaskType.TOPIC_PLANNING:
+        return True
+    message = request.message.lower()
+    if not any(keyword.lower() in message for keyword in BUSINESS_TOOL_OUTLINE_KEYWORDS):
+        return False
+    return "analyze_market_trends" in normalized_called_tools
+
+
+def _get_called_business_tool_names(state: GraphState) -> set[str]:
+    names: set[str] = set()
+    for message in state.get("messages", []):
+        if isinstance(message, ToolMessage) and message.name:
+            names.add(str(message.name))
+    return names
+
+
+def _get_latest_ai_tool_calls(state: GraphState) -> list[dict[str, object]]:
+    messages = state.get("messages", [])
+    if not messages:
+        return []
+    message = messages[-1]
+    if isinstance(message, AIMessage) and message.tool_calls:
+        normalized_calls: list[dict[str, object]] = []
+        for raw_call in message.tool_calls:
+            normalized_call = _normalize_business_tool_call(raw_call)
+            if normalized_call is not None:
+                normalized_calls.append(normalized_call)
+        return normalized_calls
+    return []
+
+
+def _build_tool_call_ai_message(tool_calls: list[dict[str, object]]) -> AIMessage:
+    normalized_tool_calls = [
+        {
+            "name": str(call["name"]),
+            "args": call.get("args", {}),
+            "id": str(call["id"]),
+            "type": "tool_call",
+        }
+        for call in tool_calls
+    ]
+    return AIMessage(content="", tool_calls=normalized_tool_calls)
+
+
+def _build_business_tool_router_messages(state: GraphState) -> list[BaseMessage]:
+    return [
+        SystemMessage(
+            content=(
+                "You are the business-tool router inside the MediaPilot LangGraph workflow. "
+                "Call a tool only when the user explicitly needs market keywords, competitor trends, "
+                "category traffic signals, or outline planning data. "
+                "If a prior tool result already answers the need, stop calling tools."
+            )
+        ),
+        HumanMessage(content=_build_business_tool_decision_prompt(state)),
+        *state.get("messages", []),
+    ]
+
+
+def _build_business_tool_decision_prompt(state: GraphState) -> str:
+    request = state["request"]
+    sections = [
+        f"\u5e73\u53f0\uff1a{request.platform.value}",
+        f"\u4efb\u52a1\u7c7b\u578b\uff1a{request.task_type.value}",
+        f"\u7528\u6237\u8bf7\u6c42\uff1a{request.message}",
+    ]
+    materials = state.get("materials_parsed", [])
+    if materials:
+        sections.append("\u7d20\u6750\u89e3\u6790\uff1a\n" + "\n".join(materials))
+    search_results = state.get("search_results", "").strip()
+    if search_results:
+        sections.append("\u641c\u7d22\u4e0a\u4e0b\u6587\uff1a\n" + search_results)
+    return "\n\n".join(sections)
+
+
+def _normalize_business_tool_call(raw_call: object) -> dict[str, object] | None:
+    if isinstance(raw_call, dict) and "name" in raw_call and "args" in raw_call:
+        tool_call_id = str(raw_call.get("id", "")) or f"call_{uuid.uuid4().hex}"
+        return {
+            "id": tool_call_id,
+            "name": str(raw_call.get("name", "")).strip(),
+            "args": raw_call.get("args", {}) if isinstance(raw_call.get("args", {}), dict) else {},
+        }
+
+    function = getattr(raw_call, "function", None)
+    if function is None and isinstance(raw_call, dict):
+        function = raw_call.get("function")
+    if function is None:
+        return None
+
+    if isinstance(function, dict):
+        name = str(function.get("name", "")).strip()
+        raw_arguments = function.get("arguments", {})
+    else:
+        name = str(getattr(function, "name", "")).strip()
+        raw_arguments = getattr(function, "arguments", {})
+    if not name:
+        return None
+
+    if isinstance(raw_arguments, str):
+        try:
+            arguments = json.loads(raw_arguments) if raw_arguments.strip() else {}
+        except json.JSONDecodeError:
+            arguments = {}
+    elif isinstance(raw_arguments, dict):
+        arguments = raw_arguments
+    else:
+        arguments = {}
+
+    tool_call_id = ""
+    if isinstance(raw_call, dict):
+        tool_call_id = str(raw_call.get("id", ""))
+    else:
+        tool_call_id = str(getattr(raw_call, "id", ""))
+    if not tool_call_id:
+        tool_call_id = f"call_{uuid.uuid4().hex}"
+
+    return {"id": tool_call_id, "name": name, "args": arguments}
+
+
+def _format_business_tool_result(tool_name: str, result: str) -> str:
+    return (
+        f"<business_tool_result name=\"{tool_name}\">\n"
+        f"{result.strip()}\n"
+        "</business_tool_result>"
+    )
+
 def _build_enriched_request(
     *,
     request: MediaChatRequest,
     materials_parsed: list[str],
     search_results: str,
+    business_tool_results: list[str],
     validation_errors: list[str],
     system_prompt: str | None,
 ) -> MediaChatRequest:
@@ -1017,16 +1473,24 @@ def _build_enriched_draft_request(
     materials_parsed: list[str],
     vision_clues: list[str],
     search_results: str,
+    business_tool_results: list[str],
     validation_errors: list[str],
     system_prompt: str | None,
 ) -> MediaChatRequest:
     sections: list[str] = []
 
     if materials_parsed:
-        sections.append("已解析素材要点：\n" + "\n".join(materials_parsed))
+        sections.append("\u5df2\u89e3\u6790\u7d20\u6750\u8981\u70b9\uff1a\n" + "\n".join(materials_parsed))
+    if business_tool_results:
+        sections.append(
+            "\u4e1a\u52a1\u5de5\u5177\u8fd4\u56de\u7ed3\u679c\uff1a\n"
+            "<business_tool_context>\n"
+            + "\n".join(business_tool_results)
+            + "\n</business_tool_context>"
+        )
     if validation_errors:
         sections.append(
-            "上一轮审查建议（本轮必须修正）：\n"
+            "\u4e0a\u4e00\u8f6e\u5ba1\u67e5\u5efa\u8bae\uff08\u672c\u8f6e\u5fc5\u987b\u4fee\u6b63\uff09\uff1a\n"
             + "\n".join(f"- {item}" for item in validation_errors)
         )
 

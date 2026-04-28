@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -13,6 +14,10 @@ from app.models.schemas import (
     AuthTokenResponse,
     LogoutRequest,
     LogoutResponse,
+    PasswordResetConfirmRequest,
+    PasswordResetConfirmResponse,
+    PasswordResetRequestCreate,
+    PasswordResetRequestResponse,
     RefreshTokenRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -23,8 +28,10 @@ from app.models.schemas import (
 )
 from app.services.auth import (
     DecodedToken,
+    JWT_PASSWORD_RESET_EXPIRE_MINUTES,
     REFRESH_TOKEN_TYPE,
     authenticate_user,
+    create_password_reset_token,
     decode_token_payload,
     extract_client_ip,
     extract_device_info,
@@ -38,12 +45,14 @@ from app.services.auth import (
     revoke_other_refresh_sessions,
     revoke_refresh_session,
     revoke_refresh_session_by_id,
+    verify_password_reset_token,
     verify_password,
     validate_refresh_session,
 )
 from app.services.persistence import cleanup_orphaned_avatars
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 def _build_auth_response(
@@ -228,6 +237,74 @@ async def logout(
         ) from exc
 
     return LogoutResponse()
+
+
+@router.post(
+    "/password-reset-request",
+    response_model=PasswordResetRequestResponse,
+)
+async def request_password_reset(
+    payload: PasswordResetRequestCreate,
+    db: Session = Depends(get_db),
+) -> PasswordResetRequestResponse:
+    username = normalize_username(payload.username)
+    if not username:
+        raise HTTPException(status_code=400, detail="用户名不能为空。")
+
+    user = get_user_by_username(db, username)
+    if user is not None:
+        reset_token = create_password_reset_token(user.username)
+        reset_link = f"http://127.0.0.1:5173/?reset_token={reset_token}"
+        logger.info(
+            "Password reset requested username=%s reset_link=%s",
+            user.username,
+            reset_link,
+        )
+    else:
+        logger.info("Password reset requested for unknown username=%s", username)
+
+    return PasswordResetRequestResponse(
+        expires_in_minutes=JWT_PASSWORD_RESET_EXPIRE_MINUTES,
+    )
+
+
+@router.post("/password-reset", response_model=PasswordResetConfirmResponse)
+async def password_reset_by_token(
+    payload: PasswordResetConfirmRequest,
+    db: Session = Depends(get_db),
+) -> PasswordResetConfirmResponse:
+    if not payload.new_password:
+        raise HTTPException(status_code=400, detail="新密码不能为空。")
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=400, detail="新密码至少需要 8 个字符。")
+
+    username = verify_password_reset_token(payload.token)
+    if not username:
+        raise HTTPException(status_code=400, detail="重置令牌无效或已过期。")
+
+    user = get_user_by_username(db, username)
+    if user is None:
+        raise HTTPException(status_code=400, detail="重置令牌无效或已过期。")
+    if verify_password(payload.new_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="新密码不能与当前密码相同。")
+
+    user.hashed_password = hash_password(payload.new_password)
+
+    try:
+        revoked_sessions = revoke_other_refresh_sessions(
+            db,
+            user_id=user.id,
+            keep_session_jti=None,
+        )
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="重置密码失败，请稍后重试。",
+        ) from exc
+
+    return PasswordResetConfirmResponse(revoked_sessions=revoked_sessions)
 
 
 @router.post("/reset-password", response_model=ResetPasswordResponse)

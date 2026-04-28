@@ -192,6 +192,7 @@ export function Composer({
             value={message}
           />
           <button
+            aria-label="发送消息"
             className="absolute bottom-4 right-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-md transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={!canSubmit}
             onClick={handleSubmit}

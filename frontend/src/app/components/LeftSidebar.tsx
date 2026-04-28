@@ -143,6 +143,7 @@ export function LeftSidebar({
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-foreground">最近会话</h3>
             <button
+              aria-label="新建会话"
               className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
               onClick={onCreateThread}
               type="button"

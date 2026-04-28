@@ -9,20 +9,25 @@ MediaPilot Agent 是一个面向新媒体内容运营场景的智能工作台，
 - 素材上传、视觉分析与结构化内容生成
 - 线程化会话、用户资料、设备会话与素材持久化
 - Light / Dark 双主题切换
+- Playwright 端到端浏览器自动化测试基线
+- LangGraph ReAct 业务工具调用、顺序多工具规划与可扩展业务工具节点
 
 这套主题系统基于 CSS 变量和 `ThemeProvider` 实现，支持在工作台顶部一键切换 Light / Dark，并会将用户偏好保存到本地 `localStorage`。
 
 ## 2. 当前核心能力
 
 - 用户注册、登录、刷新令牌、退出登录
+- 忘记密码、密码重置与重置后全局设备强制下线
 - 线程会话创建、历史回放、重命名、删除
 - 用户资料编辑，包括昵称、简介与头像上传
 - 设备会话查看与定向下线
 - 素材上传、持久化跟踪与本地 / OSS 双后端存储
-- LangGraph 多模态工作流与联网热点检索
+- LangGraph 多模态工作流、联网热点检索与 ReAct 业务工具调用
+- LangGraph 业务工具节点，可通过 `bind_tools` 顺序调用本地 Python 工具，拉取类目热词与内容大纲 mock 数据后再生成最终草稿
 - 图片素材 OCR / 视觉理解 / 搜索上下文增强
 - 结构化内容产物生成与前端渲染
 - 工作台全局主题切换与主题偏好持久化
+- Playwright 覆盖注册/登录、密码重置、登出、新建会话和流式对话冒烟链路
 
 ## 3. 技术栈
 
@@ -33,6 +38,7 @@ MediaPilot Agent 是一个面向新媒体内容运营场景的智能工作台，
 - SQLAlchemy
 - Alembic
 - LangGraph
+- LangChain Core
 - OpenAI Compatible API / DashScope Compatible API
 - SQLite
 
@@ -43,6 +49,7 @@ MediaPilot Agent 是一个面向新媒体内容运营场景的智能工作台，
 - TypeScript
 - Tailwind CSS v4
 - Lucide React
+- Playwright
 
 ## 4. 快速开始
 
@@ -65,6 +72,13 @@ cd frontend
 npm install
 ```
 
+首次运行 Playwright E2E 前安装浏览器：
+
+```bash
+cd frontend
+npx playwright install chromium
+```
+
 ### 4.3 环境变量
 
 先复制模板：
@@ -80,6 +94,7 @@ copy .env.example .env
 - 可选联网搜索配置（如 `TAVILY_API_KEY`）
 - 可选对象存储配置（如 `OMNIMEDIA_STORAGE_BACKEND`、`OSS_*`）
 - JWT 配置
+- 可选密码重置令牌时效配置（如 `JWT_PASSWORD_RESET_EXPIRE_MINUTES`）
 - 数据库连接配置
 - 本地联调使用的 `CORS_ALLOWED_ORIGINS`
 
@@ -165,11 +180,27 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
+默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
+
 执行前端构建：
 
 ```bash
 cd frontend
 npm run build
+```
+
+执行前端 E2E 自动化测试：
+
+```bash
+cd frontend
+npx playwright test
+```
+
+打开 Playwright 可视化测试面板：
+
+```bash
+cd frontend
+npx playwright test --ui
 ```
 
 ## 8. 文档说明
@@ -181,4 +212,4 @@ npm run build
 - `DEVELOPMENT.md`
   - 面向开发与维护的工程基线、接口约束、实现状态与变更规则
 
-后续每次完成功能、接口、持久化、流程或重要 UI 变更时，都应同步更新相关文档，确保仓库文档与代码保持一致。
+后续每次完成功能、接口、持久化、流程、测试基线或重要 UI 变更时，都必须同步更新 `README.md` 与 `DEVELOPMENT.md` 中相关章节，确保仓库文档与代码保持一致。

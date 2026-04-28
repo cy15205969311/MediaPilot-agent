@@ -26,9 +26,13 @@ JWT_ACCESS_EXPIRE_MINUTES = int(
     os.getenv("JWT_ACCESS_EXPIRE_MINUTES", os.getenv("JWT_EXPIRE_MINUTES", "30")),
 )
 JWT_REFRESH_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "7"))
+JWT_PASSWORD_RESET_EXPIRE_MINUTES = int(
+    os.getenv("JWT_PASSWORD_RESET_EXPIRE_MINUTES", "15"),
+)
 
 ACCESS_TOKEN_TYPE = "access"
 REFRESH_TOKEN_TYPE = "refresh"
+PASSWORD_RESET_TOKEN_TYPE = "reset"
 SESSION_LAST_SEEN_UPDATE_WINDOW = timedelta(minutes=1)
 logger = logging.getLogger(__name__)
 
@@ -98,6 +102,25 @@ def create_refresh_token(*, subject: str) -> str:
         token_type=REFRESH_TOKEN_TYPE,
         expires_delta=timedelta(days=JWT_REFRESH_EXPIRE_DAYS),
     )
+
+
+def create_password_reset_token(username: str) -> str:
+    normalized_username = normalize_username(username)
+    return _create_token(
+        subject=normalized_username,
+        token_type=PASSWORD_RESET_TOKEN_TYPE,
+        expires_delta=timedelta(minutes=JWT_PASSWORD_RESET_EXPIRE_MINUTES),
+    )
+
+
+def verify_password_reset_token(token: str) -> str | None:
+    try:
+        return decode_token_payload(
+            token=token,
+            expected_token_type=PASSWORD_RESET_TOKEN_TYPE,
+        ).subject
+    except HTTPException:
+        return None
 
 
 def _parse_expiration(raw_expiration: object) -> datetime:
