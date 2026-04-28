@@ -161,7 +161,10 @@ export function UserProfileModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4">
-      <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+      <div
+        className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
+        data-testid="user-profile-modal"
+      >
         <div className="mb-5 flex items-start justify-between gap-4">
           <div>
             <div className="text-xl font-semibold text-foreground">个人资料与安全</div>
@@ -173,6 +176,7 @@ export function UserProfileModal({
             className="rounded-xl p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground"
             onClick={onClose}
             type="button"
+            data-testid="user-profile-close"
           >
             <X className="h-5 w-5" />
           </button>
@@ -187,6 +191,7 @@ export function UserProfileModal({
             }`}
             onClick={() => setActiveTab("profile")}
             type="button"
+            data-testid="user-profile-tab-profile"
           >
             <Camera className="h-4 w-4" />
             资料设置
@@ -199,6 +204,7 @@ export function UserProfileModal({
             }`}
             onClick={() => setActiveTab("sessions")}
             type="button"
+            data-testid="user-profile-tab-sessions"
           >
             <Shield className="h-4 w-4" />
             登录设备
@@ -211,6 +217,7 @@ export function UserProfileModal({
             }`}
             onClick={() => setActiveTab("security")}
             type="button"
+            data-testid="user-profile-tab-security"
           >
             <LockKeyhole className="h-4 w-4" />
             安全设置
@@ -248,6 +255,7 @@ export function UserProfileModal({
                       disabled={disableProfileActions}
                       onClick={() => fileInputRef.current?.click()}
                       type="button"
+                      data-testid="profile-avatar-upload-trigger"
                     >
                       {isUploadingAvatar ? (
                         <LoaderCircle className="h-4 w-4 animate-spin" />
@@ -262,6 +270,7 @@ export function UserProfileModal({
                       disabled={disableProfileActions || !avatarUrl}
                       onClick={() => setAvatarUrl("")}
                       type="button"
+                      data-testid="profile-avatar-remove"
                     >
                       <Trash2 className="h-4 w-4" />
                       移除头像
@@ -276,6 +285,7 @@ export function UserProfileModal({
                 onChange={(event) => void handleAvatarChange(event)}
                 ref={fileInputRef}
                 type="file"
+                data-testid="profile-avatar-input"
               />
 
               {uploadError ? (
@@ -293,6 +303,7 @@ export function UserProfileModal({
                 onChange={(event) => setNickname(event.target.value)}
                 placeholder="例如：Ada 内容顾问"
                 value={nickname}
+                data-testid="profile-nickname-input"
               />
             </label>
 
@@ -304,6 +315,7 @@ export function UserProfileModal({
                 onChange={(event) => setBio(event.target.value)}
                 placeholder="例如：专注小红书、抖音内容策划与结构化生产。"
                 value={bio}
+                data-testid="profile-bio-input"
               />
             </label>
           </div>
@@ -323,6 +335,7 @@ export function UserProfileModal({
                 disabled={isLoadingSessions}
                 onClick={() => void onRefreshSessions()}
                 type="button"
+                data-testid="session-refresh-button"
               >
                 <RefreshCw
                   className={`h-4 w-4 ${isLoadingSessions ? "animate-spin" : ""}`}
@@ -358,6 +371,7 @@ export function UserProfileModal({
                   <div
                     key={session.id}
                     className="rounded-2xl border border-border bg-card p-4"
+                    data-testid={`session-card-${session.id}`}
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0 flex-1">
@@ -393,6 +407,7 @@ export function UserProfileModal({
                         disabled={session.is_current || revokingSessionId === session.id}
                         onClick={() => void onRevokeSession(session.id)}
                         type="button"
+                        data-testid={`session-revoke-${session.id}`}
                       >
                         {revokingSessionId === session.id ? "下线中..." : "踢出设备"}
                       </button>
@@ -428,6 +443,7 @@ export function UserProfileModal({
                 onChange={(event) => setOldPassword(event.target.value)}
                 placeholder="请输入当前密码"
                 type="password"
+                data-testid="profile-current-password-input"
                 value={oldPassword}
               />
             </label>
@@ -440,6 +456,7 @@ export function UserProfileModal({
                 onChange={(event) => setNewPassword(event.target.value)}
                 placeholder="至少 8 位"
                 type="password"
+                data-testid="profile-new-password-input"
                 value={newPassword}
               />
             </label>
@@ -454,18 +471,25 @@ export function UserProfileModal({
                 onChange={(event) => setConfirmPassword(event.target.value)}
                 placeholder="请再次输入新密码"
                 type="password"
+                data-testid="profile-confirm-password-input"
                 value={confirmPassword}
               />
             </label>
 
             {passwordError ? (
-              <div className="rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
+              <div
+                className="rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground"
+                data-testid="profile-password-error"
+              >
                 {passwordError}
               </div>
             ) : null}
 
             {passwordSuccess ? (
-              <div className="rounded-2xl border border-success-foreground/20 bg-success-surface px-4 py-3 text-sm text-success-foreground">
+              <div
+                className="rounded-2xl border border-success-foreground/20 bg-success-surface px-4 py-3 text-sm text-success-foreground"
+                data-testid="profile-password-success"
+              >
                 {passwordSuccess}
               </div>
             ) : null}
@@ -478,6 +502,7 @@ export function UserProfileModal({
             disabled={disableProfileActions || disableSecurityAction}
             onClick={onClose}
             type="button"
+            data-testid="user-profile-cancel"
           >
             取消
           </button>
@@ -488,6 +513,7 @@ export function UserProfileModal({
               disabled={disableProfileActions}
               onClick={() => void handleSave()}
               type="button"
+              data-testid="profile-save-button"
             >
               {isSubmitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
               保存资料
@@ -500,6 +526,7 @@ export function UserProfileModal({
               disabled={disableSecurityAction}
               onClick={() => void handlePasswordReset()}
               type="button"
+              data-testid="profile-password-save-button"
             >
               {isResettingPassword ? (
                 <LoaderCircle className="h-4 w-4 animate-spin" />

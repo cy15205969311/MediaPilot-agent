@@ -98,6 +98,12 @@ def test_upload_media_requires_authentication(client: TestClient):
     assert response.status_code == 401
 
 
+def test_upload_retention_summary_requires_authentication(client: TestClient):
+    response = client.get("/api/v1/media/retention")
+
+    assert response.status_code == 401
+
+
 def test_upload_media_tracks_avatar_record_metadata(
     client: TestClient,
     uploads_dir: Path,
@@ -139,6 +145,91 @@ def test_upload_media_tracks_avatar_record_metadata(
     assert record.file_size == len(file_bytes)
     assert record.purpose == "avatar"
     assert record.thread_id is None
+
+
+def test_upload_retention_summary_is_user_scoped(
+    client: TestClient,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OMNIMEDIA_STORAGE_BACKEND", "oss")
+    monkeypatch.setenv("OSS_AUTO_SETUP_LIFECYCLE", "true")
+    monkeypatch.setenv("OSS_SIGNED_URL_EXPIRE_SECONDS", "1800")
+    monkeypatch.setenv("OSS_TMP_UPLOAD_EXPIRE_DAYS", "5")
+    monkeypatch.setenv("OSS_THREAD_UPLOAD_TRANSITION_DAYS", "45")
+    monkeypatch.setenv("OSS_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS", "Archive")
+    headers, user = register_user(client, username="alice-retention")
+    _, other_user = register_user(client, username="bob-retention")
+    user_id = str(user["id"])
+    other_user_id = str(other_user["id"])
+    now = datetime.now(timezone.utc)
+
+    with session_factory() as db:
+        db.add_all(
+            [
+                UploadRecord(
+                    user_id=user_id,
+                    filename="tmp.png",
+                    file_path=f"oss://uploads/tmp/{user_id}/tmp.png",
+                    mime_type="image/png",
+                    file_size=100,
+                    purpose="material",
+                    thread_id=None,
+                    created_at=now - timedelta(days=2),
+                ),
+                UploadRecord(
+                    user_id=user_id,
+                    filename="thread.png",
+                    file_path=f"oss://uploads/{user_id}/thread.png",
+                    mime_type="image/png",
+                    file_size=200,
+                    purpose="material",
+                    thread_id="thread-retention",
+                    created_at=now,
+                ),
+                UploadRecord(
+                    user_id=user_id,
+                    filename="avatar.jpg",
+                    file_path=f"oss://uploads/{user_id}/avatar.jpg",
+                    mime_type="image/jpeg",
+                    file_size=50,
+                    purpose="avatar",
+                    thread_id=None,
+                    created_at=now,
+                ),
+                UploadRecord(
+                    user_id=other_user_id,
+                    filename="other.png",
+                    file_path=f"oss://uploads/{other_user_id}/other.png",
+                    mime_type="image/png",
+                    file_size=999,
+                    purpose="material",
+                    thread_id="other-thread",
+                    created_at=now,
+                ),
+            ]
+        )
+        db.commit()
+
+    response = client.get("/api/v1/media/retention", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["storage_backend"] == "oss"
+    assert payload["total_files"] == 3
+    assert payload["total_bytes"] == 350
+    assert payload["temporary_files"] == 1
+    assert payload["temporary_bytes"] == 100
+    assert payload["thread_material_files"] == 1
+    assert payload["thread_material_bytes"] == 200
+    assert payload["avatar_files"] == 1
+    assert payload["avatar_bytes"] == 50
+    assert payload["stale_unbound_material_files"] == 1
+    assert payload["signed_url_expires_seconds"] == 1800
+    assert payload["lifecycle_auto_rollout_enabled"] is True
+    assert payload["tmp_upload_expire_days"] == 5
+    assert payload["thread_upload_transition_days"] == 45
+    assert payload["thread_upload_transition_storage_class"] == "Archive"
 
 
 def test_upload_media_persists_thread_id_when_provided(

@@ -100,6 +100,7 @@ export function LeftSidebar({
             className="w-full rounded-[24px] bg-surface-tint p-4 text-left transition hover:shadow-sm"
             onClick={onOpenProfile}
             type="button"
+            data-testid="sidebar-open-profile"
           >
             <div className="mb-3 flex items-center gap-3">
               <div
@@ -147,6 +148,7 @@ export function LeftSidebar({
               className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
               onClick={onCreateThread}
               type="button"
+              data-testid="sidebar-create-thread"
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -189,6 +191,7 @@ export function LeftSidebar({
                     disabled={isMutating}
                     onClick={() => onSelectThread(thread)}
                     type="button"
+                    data-testid={`sidebar-thread-${thread.id}`}
                   >
                     <div className="mb-1 flex items-start justify-between gap-3">
                       <div className="truncate text-sm font-medium text-foreground">
@@ -213,6 +216,7 @@ export function LeftSidebar({
                       disabled={isMutating}
                       onClick={() => onRenameThread(thread)}
                       type="button"
+                      data-testid={`sidebar-thread-rename-${thread.id}`}
                     >
                       <Pencil className="h-3.5 w-3.5" />
                       重命名
@@ -222,6 +226,7 @@ export function LeftSidebar({
                       disabled={isMutating}
                       onClick={() => onDeleteThread(thread)}
                       type="button"
+                      data-testid={`sidebar-thread-delete-${thread.id}`}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                       删除

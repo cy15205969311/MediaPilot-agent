@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import Thread, UploadPurpose as UploadPurposeModel
 from app.db.models import UploadRecord, User
-from app.models.schemas import UploadMediaResponse, UploadPurpose
+from app.models.schemas import UploadMediaResponse, UploadPurpose, UploadRetentionSummary
 from app.services.auth import get_current_user
 from app.services.oss_client import (
     LOCAL_UPLOADS_DIR,
@@ -21,6 +21,7 @@ from app.services.oss_client import (
     build_stored_file_path,
     create_storage_client,
 )
+from app.services.persistence import build_upload_retention_summary
 
 router = APIRouter(prefix="/api/v1/media", tags=["media-storage"])
 logger = logging.getLogger(__name__)
@@ -186,4 +187,14 @@ async def upload_media(
         original_filename=original_filename,
         purpose=purpose,
         thread_id=resolved_thread_id,
+    )
+
+
+@router.get("/retention", response_model=UploadRetentionSummary)
+async def get_upload_retention_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UploadRetentionSummary:
+    return UploadRetentionSummary.model_validate(
+        build_upload_retention_summary(db, user_id=current_user.id)
     )

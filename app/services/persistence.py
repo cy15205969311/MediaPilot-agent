@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from pydantic import TypeAdapter
@@ -15,6 +16,7 @@ from app.models.schemas import (
     PersistedMessageType,
 )
 from app.services.oss_client import (
+    OSS_TEMP_OBJECT_PREFIX,
     build_delivery_url_from_stored_path,
     build_stored_file_path,
     create_storage_client,
@@ -205,6 +207,102 @@ def resolve_media_reference(url: str | None) -> str | None:
     except RuntimeError:
         logger.warning("Unable to build delivery URL for media reference %s", normalized_reference)
         return normalized_reference
+
+
+def build_upload_retention_summary(
+    db: Session,
+    *,
+    user_id: str | None = None,
+) -> dict[str, int | str | bool]:
+    now = datetime.now(timezone.utc)
+    stale_material_cutoff = now - MATERIAL_RETENTION_WINDOW
+    statement = select(UploadRecord)
+    if user_id is not None:
+        statement = statement.where(UploadRecord.user_id == user_id)
+    records = list(db.scalars(statement).all())
+
+    summary: dict[str, int | str | bool] = {
+        "storage_backend": os.getenv("OMNIMEDIA_STORAGE_BACKEND", "auto").strip().lower() or "auto",
+        "total_files": 0,
+        "total_bytes": 0,
+        "temporary_files": 0,
+        "temporary_bytes": 0,
+        "thread_material_files": 0,
+        "thread_material_bytes": 0,
+        "avatar_files": 0,
+        "avatar_bytes": 0,
+        "stale_unbound_material_files": 0,
+        "signed_url_expires_seconds": _clamp_positive_int(
+            _read_positive_int_env("OSS_SIGNED_URL_EXPIRE_SECONDS", 3600),
+            minimum=_read_positive_int_env("OSS_SIGNED_URL_MIN_EXPIRE_SECONDS", 60),
+            maximum=_read_positive_int_env("OSS_SIGNED_URL_MAX_EXPIRE_SECONDS", 86400),
+        ),
+        "lifecycle_auto_rollout_enabled": _is_enabled_env("OSS_AUTO_SETUP_LIFECYCLE"),
+        "tmp_upload_expire_days": _read_positive_int_env("OSS_TMP_UPLOAD_EXPIRE_DAYS", 3),
+        "thread_upload_transition_days": _read_positive_int_env(
+            "OSS_THREAD_UPLOAD_TRANSITION_DAYS",
+            30,
+        ),
+        "thread_upload_transition_storage_class": os.getenv(
+            "OSS_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS",
+            "IA",
+        ).strip()
+        or "IA",
+    }
+
+    for record in records:
+        file_size = max(0, record.file_size or 0)
+        summary["total_files"] = int(summary["total_files"]) + 1
+        summary["total_bytes"] = int(summary["total_bytes"]) + file_size
+
+        if record.purpose == UploadPurpose.AVATAR.value:
+            summary["avatar_files"] = int(summary["avatar_files"]) + 1
+            summary["avatar_bytes"] = int(summary["avatar_bytes"]) + file_size
+            continue
+
+        _, object_key = parse_stored_file_path(record.file_path)
+        is_tmp_record = (
+            not record.thread_id
+            or object_key.startswith(f"tmp/")
+            or object_key.startswith(f"{OSS_TEMP_OBJECT_PREFIX}/")
+        )
+        if is_tmp_record:
+            summary["temporary_files"] = int(summary["temporary_files"]) + 1
+            summary["temporary_bytes"] = int(summary["temporary_bytes"]) + file_size
+            if not record.thread_id and record.created_at <= stale_material_cutoff:
+                summary["stale_unbound_material_files"] = (
+                    int(summary["stale_unbound_material_files"]) + 1
+                )
+            continue
+
+        summary["thread_material_files"] = int(summary["thread_material_files"]) + 1
+        summary["thread_material_bytes"] = int(summary["thread_material_bytes"]) + file_size
+
+    return summary
+
+
+def _is_enabled_env(env_name: str) -> bool:
+    return os.getenv(env_name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _read_positive_int_env(env_name: str, default: int) -> int:
+    raw_value = os.getenv(env_name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _clamp_positive_int(value: int, *, minimum: int, maximum: int) -> int:
+    effective_maximum = max(minimum, maximum)
+    if value < minimum:
+        return minimum
+    if value > effective_maximum:
+        return effective_maximum
+    return value
 
 
 def bind_material_uploads_to_thread(

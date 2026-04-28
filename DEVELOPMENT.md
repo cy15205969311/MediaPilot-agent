@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.8`
+- Current version: `v1.13.11`
 - Updated on: `2026-04-28`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, Playwright E2E browser baseline, documentation baseline, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, and artifact-action flows, documentation baseline, and verification baseline
 
 Document set:
 
@@ -70,7 +70,7 @@ The current baseline includes:
 28. Vite development server now binds to `0.0.0.0` so devices on the same LAN can access the frontend workspace directly.
 29. Frontend workspace now supports persisted Light / Dark themes through CSS variables, semantic chat-bubble tokens, and root HTML theme classes.
 30. Shared storage client abstraction now supports either local disk or Aliyun OSS uploads, signed delivery URL resolution, temporary-prefix staging, lifecycle helper provisioning, copy-based promotion, and deletion.
-31. Playwright end-to-end browser coverage for auth, password reset, logout, new-thread setup, and streamed chat smoke flows.
+31. Playwright end-to-end browser coverage for auth, password reset, refresh retry, thread lifecycle, replay, profile/session security, uploads, artifact follow-up actions, and streamed chat flows.
 32. Extensible LangGraph Business Tools architecture with tool-call routing, local Python tool execution, and `<business_tool_context>` injection before drafting.
 
 ### 3.2 Out of Scope
@@ -80,8 +80,8 @@ The following capabilities are intentionally not production-complete yet:
 1. third-party SSO or enterprise identity providers
 2. access-token revocation lists, device fingerprints, or organization-wide session-management dashboards
 3. production observability, rate limiting, or audit logging
-4. deeper external business integrations beyond the current mock Business Tools baseline
-5. automated OSS lifecycle rollout hooks, CDN invalidation, multi-bucket governance, or an operator-facing retention control plane
+4. deeper external business integrations beyond the current Tavily-backed Business Tools baseline
+5. CDN invalidation, multi-bucket governance, or a full operator-facing retention control plane beyond the current authenticated retention summary endpoint
 6. real email/SMS delivery for password-reset links and broader account-recovery operations
 7. advanced avatar processing such as cropping, compression, and CDN hosting
 
@@ -288,16 +288,19 @@ Current supported runtime variables:
 - `OSS_REGION`
 - `OSS_PUBLIC_BASE_URL`
 - `OSS_SIGNED_URL_EXPIRE_SECONDS`
+- `OSS_SIGNED_URL_MIN_EXPIRE_SECONDS`
+- `OSS_SIGNED_URL_MAX_EXPIRE_SECONDS`
 - `OSS_TMP_UPLOAD_EXPIRE_DAYS`
 - `OSS_THREAD_UPLOAD_TRANSITION_DAYS`
 - `OSS_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS`
+- `OSS_AUTO_SETUP_LIFECYCLE`
 
 The committed `.env.example` now includes:
 
 - provider selection defaults for `LangGraphProvider`
 - text-model and artifact-model placeholders
 - vision-model placeholders for multimodal OCR
-- optional Tavily search placeholders for real-time web retrieval
+- optional Tavily search placeholders for real-time web retrieval and market-intelligence business tools
 - optional OSS storage placeholders with `auto`, `local`, and `oss` backend selection
 - signed delivery URL and lifecycle tuning placeholders for OSS production rollouts
 - password-reset token lifetime placeholder for local development
@@ -752,7 +755,7 @@ Current execution rules:
 6. `generate_draft_node` first invokes a tool-aware planner created via `inner_provider.bind_tools(...)` when the provider supports it, and otherwise falls back to deterministic heuristic planning so Mock and test providers remain stable
 7. the planner appends `AIMessage` entries into `GraphState.messages`; if `AIMessage.tool_calls` are present, the graph routes to `tool_execution_node`, otherwise final drafting proceeds through the configured inner provider with XML-style `<image_context>`, `<search_context>`, and `<business_tool_context>` blocks injected when those contexts exist
 8. `tool_execution_node` emits `tool_call` progress, executes local Python tools from `app/services/tools.py`, stores `ToolMessage` results in graph state, and loops back to `generate_draft_node` until the planner stops requesting tools or `business_tool_max_iterations` is reached
-9. the current mock baseline supports sequential Business Tools such as `analyze_market_trends` followed by `generate_content_outline`, which enables a real ReAct-style "analyze first, draft later" loop before the final draft is streamed
+9. the current baseline supports sequential Business Tools such as Tavily-backed `analyze_market_trends` followed by local `generate_content_outline`, which enables a real ReAct-style "analyze first, draft later" loop before the final draft is streamed
 10. `review_node` emits `tool_call` progress, validates the draft against lightweight structural and persona constraints, and can retry generation up to `2` times
 11. only the accepted or max-retry draft is emitted downstream as `message` events, which keeps persisted assistant output aligned with the final visible draft
 12. `format_artifact_node` emits a `tool_call` event and produces the final `artifact`
@@ -861,7 +864,10 @@ Current enforced boundaries:
 20. deleting a thread triggers immediate cleanup of linked material upload files and records
 21. an APScheduler background job runs `cleanup_abandoned_materials()` every hour and deletes the physical file through the resolved storage backend before removing the database record
 22. Aliyun OSS can additionally apply `setup_bucket_lifecycle()` so `uploads/tmp/` objects expire automatically and aged `uploads/` objects transition to colder storage classes
-23. partial files are cleaned up on failure
+23. setting `OSS_AUTO_SETUP_LIFECYCLE=true` provisions those lifecycle rules on backend startup and through the daily `oss_lifecycle_rollout` scheduler job
+24. signed URL expiry is clamped by configurable min/max bounds to avoid accidentally issuing too-short or too-long delivery URLs
+25. authenticated users can query `GET /api/v1/media/retention` for user-scoped upload counts, byte totals, stale temporary material counts, and effective OSS retention policy knobs
+26. partial files are cleaned up on failure
 
 ## 13. Frontend Engineering Baseline
 
@@ -1113,15 +1119,21 @@ Covered cases:
 43. password-reset request logs a short-lived local-development recovery link when the user exists
 44. token-based password reset revokes all active sessions for the user before they log back in
 45. invalid password-reset tokens are rejected without mutating the stored password
-46. Playwright auth coverage verifies browser registration/login token persistence, password-reset form transition, and logout local-storage cleanup
-47. Playwright workspace coverage verifies new-thread modal creation and streamed chat bubble rendering with user-avatar fallback
-48. Business Tool registry exports OpenAI-compatible function schemas and typed mock tool outputs
-49. LangGraph business-tool execution routes from draft generation to local tool execution and loops back with `<business_tool_context>` before review
-50. OSS delivery URLs are generated as signed previews instead of persisted long-lived public links
-51. profile avatars and thread-history materials resolve frontend URLs dynamically from normalized storage references
-52. unbound OSS material uploads are staged under a temporary prefix and promoted to permanent object keys on thread bind
-53. Aliyun OSS lifecycle setup provisions both temporary-object expiration and aged-object storage transitions
-54. upload persistence normalization accepts signed OSS URLs and rewrites them back to managed storage paths safely
+46. Playwright auth coverage verifies browser registration/login token persistence, password-reset form transition, logout local-storage cleanup, and `401 -> refresh -> retry` recovery on protected workspace bootstrap
+47. Playwright workspace coverage verifies new-thread modal creation, startup thread replay, thread settings persistence, sidebar rename/delete flows, and streamed chat rendering for user and assistant bubbles
+48. Playwright profile coverage verifies nickname, bio, avatar, and in-session password updates through the profile modal with immediate workspace sync
+49. Playwright session-management coverage verifies session list refresh, targeted non-current device revocation, and password-change-driven session pruning
+50. Playwright upload-plus-SSE coverage verifies image material upload, tool-call progress rendering, assistant response completion, and right-panel artifact follow-up actions
+51. Business Tool registry exports OpenAI-compatible function schemas and typed live-or-fallback tool outputs
+52. LangGraph business-tool execution routes from draft generation to local tool execution and loops back with `<business_tool_context>` before review
+53. OSS delivery URLs are generated as signed previews instead of persisted long-lived public links
+54. profile avatars and thread-history materials resolve frontend URLs dynamically from normalized storage references
+55. unbound OSS material uploads are staged under a temporary prefix and promoted to permanent object keys on thread bind
+56. Aliyun OSS lifecycle setup provisions both temporary-object expiration and aged-object storage transitions
+57. upload persistence normalization accepts signed OSS URLs and rewrites them back to managed storage paths safely
+58. signed OSS delivery policy is bounded by min/max expiry controls and accepts both custom public-base URLs plus canonical bucket endpoint signed URLs during normalization
+59. the scheduler can automatically roll out OSS lifecycle rules on startup and every 24 hours when `OSS_AUTO_SETUP_LIFECYCLE=true`
+60. `GET /api/v1/media/retention` exposes an authenticated, user-scoped retention summary for upload counts, byte totals, stale temporary uploads, and effective lifecycle/signed-URL policy values
 
 ### 15.2 E2E Browser Automation
 
@@ -1145,19 +1157,22 @@ The Playwright config starts the Vite dev server automatically with `npm run dev
 
 ### 15.3 Latest Verification Result
 
-The following checks were executed for the current OSS signed-delivery and lifecycle hardening change set on `2026-04-28` and passed:
+The following checks were executed for the current Tavily-backed Business Tool integration change set on `2026-04-28` and passed:
 
 ```bash
 python -m pytest -q
+cd frontend
+npm run build
+npx playwright test
 ```
 
 Observed result baseline:
 
-- full backend test suite: 69 passed
-- covered storage-hardening flows: signed preview URL generation, bucket lifecycle rule provisioning, temporary-prefix OSS material staging, copy-based promotion on thread bind, normalized avatar/media persistence, and signed thread-history replay URLs
-- existing auth, scheduler, upload-retention, LangGraph search/tool, and multimodal OCR regression suites remain green under the new storage-reference normalization flow
-
-The previous Playwright E2E baseline remains: `5 passed` for auth, password reset, logout, new-thread setup, and streamed chat rendering.
+- full backend test suite: 77 passed
+- frontend production build: passed
+- frontend Playwright E2E suite: 14 passed
+- covered browser flows: auth bootstrap, password-reset request UX, logout cleanup, protected-route refresh retry, thread creation/replay/settings/rename/delete, profile avatar/nickname/bio updates, active-session refresh and revoke, in-session password change, upload plus tool-call streaming feedback, and right-panel artifact follow-up actions
+- existing auth, scheduler, upload-retention, OSS signed-delivery, LangGraph search/tool, Tavily-backed business-tool live/fallback, and multimodal OCR regression suites remain green under the expanded browser baseline
 
 ### 15.4 Current Warning
 
@@ -1165,7 +1180,39 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.8
+### 16.1 Completed in v1.13.11
+
+This version adds or solidifies:
+
+1. `app/services/tools.py` now upgrades `analyze_market_trends` from a deterministic mock-only tool to a Tavily-backed market-intelligence tool that returns live search-derived hot keywords, traffic notes, evidence sources, and a safe mock fallback payload when no API key is configured or the upstream call fails.
+2. `tool_execution_node` now executes business tools through `asyncio.to_thread(...)`, preventing live network-backed tool calls from blocking the LangGraph event loop while preserving the existing ReAct loop contract.
+3. `tests/test_graph_tools.py` now locks three business-tool modes explicitly: mock-only baseline, live Tavily-backed market-trend enrichment, and failure fallback to deterministic mock output.
+4. `.env.example` now documents that `TAVILY_API_KEY` powers both LangGraph search retrieval and the market-intelligence business tool path.
+5. `README.md` and `DEVELOPMENT.md` now document the live-or-fallback Business Tool baseline so the roadmap no longer treats all market-trend tooling as purely mock data.
+
+### 16.2 Completed in v1.13.10
+
+This version adds or solidifies:
+
+1. frontend workspace surfaces now expose stable `data-testid` anchors for workspace title, composer input, sidebar rename/delete actions, right-panel artifact actions, and profile-password form assertions.
+2. `frontend/e2e/chat.spec.ts` now covers sidebar prompt-based rename, confirm-based delete, fallback-history reload, in-session password change, and artifact-action follow-up flows on top of the previous replay/upload/session baseline.
+3. the stateful Playwright mock backend continues to drive these richer thread-lifecycle and security-tab flows without requiring a live backend service, keeping browser regression coverage deterministic.
+4. right-panel artifact actions are now locked by browser tests that verify prompt priming and cross-platform workspace toggling from persisted artifact history.
+5. Playwright browser coverage now spans the full high-frequency authenticated workspace lifecycle except archive-specific and live-backend delivery paths, reducing regression risk across the operator journey.
+6. `README.md` and `DEVELOPMENT.md` now document the expanded `14 passed` browser baseline and the narrowed remaining E2E gaps.
+
+### 16.3 Completed in v1.13.9
+
+This version adds or solidifies:
+
+1. `frontend/e2e/fixtures.ts` now provides a stateful mock backend that can simulate thread history, profile mutations, session revocation, upload responses, refresh-token retries, and richer SSE event sequences for browser regression coverage.
+2. frontend workspace surfaces now expose stable `data-testid` anchors for thread settings, profile/session management, uploads, tool-call chat notices, and workspace status assertions.
+3. `frontend/e2e/auth.spec.ts` now covers protected-route `401 -> refresh -> retry` recovery in addition to registration, password-reset request, and logout cleanup.
+4. `frontend/e2e/chat.spec.ts` now covers startup replay of persisted thread history, thread settings persistence, profile avatar/nickname/bio updates, active-session refresh and revocation, and image-upload plus tool-call streaming feedback.
+5. Playwright coverage now exercises much more of the authenticated workspace lifecycle without requiring a live backend, reducing regression risk across the highest-frequency operator flows.
+6. `README.md` and `DEVELOPMENT.md` now document the expanded browser verification baseline and the increased E2E surface area.
+
+### 16.4 Completed in v1.13.8
 
 This version adds or solidifies:
 
@@ -1176,7 +1223,7 @@ This version adds or solidifies:
 5. LangGraph OCR image resolution can now consume OSS-managed image materials by converting normalized stored paths into signed delivery URLs before remote download.
 6. `tests/test_oss.py`, `tests/test_oss_client.py`, `README.md`, `.env.example`, and `DEVELOPMENT.md` now lock the signed delivery, lifecycle, promotion, and normalization baseline.
 
-### 16.2 Completed in v1.13.7
+### 16.5 Completed in v1.13.7
 
 This version adds or solidifies:
 
@@ -1187,7 +1234,7 @@ This version adds or solidifies:
 5. `pytest.ini` constrains default discovery to `tests/`, so `python -m pytest -q` no longer walks transient `uploads/` directories during collection.
 6. `tests/test_graph_tools.py`, `README.md`, and `DEVELOPMENT.md` now lock the sequential Business Tools baseline, title-only single-tool fallback, and the updated verification entrypoint.
 
-### 16.3 Completed in v1.13.6
+### 16.6 Completed in v1.13.6
 
 This version adds or solidifies:
 
@@ -1198,7 +1245,7 @@ This version adds or solidifies:
 5. `tests/test_graph_tools.py` locks the tool schema export, mock tool output, and ReAct loopback behavior without requiring live model credentials.
 6. `README.md` and `DEVELOPMENT.md` now document the Business Tools architecture and preserve the mandatory documentation-update rule.
 
-### 16.4 Completed in v1.13.5
+### 16.7 Completed in v1.13.5
 
 This version adds or solidifies:
 
@@ -1209,7 +1256,7 @@ This version adds or solidifies:
 5. frontend components now expose stable accessibility labels and `data-testid` anchors for critical auth, workspace, composer, and chat-bubble assertions.
 6. `README.md` and `DEVELOPMENT.md` now document E2E setup, commands, coverage scope, and the mandatory documentation-update rule for future changes.
 
-### 16.5 Completed in v1.13.4
+### 16.8 Completed in v1.13.4
 
 This version adds or solidifies:
 
@@ -1220,23 +1267,23 @@ This version adds or solidifies:
 5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the password-reset capability, reset-token lifetime, and global forced sign-out behavior
 6. regression coverage and frontend production build validation now explicitly include account-recovery and password-reset compatibility
 
-### 16.6 Current Non-Blocking Gaps
+### 16.9 Current Non-Blocking Gaps
 
 The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 
 1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
-3. upload cleanup now covers avatars plus local and OSS-backed material retention, and OSS delivery now uses signed URLs with lifecycle-ready prefixes, but the project still lacks automated lifecycle rollout hooks, CDN invalidation, and operator-facing retention governance
-4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, and sequential mock Business Tools, but still lacks deeper retrieval and live external business-system integrations
-5. E2E smoke coverage now exists for auth, password reset, logout, new-thread setup, and streamed chat rendering, but still needs expansion for replay, uploads, avatar updates, refresh rotation, session management, thread settings, and full LangGraph flows
+3. upload cleanup now covers avatars plus local and OSS-backed material retention, OSS delivery now uses signed URLs with lifecycle-ready prefixes, lifecycle rollout can be automated, and users can inspect retention summaries, but the project still lacks CDN invalidation, multi-bucket governance, and a full admin retention console
+4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, and Tavily-backed market-intelligence Business Tools, but still lacks deeper retrieval, first-party business data sources, and richer live external business-system integrations
+5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, and artifact-side follow-up actions, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
 
 ## 17. Recommended Next Steps
 
 The next engineering steps SHOULD prioritize:
 
-1. deepen LangGraph retrieval and replace the current sequential mock Business Tools baseline with live external business-system integrations
-2. harden OSS governance with automated lifecycle rollout, CDN invalidation, signed-download policy tuning, and richer retention analytics on top of the current signed-delivery baseline
-3. expand end-to-end browser coverage beyond the initial Playwright smoke suite to include replay, uploads, avatar updates, refresh flows, session management, thread settings, and deeper SSE/LangGraph flows
+1. deepen LangGraph retrieval beyond the current Tavily-backed market-intelligence tool, and expand into richer live external business-system integrations such as product, competitor, CRM, or internal knowledge sources
+2. harden OSS governance further with CDN invalidation, multi-bucket policy rollout, admin retention analytics, and richer signed-download policy controls on top of the current lifecycle rollout and retention-summary baseline
+3. expand browser coverage further into archive controls, clipboard/export interactions, and live backend/OSS delivery flows beyond the current mocked regression baseline
 4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain
 
 ## 18. Change Control Principle

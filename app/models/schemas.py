@@ -101,6 +101,39 @@ class UploadMediaResponse(SchemaModel):
     )
 
 
+class UploadRetentionSummary(SchemaModel):
+    storage_backend: str = Field(..., description="Active storage backend.")
+    total_files: int = Field(..., description="Total tracked uploads.")
+    total_bytes: int = Field(..., description="Total tracked upload size in bytes.")
+    temporary_files: int = Field(..., description="Unbound temporary material uploads.")
+    temporary_bytes: int = Field(..., description="Temporary material size in bytes.")
+    thread_material_files: int = Field(..., description="Thread-bound material uploads.")
+    thread_material_bytes: int = Field(..., description="Thread-bound material size in bytes.")
+    avatar_files: int = Field(..., description="Tracked avatar uploads.")
+    avatar_bytes: int = Field(..., description="Tracked avatar size in bytes.")
+    stale_unbound_material_files: int = Field(
+        ...,
+        description="Unbound material uploads older than the local GC retention window.",
+    )
+    signed_url_expires_seconds: int = Field(
+        ...,
+        description="Effective signed delivery URL lifetime in seconds.",
+    )
+    lifecycle_auto_rollout_enabled: bool = Field(
+        ...,
+        description="Whether startup and scheduled OSS lifecycle rollout is enabled.",
+    )
+    tmp_upload_expire_days: int = Field(..., description="OSS tmp prefix expiration days.")
+    thread_upload_transition_days: int = Field(
+        ...,
+        description="OSS thread material cold-transition days.",
+    )
+    thread_upload_transition_storage_class: str = Field(
+        ...,
+        description="OSS cold-transition storage class.",
+    )
+
+
 class ArtifactPayload(SchemaModel):
     artifact_type: ArtifactType = Field(..., description="Artifact discriminator.")
     title: str = Field(..., description="Artifact title.")

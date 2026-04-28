@@ -32,6 +32,8 @@ OSS_STORAGE_BACKEND = "oss"
 OSS_STORED_PATH_PREFIX = "oss://"
 OSS_TEMP_OBJECT_PREFIX = "uploads/tmp"
 DEFAULT_SIGNED_URL_EXPIRE_SECONDS = 3600
+DEFAULT_SIGNED_URL_MIN_EXPIRE_SECONDS = 60
+DEFAULT_SIGNED_URL_MAX_EXPIRE_SECONDS = 86400
 DEFAULT_TEMP_UPLOAD_EXPIRY_DAYS = 3
 DEFAULT_THREAD_UPLOAD_TRANSITION_DAYS = 30
 DEFAULT_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS = "IA"
@@ -210,8 +212,24 @@ class AliyunOSSClient(BaseStorageClient):
         self.settings = settings
         self._bucket = None
         parsed_public_base = urlparse(settings.public_base_url)
+        parsed_endpoint = urlparse(settings.endpoint)
         self._public_scheme = parsed_public_base.scheme or "https"
         self._public_netloc = parsed_public_base.netloc or parsed_public_base.path
+        endpoint_netloc = parsed_endpoint.netloc or parsed_endpoint.path
+        bucket_endpoint_netloc = (
+            endpoint_netloc
+            if endpoint_netloc.startswith(f"{settings.bucket_name}.")
+            else f"{settings.bucket_name}.{endpoint_netloc}"
+        )
+        self._accepted_delivery_netlocs = {
+            netloc
+            for netloc in {
+                self._public_netloc,
+                endpoint_netloc,
+                bucket_endpoint_netloc,
+            }
+            if netloc
+        }
 
     def build_object_key(self, *, user_id: str, filename: str) -> str:
         return f"uploads/{user_id}/{filename}"
@@ -236,7 +254,7 @@ class AliyunOSSClient(BaseStorageClient):
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             return None
-        if parsed.netloc != self._public_netloc:
+        if parsed.netloc not in self._accepted_delivery_netlocs:
             return None
 
         object_key = parsed.path.strip("/")
@@ -312,7 +330,7 @@ class AliyunOSSClient(BaseStorageClient):
         return self._get_bucket().sign_url(
             "GET",
             object_name,
-            expires_in,
+            _normalize_signed_url_expires_in(expires_in),
             slash_safe=True,
         )
 
@@ -513,10 +531,29 @@ def is_temporary_upload_object_key(object_key: str) -> bool:
 
 
 def _get_signed_url_expire_seconds() -> int:
-    return _read_positive_int_env(
-        "OSS_SIGNED_URL_EXPIRE_SECONDS",
-        DEFAULT_SIGNED_URL_EXPIRE_SECONDS,
+    return _normalize_signed_url_expires_in(
+        _read_positive_int_env(
+            "OSS_SIGNED_URL_EXPIRE_SECONDS",
+            DEFAULT_SIGNED_URL_EXPIRE_SECONDS,
+        )
     )
+
+
+def _normalize_signed_url_expires_in(expires_in: int) -> int:
+    minimum = _read_positive_int_env(
+        "OSS_SIGNED_URL_MIN_EXPIRE_SECONDS",
+        DEFAULT_SIGNED_URL_MIN_EXPIRE_SECONDS,
+    )
+    configured_maximum = _read_positive_int_env(
+        "OSS_SIGNED_URL_MAX_EXPIRE_SECONDS",
+        DEFAULT_SIGNED_URL_MAX_EXPIRE_SECONDS,
+    )
+    maximum = max(minimum, configured_maximum)
+    if expires_in < minimum:
+        return minimum
+    if expires_in > maximum:
+        return maximum
+    return expires_in
 
 
 def _get_temp_upload_expiry_days() -> int:

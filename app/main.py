@@ -18,7 +18,11 @@ from app.api.v1.history import router as media_history_router
 from app.api.v1.oss import UPLOADS_DIR, router as media_upload_router
 from app.db.database import engine
 from app.db.models import Base
-from app.services.scheduler import create_scheduler, run_material_cleanup_job
+from app.services.scheduler import (
+    create_scheduler,
+    run_material_cleanup_job,
+    run_oss_lifecycle_rollout_job,
+)
 
 APP_LOGGER_NAME = "app"
 STREAM_TRACE_PATHS = frozenset({"/api/v1/media/chat/stream"})
@@ -70,6 +74,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     scheduler = create_scheduler()
     scheduler.start()
+    await run_oss_lifecycle_rollout_job()
     await run_material_cleanup_job()
     try:
         yield

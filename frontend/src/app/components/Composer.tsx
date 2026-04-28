@@ -108,6 +108,7 @@ export function Composer({
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
             onClick={() => onTriggerFilePicker("image")}
             type="button"
+            data-testid="composer-upload-image"
           >
             <ImageIcon className="h-4 w-4" />
             上传图片
@@ -116,6 +117,7 @@ export function Composer({
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
             onClick={() => onTriggerFilePicker("video")}
             type="button"
+            data-testid="composer-upload-video"
           >
             <Video className="h-4 w-4" />
             视频转写稿
@@ -124,6 +126,7 @@ export function Composer({
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
             onClick={() => onTriggerFilePicker("text")}
             type="button"
+            data-testid="composer-upload-text"
           >
             <FileText className="h-4 w-4" />
             文本文件
@@ -189,6 +192,7 @@ export function Composer({
             onChange={(event) => onMessageChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="描述你的内容需求，或上传素材让 Agent 帮你分析..."
+            data-testid="composer-textarea"
             value={message}
           />
           <button
@@ -197,6 +201,7 @@ export function Composer({
             disabled={!canSubmit}
             onClick={handleSubmit}
             type="button"
+            data-testid="composer-send-button"
           >
             <Send className="h-4 w-4" />
           </button>
@@ -214,6 +219,7 @@ export function Composer({
         onChange={(event) => onFilesSelected("image", event)}
         ref={imageInputRef}
         type="file"
+        data-testid="composer-image-input"
       />
       <input
         accept="video/*,.mp4,.mov"
@@ -222,6 +228,7 @@ export function Composer({
         onChange={(event) => onFilesSelected("video", event)}
         ref={videoInputRef}
         type="file"
+        data-testid="composer-video-input"
       />
       <input
         accept=".txt,.pdf,.md"
@@ -230,6 +237,7 @@ export function Composer({
         onChange={(event) => onFilesSelected("text", event)}
         ref={textInputRef}
         type="file"
+        data-testid="composer-text-input"
       />
     </>
   );

@@ -652,7 +652,11 @@ class LangGraphProvider(BaseLLMProvider):
                 message=f"\u6b63\u5728\u8c03\u7528\u4e1a\u52a1\u5de5\u5177: {tool_name}...",
             )
             try:
-                result = execute_business_tool(tool_name, tool_args)
+                result = await asyncio.to_thread(
+                    execute_business_tool,
+                    tool_name,
+                    tool_args,
+                )
                 formatted_result = _format_business_tool_result(tool_name, result)
                 tool_results.append(formatted_result)
                 messages.append(

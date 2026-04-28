@@ -90,6 +90,7 @@ export function RightPanel({
         className={`fixed inset-y-16 right-0 z-40 w-full max-w-md border-l border-border bg-card shadow-sm transition-transform duration-300 xl:static xl:shrink-0 xl:translate-x-0 xl:transition-[width,border-color] xl:duration-300 ${
           open ? "translate-x-0" : "translate-x-full"
         } ${isDesktopCollapsed ? "xl:w-0 xl:max-w-none xl:border-l-transparent" : "xl:w-[28rem] xl:max-w-[28rem]"}`}
+        data-testid="right-panel"
       >
         <div
           className={`flex h-full flex-col overflow-hidden transition-opacity duration-200 ${
@@ -156,7 +157,7 @@ export function RightPanel({
             <div className="grid gap-2">
               {artifactActions.map((action) => (
                 <button
-                  key={action.label}
+                  key={action.id}
                   className={`rounded-2xl px-4 py-3 text-sm font-medium transition ${
                     action.variant === "primary"
                       ? "bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
@@ -164,6 +165,7 @@ export function RightPanel({
                   }`}
                   onClick={action.onClick}
                   type="button"
+                  data-testid={`artifact-action-${action.id}`}
                 >
                   {action.label}
                 </button>

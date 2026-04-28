@@ -640,6 +640,7 @@ function App() {
   const artifactActions: ArtifactAction[] = useMemo(
     () => [
       {
+        id: "continue-optimization",
         label: "继续优化",
         variant: "primary",
         onClick: () =>
@@ -648,6 +649,7 @@ function App() {
           ),
       },
       {
+        id: "rewrite-other-platform",
         label: "改写到另一平台",
         onClick: () => {
           setPlatform((current) => (current === "douyin" ? "xiaohongshu" : "douyin"));
@@ -657,11 +659,13 @@ function App() {
         },
       },
       {
+        id: "generate-three-versions",
         label: "生成 3 个版本",
         onClick: () =>
           setMessage("请在当前方向上再生成 3 个不同风格版本。"),
       },
       {
+        id: "export-markdown",
         label: "导出 Markdown",
         onClick: () =>
           void navigator.clipboard.writeText(
@@ -997,7 +1001,9 @@ function App() {
           id: createId("tool"),
           role: "tool",
           title: "工具调用",
-          content: `正在执行 ${event.name}，状态：${event.status}`,
+          content:
+            event.message ??
+            `正在调用业务工具：${event.name}（状态：${event.status}）`,
           createdAt: new Date().toISOString(),
         });
         setStatusText("Agent 正在整理中间结果");
@@ -1717,7 +1723,10 @@ function App() {
                   ) : null}
 
                   <div className="min-w-0">
-                    <h2 className="text-2xl font-bold tracking-tight text-foreground">
+                    <h2
+                      className="text-2xl font-bold tracking-tight text-foreground"
+                      data-testid="workspace-title"
+                    >
                       {workspaceTitle}
                     </h2>
                   </div>
@@ -1727,6 +1736,7 @@ function App() {
                   <div
                     className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${isStreaming ? "bg-warning-surface text-warning-foreground" : "bg-success-surface text-success-foreground"
                       }`}
+                    data-testid="workspace-status"
                   >
                     {isStreaming ? (
                       <RefreshCw className="h-4 w-4 animate-spin" />
@@ -1765,7 +1775,7 @@ function App() {
                   <div className="mb-4 flex flex-wrap items-center gap-2">
                     <div className="inline-flex max-w-3xl items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
                       <Sparkles className="h-3.5 w-3.5" />
-                      <span className="truncate">
+                      <span className="truncate" data-testid="workspace-persona-badge">
                         当前人设：{activeSystemPrompt || "通用助手"}
                       </span>
                     </div>
@@ -1773,6 +1783,7 @@ function App() {
                       className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-card-foreground transition hover:border-brand/40 hover:text-brand"
                       onClick={() => setIsThreadSettingsOpen(true)}
                       type="button"
+                      data-testid="open-thread-settings"
                     >
                       <Settings2 className="h-3.5 w-3.5" />
                       {isDraftThread ? "草稿设置" : "会话设置"}

@@ -165,6 +165,65 @@ def test_aliyun_client_generates_presigned_delivery_url(monkeypatch):
     }
 
 
+def test_aliyun_client_clamps_presigned_url_expiry(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class FakeAuthV4:
+        def __init__(self, access_key_id: str, access_key_secret: str) -> None:
+            calls["auth"] = (access_key_id, access_key_secret)
+
+    class FakeBucket:
+        def __init__(self, auth, endpoint: str, bucket_name: str, region: str) -> None:
+            calls["bucket"] = (auth, endpoint, bucket_name, region)
+
+        def sign_url(self, method: str, key: str, expires: int, **kwargs) -> str:
+            calls.setdefault("expires", []).append(expires)
+            return f"https://signed.example.com/{key}?Expires={expires}"
+
+    monkeypatch.setenv("OSS_SIGNED_URL_MIN_EXPIRE_SECONDS", "120")
+    monkeypatch.setenv("OSS_SIGNED_URL_MAX_EXPIRE_SECONDS", "7200")
+    monkeypatch.setattr(
+        oss_client_module,
+        "oss2",
+        SimpleNamespace(AuthV4=FakeAuthV4, Auth=None, Bucket=FakeBucket),
+    )
+
+    client = oss_client_module.AliyunOSSClient(
+        OSSSettings(
+            access_key_id="configured-key",
+            access_key_secret="configured-secret",
+            endpoint="https://oss-cn-shanghai.aliyuncs.com",
+            bucket_name="media-bucket",
+            public_base_url="https://media-bucket.oss-cn-shanghai.aliyuncs.com",
+            region="cn-shanghai",
+        )
+    )
+
+    client.generate_presigned_url("uploads/alice/cover.png", expires_in=30)
+    client.generate_presigned_url("uploads/alice/cover.png", expires_in=99999)
+
+    assert calls["expires"] == [120, 7200]
+
+
+def test_aliyun_client_extracts_endpoint_signed_url_object_key():
+    client = oss_client_module.AliyunOSSClient(
+        OSSSettings(
+            access_key_id="configured-key",
+            access_key_secret="configured-secret",
+            endpoint="https://oss-cn-shanghai.aliyuncs.com",
+            bucket_name="media-bucket",
+            public_base_url="https://cdn.example.com",
+            region="cn-shanghai",
+        )
+    )
+
+    object_key = client.extract_object_key_from_url(
+        "https://media-bucket.oss-cn-shanghai.aliyuncs.com/uploads/alice/cover.png?Expires=3600&Signature=test"
+    )
+
+    assert object_key == "uploads/alice/cover.png"
+
+
 def test_aliyun_client_sets_up_bucket_lifecycle_rules(monkeypatch):
     calls: dict[str, object] = {}
 

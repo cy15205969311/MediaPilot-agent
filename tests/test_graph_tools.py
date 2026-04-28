@@ -1,7 +1,8 @@
-
 import asyncio
+import json
 
 from app.models.schemas import MediaChatRequest
+from app.services import tools as business_tools
 from app.services.graph import LangGraphProvider
 from app.services.providers import BaseLLMProvider
 from app.services.tools import execute_business_tool, get_openai_tool_specs
@@ -61,7 +62,9 @@ def test_business_tool_registry_exports_openai_function_schema():
     assert set(parameters["required"]) == {"platform", "category"}
 
 
-def test_analyze_market_trends_tool_returns_structured_mock_json():
+def test_analyze_market_trends_tool_returns_structured_mock_json(monkeypatch):
+    monkeypatch.setattr(business_tools, "_load_tavily_api_key", lambda: "")
+
     result = execute_business_tool(
         "analyze_market_trends",
         {"platform": "xiaohongshu", "category": "\u5730\u57df\u6587\u65c5"},
@@ -71,6 +74,67 @@ def test_analyze_market_trends_tool_returns_structured_mock_json():
     assert '"category": "\u5730\u57df\u6587\u65c5"' in result
     assert "\u5468\u672b\u77ed\u9014" in result
     assert '"data_mode": "mock"' in result
+
+
+def test_analyze_market_trends_tool_uses_live_tavily_when_configured(monkeypatch):
+    monkeypatch.setattr(business_tools, "_load_tavily_api_key", lambda: "test-key")
+    monkeypatch.setattr(
+        business_tools,
+        "_request_tavily_market_search",
+        lambda query: {
+            "answer": "Citywalk 和周末短途仍然是小红书地域文旅内容里的核心高意图词。",
+            "results": [
+                {
+                    "title": "福州 Citywalk 周末短途攻略持续升温",
+                    "content": "用户更关注本地路线、地铁直达和一日游预算。",
+                    "url": "https://example.com/fuzhou-citywalk",
+                },
+                {
+                    "title": "亲子半日游与小众古镇成为收藏热点",
+                    "content": "亲子半日游、小众古镇、避坑清单持续高频出现。",
+                    "url": "https://example.com/family-trip",
+                },
+            ],
+        },
+    )
+
+    payload = json.loads(
+        execute_business_tool(
+            "analyze_market_trends",
+            {"platform": "xiaohongshu", "category": "\u5730\u57df\u6587\u65c5"},
+        )
+    )
+
+    assert payload["data_mode"] == "live_tavily"
+    assert payload["platform"] == "xiaohongshu"
+    assert payload["category"] == "\u5730\u57df\u6587\u65c5"
+    assert payload["source_count"] == 2
+    assert payload["evidence_sources"][0]["url"] == "https://example.com/fuzhou-citywalk"
+    assert "Citywalk" in payload["hot_keywords"]
+
+
+def test_analyze_market_trends_tool_falls_back_to_mock_when_live_search_fails(monkeypatch):
+    monkeypatch.setattr(business_tools, "_load_tavily_api_key", lambda: "test-key")
+
+    def raise_live_search_error(_: str) -> dict[str, object]:
+        raise RuntimeError("tavily boom")
+
+    monkeypatch.setattr(
+        business_tools,
+        "_request_tavily_market_search",
+        raise_live_search_error,
+    )
+
+    payload = json.loads(
+        execute_business_tool(
+            "analyze_market_trends",
+            {"platform": "xiaohongshu", "category": "\u5730\u57df\u6587\u65c5"},
+        )
+    )
+
+    assert payload["data_mode"] == "mock_fallback"
+    assert payload["fallback_reason"] == "tavily boom"
+    assert payload["hot_keywords"][0] == "\u5468\u672b\u77ed\u9014"
 
 
 def test_langgraph_executes_sequential_business_tools_before_final_draft():

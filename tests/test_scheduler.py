@@ -44,6 +44,42 @@ def test_create_scheduler_registers_cleanup_job() -> None:
     try:
         job = scheduler.get_job("cleanup_abandoned_materials")
         assert job is not None
+        lifecycle_job = scheduler.get_job("oss_lifecycle_rollout")
+        assert lifecycle_job is not None
     finally:
         if scheduler.running:
             scheduler.shutdown(wait=False)
+
+
+def test_run_oss_lifecycle_rollout_job_skips_when_disabled(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def fake_create_storage_client(preferred_backend=None):
+        observed["backend"] = preferred_backend
+        raise AssertionError("storage client should not be created when disabled")
+
+    monkeypatch.delenv("OSS_AUTO_SETUP_LIFECYCLE", raising=False)
+    monkeypatch.setattr(scheduler_module, "create_storage_client", fake_create_storage_client)
+
+    asyncio.run(scheduler_module.run_oss_lifecycle_rollout_job())
+
+    assert observed == {}
+
+
+def test_run_oss_lifecycle_rollout_job_sets_lifecycle_when_enabled(monkeypatch):
+    observed: dict[str, object] = {}
+
+    class FakeStorageClient:
+        def setup_bucket_lifecycle(self) -> None:
+            observed["setup_called"] = True
+
+    def fake_create_storage_client(preferred_backend=None):
+        observed["backend"] = preferred_backend
+        return FakeStorageClient()
+
+    monkeypatch.setenv("OSS_AUTO_SETUP_LIFECYCLE", "true")
+    monkeypatch.setattr(scheduler_module, "create_storage_client", fake_create_storage_client)
+
+    asyncio.run(scheduler_module.run_oss_lifecycle_rollout_job())
+
+    assert observed == {"backend": "oss", "setup_called": True}

@@ -38,7 +38,10 @@ export function ThreadSettingsModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4">
-      <div className="w-full max-w-2xl rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+      <div
+        className="w-full max-w-2xl rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
+        data-testid="thread-settings-modal"
+      >
         <div className="mb-5 flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
             <div
@@ -62,6 +65,7 @@ export function ThreadSettingsModal({
             disabled={isSubmitting}
             onClick={onClose}
             type="button"
+            data-testid="thread-settings-close"
           >
             <X className="h-5 w-5" />
           </button>
@@ -75,6 +79,7 @@ export function ThreadSettingsModal({
               onChange={(event) => setTitle(event.target.value)}
               placeholder="例如：年度资产配置复盘选题会"
               value={title}
+              data-testid="thread-settings-title-input"
             />
           </label>
 
@@ -87,6 +92,7 @@ export function ThreadSettingsModal({
               onChange={(event) => setSystemPrompt(event.target.value)}
               placeholder="请输入你希望我扮演的角色，留空则回退到通用助手。"
               value={systemPrompt}
+              data-testid="thread-settings-system-prompt-input"
             />
           </label>
         </div>
@@ -97,6 +103,7 @@ export function ThreadSettingsModal({
             disabled={isSubmitting}
             onClick={onClose}
             type="button"
+            data-testid="thread-settings-cancel"
           >
             取消
           </button>
@@ -105,6 +112,7 @@ export function ThreadSettingsModal({
             disabled={isSubmitting}
             onClick={() => void onSave({ title, systemPrompt })}
             type="button"
+            data-testid="thread-settings-save"
           >
             {isSubmitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
             保存设置

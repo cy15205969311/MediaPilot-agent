@@ -1,13 +1,25 @@
 import type { Page, Route } from "@playwright/test";
 import { expect } from "@playwright/test";
 
+import type {
+  AuthResponse,
+  AuthSessionItem,
+  AuthenticatedUser,
+  ChatStreamEvent,
+  HistoryMessageItem,
+  HistoryThreadSummary,
+  MediaChatRequestPayload,
+  ThreadMessagesApiResponse,
+  UploadApiResponse,
+} from "../src/app/types";
+
 export const authStorageKeys = {
   token: "omnimedia_token",
   refreshToken: "omnimedia_refresh_token",
   user: "omnimedia_user",
 } as const;
 
-export const testUser = {
+export const testUser: AuthenticatedUser = {
   id: "user-e2e-001",
   username: "e2e_user",
   nickname: "E2E User",
@@ -15,6 +27,137 @@ export const testUser = {
   avatar_url: null,
   created_at: "2026-04-28T00:00:00Z",
 };
+
+export type MockBackendOptions = {
+  user?: Partial<AuthenticatedUser>;
+  threads?: HistoryThreadSummary[];
+  threadMessagesById?: Record<string, ThreadMessagesApiResponse>;
+  sessions?: AuthSessionItem[];
+  failOnceUnauthorizedPaths?: string[];
+  responseDelayMsByPath?: Record<string, number>;
+  uploadResponse?:
+    | Partial<UploadApiResponse>
+    | ((context: {
+        purpose: "avatar" | "material";
+        threadId?: string | null;
+        filename: string;
+        uploadCount: number;
+      }) => UploadApiResponse);
+  streamEvents?:
+    | ChatStreamEvent[]
+    | ((payload: MediaChatRequestPayload) => ChatStreamEvent[]);
+};
+
+type MockBackendState = {
+  user: AuthenticatedUser;
+  threads: HistoryThreadSummary[];
+  threadMessagesById: Record<string, ThreadMessagesApiResponse>;
+  sessions: AuthSessionItem[];
+  unauthorizedOncePending: Set<string>;
+  refreshCount: number;
+  uploadCount: number;
+};
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+async function delay(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function defaultStreamEvents(payload: MediaChatRequestPayload): ChatStreamEvent[] {
+  return [
+    {
+      event: "start",
+      thread_id: payload.thread_id,
+      platform: payload.platform,
+      task_type: payload.task_type,
+      materials_count: payload.materials.length,
+    },
+    { event: "message", delta: "你好，", index: 0 },
+    { event: "message", delta: "这是 Playwright 自动化回复。", index: 1 },
+    { event: "done", thread_id: payload.thread_id },
+  ];
+}
+
+export function createMockThreadSummary(
+  overrides: Partial<HistoryThreadSummary> = {},
+): HistoryThreadSummary {
+  return {
+    id: overrides.id ?? "thread-e2e-001",
+    title: overrides.title ?? "E2E 默认会话",
+    latest_message_excerpt: overrides.latest_message_excerpt ?? "Playwright 自动化回复",
+    is_archived: overrides.is_archived ?? false,
+    updated_at: overrides.updated_at ?? "2026-04-28T08:00:00Z",
+  };
+}
+
+export function createMockThreadMessages(
+  overrides: Partial<ThreadMessagesApiResponse> = {},
+): ThreadMessagesApiResponse {
+  const threadId = overrides.thread_id ?? "thread-e2e-001";
+  return {
+    thread_id: threadId,
+    title: overrides.title ?? "E2E 默认会话",
+    system_prompt: overrides.system_prompt ?? "你是一位专业内容策划助手",
+    messages: overrides.messages ?? [],
+    materials: overrides.materials ?? [],
+  };
+}
+
+export function createMockHistoryMessage(
+  overrides: Partial<HistoryMessageItem> = {},
+): HistoryMessageItem {
+  return {
+    id: overrides.id ?? `message-${Math.random().toString(36).slice(2, 8)}`,
+    thread_id: overrides.thread_id ?? "thread-e2e-001",
+    role: overrides.role ?? "assistant",
+    message_type: overrides.message_type ?? "text",
+    content: overrides.content ?? "Playwright 自动化回复",
+    created_at: overrides.created_at ?? nowIso(),
+    artifact: overrides.artifact ?? null,
+    materials: overrides.materials ?? [],
+  };
+}
+
+export function createMockSession(
+  overrides: Partial<AuthSessionItem> = {},
+): AuthSessionItem {
+  return {
+    id: overrides.id ?? `session-${Math.random().toString(36).slice(2, 8)}`,
+    device_info: overrides.device_info ?? "Chrome on Windows",
+    ip_address: overrides.ip_address ?? "127.0.0.1",
+    expires_at: overrides.expires_at ?? "2026-05-01T00:00:00Z",
+    last_seen_at: overrides.last_seen_at ?? "2026-04-28T08:00:00Z",
+    created_at: overrides.created_at ?? "2026-04-28T07:00:00Z",
+    is_current: overrides.is_current ?? false,
+  };
+}
+
+export function buildAuthPayload(
+  username = testUser.username,
+  overrides: Partial<AuthenticatedUser> = {},
+  tokenSuffix = username,
+): AuthResponse {
+  return {
+    access_token: `access-token-${tokenSuffix}`,
+    refresh_token: `refresh-token-${tokenSuffix}`,
+    token_type: "bearer",
+    user: {
+      ...testUser,
+      username,
+      ...overrides,
+    },
+  };
+}
 
 async function fulfillJson(route: Route, payload: unknown, status = 200) {
   await route.fulfill({
@@ -24,48 +167,205 @@ async function fulfillJson(route: Route, payload: unknown, status = 200) {
   });
 }
 
-async function fulfillStream(route: Route, threadId: string) {
-  const body = [
-    `event: start\ndata: ${JSON.stringify({ thread_id: threadId, platform: "xiaohongshu", task_type: "content_generation", materials_count: 0 })}\n\n`,
-    `event: message\ndata: ${JSON.stringify({ delta: "你好，", index: 0 })}\n\n`,
-    `event: message\ndata: ${JSON.stringify({ delta: "这是 Playwright 自动化回复。", index: 1 })}\n\n`,
-    `event: done\ndata: ${JSON.stringify({ thread_id: threadId })}\n\n`,
-  ].join("");
-
-  await route.fulfill({
-    status: 200,
-    contentType: "text/event-stream; charset=utf-8",
-    body,
-  });
+function buildSseBody(events: ChatStreamEvent[]): string {
+  return events
+    .map((event) => {
+      const { event: eventName, ...payload } = event;
+      return `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+    })
+    .join("");
 }
 
-function authPayload(username = testUser.username) {
+function parseJsonBody<T>(route: Route): T {
+  return JSON.parse(route.request().postData() || "{}") as T;
+}
+
+function parseMultipartField(rawBody: string, fieldName: string): string | null {
+  const match = rawBody.match(
+    new RegExp(`name="${fieldName}"\\r\\n\\r\\n([^\\r\\n]+)`),
+  );
+  return match?.[1] ?? null;
+}
+
+function parseMultipartFilename(rawBody: string): string {
+  const match = rawBody.match(/name="file"; filename="([^"]+)"/);
+  return match?.[1] ?? "upload.bin";
+}
+
+function inferFileType(filename: string): string {
+  const lowered = filename.toLowerCase();
+  if (/\.(png|jpg|jpeg|webp)$/.test(lowered)) {
+    return "image";
+  }
+  if (/\.(mp4|mov)$/.test(lowered)) {
+    return "video";
+  }
+  return "document";
+}
+
+function inferContentType(filename: string): string {
+  const lowered = filename.toLowerCase();
+  if (lowered.endsWith(".png")) {
+    return "image/png";
+  }
+  if (/\.(jpg|jpeg)$/.test(lowered)) {
+    return "image/jpeg";
+  }
+  if (lowered.endsWith(".webp")) {
+    return "image/webp";
+  }
+  if (lowered.endsWith(".mp4")) {
+    return "video/mp4";
+  }
+  if (lowered.endsWith(".mov")) {
+    return "video/quicktime";
+  }
+  if (lowered.endsWith(".md")) {
+    return "text/markdown";
+  }
+  if (lowered.endsWith(".txt")) {
+    return "text/plain";
+  }
+  if (lowered.endsWith(".pdf")) {
+    return "application/pdf";
+  }
+  return "application/octet-stream";
+}
+
+function upsertThreadSummary(
+  state: MockBackendState,
+  summary: HistoryThreadSummary,
+): void {
+  const existingIndex = state.threads.findIndex((thread) => thread.id === summary.id);
+  if (existingIndex === -1) {
+    state.threads = [summary, ...state.threads];
+    return;
+  }
+
+  const nextThreads = [...state.threads];
+  nextThreads[existingIndex] = summary;
+  state.threads = nextThreads;
+}
+
+function resolveStreamEvents(
+  options: MockBackendOptions,
+  payload: MediaChatRequestPayload,
+): ChatStreamEvent[] {
+  if (typeof options.streamEvents === "function") {
+    return options.streamEvents(payload);
+  }
+  if (Array.isArray(options.streamEvents)) {
+    return options.streamEvents;
+  }
+  return defaultStreamEvents(payload);
+}
+
+function resolveUploadResponse(
+  options: MockBackendOptions,
+  context: {
+    purpose: "avatar" | "material";
+    threadId?: string | null;
+    filename: string;
+    uploadCount: number;
+  },
+): UploadApiResponse {
+  if (typeof options.uploadResponse === "function") {
+    return options.uploadResponse(context);
+  }
+
+  if (options.uploadResponse) {
+    return {
+      url:
+        options.uploadResponse.url ??
+        `https://signed-media.example.com/uploads/${context.filename}?Expires=3600`,
+      file_type: options.uploadResponse.file_type ?? inferFileType(context.filename),
+      content_type:
+        options.uploadResponse.content_type ?? inferContentType(context.filename),
+      filename: options.uploadResponse.filename ?? context.filename,
+      original_filename:
+        options.uploadResponse.original_filename ?? context.filename,
+      purpose: options.uploadResponse.purpose ?? context.purpose,
+      thread_id:
+        options.uploadResponse.thread_id ??
+        context.threadId ??
+        null,
+    };
+  }
+
+  const objectPrefix = context.purpose === "avatar" ? "avatars" : "uploads";
   return {
-    access_token: `access-token-${username}`,
-    refresh_token: `refresh-token-${username}`,
-    token_type: "bearer",
-    user: {
-      ...testUser,
-      username,
-    },
+    url: `https://signed-media.example.com/${objectPrefix}/${context.filename}?Expires=3600`,
+    file_type: inferFileType(context.filename),
+    content_type: inferContentType(context.filename),
+    filename: context.filename,
+    original_filename: context.filename,
+    purpose: context.purpose,
+    thread_id: context.threadId ?? null,
   };
 }
 
-export async function mockBackend(page: Page) {
+export async function mockBackend(page: Page, options: MockBackendOptions = {}) {
+  const initialUser = {
+    ...testUser,
+    ...(options.user ?? {}),
+  };
+
+  const state: MockBackendState = {
+    user: initialUser,
+    threads: clone(options.threads ?? []),
+    threadMessagesById: clone(options.threadMessagesById ?? {}),
+    sessions: clone(
+      options.sessions ?? [
+        createMockSession({ id: "session-current", is_current: true }),
+      ],
+    ),
+    unauthorizedOncePending: new Set(options.failOnceUnauthorizedPaths ?? []),
+    refreshCount: 0,
+    uploadCount: 0,
+  };
+
   await page.route("**/api/v1/**", async (route: Route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
 
+    if (state.unauthorizedOncePending.has(path)) {
+      state.unauthorizedOncePending.delete(path);
+      await fulfillJson(route, { detail: "当前登录状态已失效，请重新登录。" }, 401);
+      return;
+    }
+
+    const configuredDelay = options.responseDelayMsByPath?.[path] ?? 0;
+    if (configuredDelay > 0) {
+      await delay(configuredDelay);
+    }
+
     if (path === "/api/v1/auth/register" && request.method() === "POST") {
-      const body = JSON.parse(request.postData() || "{}") as { username?: string };
-      await fulfillJson(route, authPayload(body.username || testUser.username));
+      const body = parseJsonBody<{ username?: string }>(route);
+      const username = body.username || testUser.username;
+      state.user = { ...state.user, username };
+      await fulfillJson(route, buildAuthPayload(username, state.user, username));
       return;
     }
 
     if (path === "/api/v1/auth/login" && request.method() === "POST") {
       const form = new URLSearchParams(request.postData() || "");
-      await fulfillJson(route, authPayload(form.get("username") || testUser.username));
+      const username = form.get("username") || testUser.username;
+      state.user = { ...state.user, username };
+      await fulfillJson(route, buildAuthPayload(username, state.user, username));
+      return;
+    }
+
+    if (path === "/api/v1/auth/refresh" && request.method() === "POST") {
+      state.refreshCount += 1;
+      await fulfillJson(
+        route,
+        buildAuthPayload(
+          state.user.username,
+          state.user,
+          `refreshed-${state.refreshCount}`,
+        ),
+      );
       return;
     }
 
@@ -74,34 +374,236 @@ export async function mockBackend(page: Page) {
       return;
     }
 
+    if (path === "/api/v1/auth/password-reset" && request.method() === "POST") {
+      await fulfillJson(route, { password_reset: true, revoked_sessions: 2 });
+      return;
+    }
+
     if (path === "/api/v1/auth/logout" && request.method() === "POST") {
       await fulfillJson(route, { logged_out: true });
       return;
     }
 
+    if (path === "/api/v1/auth/profile" && request.method() === "PATCH") {
+      const body = parseJsonBody<Partial<AuthenticatedUser>>(route);
+      state.user = {
+        ...state.user,
+        ...(body.nickname !== undefined ? { nickname: body.nickname } : {}),
+        ...(body.bio !== undefined ? { bio: body.bio } : {}),
+        ...(body.avatar_url !== undefined ? { avatar_url: body.avatar_url } : {}),
+      };
+      await fulfillJson(route, state.user);
+      return;
+    }
+
+    if (path === "/api/v1/auth/reset-password" && request.method() === "POST") {
+      const revokedSessions = state.sessions.filter((session) => !session.is_current).length;
+      state.sessions = state.sessions.filter((session) => session.is_current);
+      await fulfillJson(route, { password_reset: true, revoked_sessions: revokedSessions });
+      return;
+    }
+
+    if (path === "/api/v1/auth/sessions" && request.method() === "GET") {
+      await fulfillJson(route, { items: state.sessions });
+      return;
+    }
+
+    const sessionMatch = path.match(/^\/api\/v1\/auth\/sessions\/([^/]+)$/);
+    if (sessionMatch && request.method() === "DELETE") {
+      const sessionId = sessionMatch[1];
+      state.sessions = state.sessions.filter((session) => session.id !== sessionId);
+      await fulfillJson(route, { id: sessionId, revoked: true });
+      return;
+    }
+
+    if (path === "/api/v1/media/upload" && request.method() === "POST") {
+      state.uploadCount += 1;
+      const rawBody = request.postData() || "";
+      const purpose =
+        (parseMultipartField(rawBody, "purpose") as "avatar" | "material" | null) ??
+        "material";
+      const threadId = parseMultipartField(rawBody, "thread_id");
+      const filename = parseMultipartFilename(rawBody);
+      const payload = resolveUploadResponse(options, {
+        purpose,
+        threadId,
+        filename,
+        uploadCount: state.uploadCount,
+      });
+      await fulfillJson(route, payload);
+      return;
+    }
+
     if (path === "/api/v1/media/threads" && request.method() === "GET") {
-      await fulfillJson(route, { items: [], total: 0, page: 1, page_size: 20 });
+      await fulfillJson(route, {
+        items: state.threads,
+        total: state.threads.length,
+        page: 1,
+        page_size: 20,
+      });
+      return;
+    }
+
+    const threadMessagesMatch = path.match(/^\/api\/v1\/media\/threads\/([^/]+)\/messages$/);
+    if (threadMessagesMatch && request.method() === "GET") {
+      const threadId = threadMessagesMatch[1];
+      const payload =
+        state.threadMessagesById[threadId] ??
+        createMockThreadMessages({
+          thread_id: threadId,
+          title:
+            state.threads.find((thread) => thread.id === threadId)?.title ?? "Untitled thread",
+        });
+      await fulfillJson(route, payload);
+      return;
+    }
+
+    const threadMutationMatch = path.match(/^\/api\/v1\/media\/threads\/([^/]+)$/);
+    if (threadMutationMatch && request.method() === "PATCH") {
+      const threadId = threadMutationMatch[1];
+      const body = parseJsonBody<{
+        title?: string;
+        is_archived?: boolean;
+        system_prompt?: string;
+      }>(route);
+      const existingSummary =
+        state.threads.find((thread) => thread.id === threadId) ??
+        createMockThreadSummary({ id: threadId });
+      const nextSummary: HistoryThreadSummary = {
+        ...existingSummary,
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.is_archived !== undefined ? { is_archived: body.is_archived } : {}),
+        updated_at: nowIso(),
+      };
+      upsertThreadSummary(state, nextSummary);
+
+      const existingMessages =
+        state.threadMessagesById[threadId] ??
+        createMockThreadMessages({ thread_id: threadId, title: nextSummary.title });
+      state.threadMessagesById[threadId] = {
+        ...existingMessages,
+        title: body.title ?? existingMessages.title,
+        system_prompt:
+          body.system_prompt !== undefined
+            ? body.system_prompt
+            : existingMessages.system_prompt,
+      };
+
+      await fulfillJson(route, nextSummary);
+      return;
+    }
+
+    if (threadMutationMatch && request.method() === "DELETE") {
+      const threadId = threadMutationMatch[1];
+      state.threads = state.threads.filter((thread) => thread.id !== threadId);
+      delete state.threadMessagesById[threadId];
+      await fulfillJson(route, { id: threadId, deleted: true });
       return;
     }
 
     if (path === "/api/v1/media/chat/stream" && request.method() === "POST") {
-      const body = JSON.parse(request.postData() || "{}") as { thread_id?: string };
-      await fulfillStream(route, body.thread_id || "thread-e2e");
+      const body = parseJsonBody<MediaChatRequestPayload>(route);
+      const events = resolveStreamEvents(options, body);
+      const assistantContent = events
+        .filter(
+          (
+            event,
+          ): event is Extract<ChatStreamEvent, { event: "message" }> =>
+            event.event === "message",
+        )
+        .map((event) => event.delta)
+        .join("");
+      const createdAt = nowIso();
+
+      const requestMaterials = body.materials.map((material, index) => ({
+        id: `material-${body.thread_id}-${index + 1}`,
+        thread_id: body.thread_id,
+        message_id: `message-user-${body.thread_id}`,
+        type: material.type,
+        url: material.url ?? null,
+        text: material.text,
+        created_at: createdAt,
+      }));
+
+      const existingThreadMessages =
+        state.threadMessagesById[body.thread_id] ??
+        createMockThreadMessages({
+          thread_id: body.thread_id,
+          title: body.thread_title ?? "Untitled thread",
+          system_prompt: body.system_prompt ?? "",
+        });
+
+      const userMessage = createMockHistoryMessage({
+        id: `message-user-${body.thread_id}-${Date.now()}`,
+        thread_id: body.thread_id,
+        role: "user",
+        message_type: "text",
+        content: body.message,
+        created_at: createdAt,
+        materials: requestMaterials,
+      });
+      const assistantMessage = createMockHistoryMessage({
+        id: `message-assistant-${body.thread_id}-${Date.now()}`,
+        thread_id: body.thread_id,
+        role: "assistant",
+        message_type: "text",
+        content: assistantContent || "Playwright 自动化回复",
+        created_at: createdAt,
+      });
+
+      state.threadMessagesById[body.thread_id] = {
+        thread_id: body.thread_id,
+        title:
+          body.thread_title ??
+          existingThreadMessages.title ??
+          state.threads.find((thread) => thread.id === body.thread_id)?.title ??
+          "Untitled thread",
+        system_prompt: body.system_prompt ?? existingThreadMessages.system_prompt ?? "",
+        messages: [
+          ...existingThreadMessages.messages,
+          userMessage,
+          assistantMessage,
+        ],
+        materials: [...existingThreadMessages.materials, ...requestMaterials],
+      };
+
+      upsertThreadSummary(state, {
+        id: body.thread_id,
+        title:
+          body.thread_title ??
+          existingThreadMessages.title ??
+          state.threads.find((thread) => thread.id === body.thread_id)?.title ??
+          "Untitled thread",
+        latest_message_excerpt: assistantContent || body.message,
+        is_archived: false,
+        updated_at: createdAt,
+      });
+
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream; charset=utf-8",
+        body: buildSseBody(events),
+      });
       return;
     }
 
     await fulfillJson(route, { detail: `Unhandled E2E route: ${path}` }, 404);
   });
+
+  return { state };
 }
 
-export async function seedAuthenticatedSession(page: Page) {
+export async function seedAuthenticatedSession(
+  page: Page,
+  payload: AuthResponse = buildAuthPayload(),
+) {
   await page.addInitScript(
-    ({ keys, payload }) => {
-      window.localStorage.setItem(keys.token, payload.access_token);
-      window.localStorage.setItem(keys.refreshToken, payload.refresh_token);
-      window.localStorage.setItem(keys.user, JSON.stringify(payload.user));
+    ({ keys, authPayload }) => {
+      window.localStorage.setItem(keys.token, authPayload.access_token);
+      window.localStorage.setItem(keys.refreshToken, authPayload.refresh_token);
+      window.localStorage.setItem(keys.user, JSON.stringify(authPayload.user));
     },
-    { keys: authStorageKeys, payload: authPayload() },
+    { keys: authStorageKeys, authPayload: payload },
   );
 }
 

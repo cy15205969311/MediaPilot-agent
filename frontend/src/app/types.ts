@@ -206,6 +206,7 @@ export type ToolCallStreamEvent = {
   event: "tool_call";
   name: string;
   status: string;
+  message?: string;
 };
 
 export type ArtifactStreamEvent = {
@@ -233,6 +234,7 @@ export type ChatStreamEvent =
   | DoneStreamEvent;
 
 export type ArtifactAction = {
+  id: string;
   label: string;
   onClick: () => void;
   variant?: "primary" | "secondary";
