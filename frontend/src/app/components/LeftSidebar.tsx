@@ -30,6 +30,7 @@ type LeftSidebarProps = {
   mutatingThreadId: string | null;
   currentUser: AuthenticatedUser;
   draftCount?: number;
+  templateCount?: number;
   onCreateThread: () => void;
   onDeleteThread: (thread: ThreadItem) => void;
   onRenameThread: (thread: ThreadItem) => void;
@@ -48,7 +49,7 @@ const shortcuts: Array<{
   icon: typeof Target;
 }> = [
   { id: "topics", label: "选题池", count: 12, icon: Target },
-  { id: "templates", label: "模板库", count: 8, icon: FileText },
+  { id: "templates", label: "模板中心", icon: FileText },
   { id: "dashboard", label: "数据看板", icon: BarChart3 },
   { id: "drafts", label: "我的草稿", icon: Clock },
 ];
@@ -56,9 +57,14 @@ const shortcuts: Array<{
 function getShortcutCount(
   shortcutId: Exclude<WorkspaceView, "chat">,
   draftCount?: number,
+  templateCount?: number,
 ): number | undefined {
   if (shortcutId === "drafts") {
     return draftCount;
+  }
+
+  if (shortcutId === "templates") {
+    return templateCount;
   }
 
   return shortcuts.find((item) => item.id === shortcutId)?.count;
@@ -74,6 +80,7 @@ export function LeftSidebar({
   mutatingThreadId,
   currentUser,
   draftCount,
+  templateCount,
   onCreateThread,
   onDeleteThread,
   onRenameThread,
@@ -126,9 +133,9 @@ export function LeftSidebar({
         <div className="border-b border-border p-4">
           <button
             className="w-full rounded-[24px] bg-surface-tint p-4 text-left transition hover:shadow-sm"
+            data-testid="sidebar-open-profile"
             onClick={onOpenProfile}
             type="button"
-            data-testid="sidebar-open-profile"
           >
             <div className="mb-3 flex items-center gap-3">
               <div
@@ -174,9 +181,9 @@ export function LeftSidebar({
             <button
               aria-label="新建会话"
               className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
+              data-testid="sidebar-create-thread"
               onClick={onCreateThread}
               type="button"
-              data-testid="sidebar-create-thread"
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -204,8 +211,7 @@ export function LeftSidebar({
             ) : null}
 
             {threads.map((thread) => {
-              const isActive =
-                activeView === "chat" && activeThreadId === thread.id;
+              const isActive = activeView === "chat" && activeThreadId === thread.id;
               const isMutating = mutatingThreadId === thread.id;
 
               return (
@@ -217,10 +223,10 @@ export function LeftSidebar({
                 >
                   <button
                     className="w-full rounded-xl px-3 py-3 text-left"
+                    data-testid={`sidebar-thread-${thread.id}`}
                     disabled={isMutating}
                     onClick={() => onSelectThread(thread)}
                     type="button"
-                    data-testid={`sidebar-thread-${thread.id}`}
                   >
                     <div className="mb-1 flex items-start justify-between gap-3">
                       <div className="truncate text-sm font-medium text-foreground">
@@ -242,20 +248,20 @@ export function LeftSidebar({
                   <div className="flex items-center gap-1 px-2 pb-2 opacity-0 transition group-hover:opacity-100">
                     <button
                       className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2 text-xs text-muted-foreground transition hover:bg-card hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      data-testid={`sidebar-thread-rename-${thread.id}`}
                       disabled={isMutating}
                       onClick={() => onRenameThread(thread)}
                       type="button"
-                      data-testid={`sidebar-thread-rename-${thread.id}`}
                     >
                       <Pencil className="h-3.5 w-3.5" />
                       重命名
                     </button>
                     <button
                       className="inline-flex h-8 items-center gap-1 rounded-lg border border-danger-foreground/20 px-2 text-xs text-danger-foreground transition hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-50"
+                      data-testid={`sidebar-thread-delete-${thread.id}`}
                       disabled={isMutating}
                       onClick={() => onDeleteThread(thread)}
                       type="button"
-                      data-testid={`sidebar-thread-delete-${thread.id}`}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                       删除
@@ -270,7 +276,7 @@ export function LeftSidebar({
             <h3 className="mb-3 text-sm font-semibold text-foreground">业务模块</h3>
             <div className="space-y-2">
               {shortcuts.map((item) => {
-                const count = getShortcutCount(item.id, draftCount);
+                const count = getShortcutCount(item.id, draftCount, templateCount);
                 const isActive = activeView === item.id;
 
                 return (

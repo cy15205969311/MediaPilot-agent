@@ -16,6 +16,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.chat import router as media_chat_router
 from app.api.v1.history import router as media_history_router
 from app.api.v1.oss import UPLOADS_DIR, router as media_upload_router
+from app.api.v1.templates import router as media_templates_router
 from app.db.database import engine
 from app.db.models import Base
 from app.services.scheduler import (
@@ -159,3 +160,4 @@ app.include_router(auth_router)
 app.include_router(media_chat_router)
 app.include_router(media_history_router)
 app.include_router(media_upload_router)
+app.include_router(media_templates_router)

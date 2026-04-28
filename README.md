@@ -202,10 +202,10 @@ pip install -r requirements.txt
 ```bash
 python -m pytest -q
 ```
-Current backend regression baseline: `81 passed`.
+Current backend regression baseline: `86 passed`.
 
 默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
-当前后端回归基线为 `81 passed`。
+当前后端回归基线为 `86 passed`。
 
 执行前端构建：
 
@@ -221,7 +221,7 @@ cd frontend
 npx playwright test
 ```
 
-当前前端 E2E 回归基线为 `19 passed`。
+当前前端 E2E 回归基线为 `21 passed`。
 
 打开 Playwright 可视化测试面板：
 
@@ -252,3 +252,9 @@ npx playwright test --ui
 这一步让 MediaPilot 不再只是单一聊天页，而是开始具备“内容资产管理工作台”的基础骨架。
 
 后续每次完成功能、接口、持久化、流程、测试基线或重要 UI 变更时，都必须同步更新 `README.md` 与 `DEVELOPMENT.md` 中相关章节，确保仓库文档与代码保持一致。
+## 10. 模板库
+
+- 模板数据来自后端 `GET /api/v1/media/templates`
+- 当前内置了小红书文旅探店、闲鱼二手转化、TechBlog 硬核教程三类模板
+- 点击模板卡片上的“一键使用”后，工作台会自动切回聊天区并弹出新建会话窗口
+- 被选模板的 `title` 与 `system_prompt` 会自动填入新建会话表单，减少重复输入成本

@@ -86,6 +86,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    templates: Mapped[list["Template"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     refresh_sessions: Mapped[list["RefreshSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -225,6 +229,30 @@ class ArtifactRecord(Base):
 
     thread: Mapped[Thread] = relationship(back_populates="artifacts")
     message: Mapped[Message] = relationship(back_populates="artifacts")
+
+
+class Template(Base):
+    __tablename__ = "templates"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    is_preset: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utcnow,
+        nullable=False,
+    )
+
+    user: Mapped[User | None] = relationship(back_populates="templates")
 
 
 class UploadRecord(Base):

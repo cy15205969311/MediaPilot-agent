@@ -8,6 +8,7 @@ import {
   createMockDraftSummary,
   createMockHistoryMessage,
   createMockSession,
+  createMockTemplate,
   createMockThreadMessages,
   createMockThreadSummary,
   expectAuthenticated,
@@ -19,10 +20,7 @@ async function openWorkspace(
   page: Page,
   options: Parameters<typeof mockBackend>[1] = {},
 ) {
-  const authPayload = buildAuthPayload(
-    options.user?.username,
-    options.user,
-  );
+  const authPayload = buildAuthPayload(options.user?.username, options.user);
   await mockBackend(page, options);
   await seedAuthenticatedSession(page, authPayload);
   await page.goto("/");
@@ -35,7 +33,7 @@ test("creates a new titled conversation from the sidebar modal", async ({ page }
   await openWorkspace(page);
   await page.getByTestId("sidebar-create-thread").click();
   await expect(page.getByTestId("new-thread-modal")).toBeVisible();
-  await page.getByPlaceholder("For example: Annual portfolio review ideas").fill(threadTitle);
+  await page.getByPlaceholder("例如：五一福州周边文旅选题").fill(threadTitle);
   await page.getByRole("button", { name: "开始新会话" }).click();
 
   await expect(page.getByTestId("new-thread-modal")).toBeHidden();
@@ -98,6 +96,117 @@ test("shows the drafts empty state when no saved artifacts exist", async ({ page
 
   await expect(page.getByTestId("drafts-view")).toBeVisible();
   await expect(page.getByTestId("drafts-empty-state")).toBeVisible();
+});
+
+test("opens the template center and prefills a new thread modal from a template", async ({
+  page,
+}) => {
+  const template = createMockTemplate({
+    id: "template-preset-xianyu-secondhand-sku",
+    title: "高转化二手闲置 SKU",
+    description: "适合闲鱼二手发布，强调回血、真诚和转化效率。",
+    platform: "闲鱼",
+    category: "电商/闲鱼",
+    system_prompt:
+      "你是一名擅长闲鱼高转化文案的二手运营助手，请围绕精致穷、同龄人焦虑、真实成色与回血效率组织表达。",
+    is_preset: true,
+  });
+
+  await openWorkspace(page, {
+    templates: [
+      template,
+      createMockTemplate({
+        id: "template-preset-tech-iot-markdown",
+        title: "硬核技术教程（IoT / STM32）",
+        platform: "技术博客",
+        category: "数码科技",
+        is_preset: true,
+      }),
+    ],
+  });
+
+  await page.getByTestId("sidebar-shortcut-templates").click();
+  await expect(page.getByTestId("templates-view")).toBeVisible();
+  await expect(page.getByTestId(`template-card-${template.id}`)).toContainText(
+    template.title,
+  );
+
+  await page.getByTestId(`template-use-${template.id}`).click();
+
+  await expect(page.getByTestId("templates-view")).toBeHidden();
+  await expect(page.getByTestId("workspace-chat-view")).toBeVisible();
+  await expect(page.getByTestId("new-thread-modal")).toBeVisible();
+  await expect(page.getByTestId("new-thread-title-input")).toHaveValue(template.title);
+  await expect(page.getByTestId("new-thread-system-prompt-input")).toContainText("精致穷");
+  await expect(page.getByTestId("new-thread-system-prompt-input")).toContainText(
+    "同龄人焦虑",
+  );
+});
+
+test("creates a custom template and batch deletes selected templates", async ({
+  page,
+}) => {
+  await openWorkspace(page, {
+    templates: [
+      createMockTemplate({
+        id: "template-preset-travel-hotflow",
+        title: "文旅探店爆款流",
+        platform: "小红书",
+        category: "美食文旅",
+        is_preset: true,
+      }),
+    ],
+  });
+
+  await page.getByTestId("sidebar-shortcut-templates").click();
+  await expect(page.getByTestId("templates-view")).toBeVisible();
+
+  await page.getByTestId("template-create-open").click();
+  await expect(page.getByTestId("template-create-modal")).toBeVisible();
+  await page.getByTestId("template-create-title").fill("我的理财复盘模板");
+  await page
+    .getByTestId("template-create-description")
+    .fill("适合 28-35 岁女性做月度预算复盘。");
+  await page.getByTestId("template-create-platform").selectOption("小红书");
+  await page.getByTestId("template-create-category").selectOption("职场金融");
+  await page
+    .getByTestId("template-create-system-prompt")
+    .fill("请围绕精致穷、预算焦虑、温柔理财建议输出内容。");
+  await page.getByTestId("template-create-submit").click();
+
+  const financeCard = page.locator('[data-testid^="template-card-template-user-"]').filter({
+    hasText: "我的理财复盘模板",
+  });
+  await expect(financeCard).toHaveCount(1);
+
+  await page.getByTestId("template-create-open").click();
+  await page.getByTestId("template-create-title").fill("我的教育标题模板");
+  await page
+    .getByTestId("template-create-description")
+    .fill("适合初高中教辅资料做标题引流。");
+  await page.getByTestId("template-create-platform").selectOption("抖音");
+  await page.getByTestId("template-create-category").selectOption("教育/干货");
+  await page
+    .getByTestId("template-create-system-prompt")
+    .fill("请围绕提分、逆袭、家长焦虑生成高点击标题。");
+  await page.getByTestId("template-create-submit").click();
+
+  const customCards = page.locator('[data-testid^="template-card-template-user-"]');
+  await expect(customCards).toHaveCount(2);
+
+  const customCheckboxes = page.locator('[data-testid^="template-checkbox-template-user-"]');
+  await customCheckboxes.nth(0).check();
+  await customCheckboxes.nth(1).check();
+  await expect(page.getByTestId("templates-selected-count")).toContainText("已选择 2 项");
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    await dialog.accept();
+  });
+
+  await page.getByTestId("template-delete-selected").click();
+  await expect(customCards).toHaveCount(0);
+  await expect(page.getByTestId("template-card-template-preset-travel-hotflow")).toBeVisible();
 });
 
 test("opens a saved draft preview and jumps back into its conversation", async ({
@@ -163,15 +272,11 @@ test("opens a saved draft preview and jumps back into its conversation", async (
 
   await page.getByTestId("sidebar-shortcut-drafts").click();
   await expect(page.getByTestId("drafts-view")).toBeVisible();
-  await expect(page.getByTestId(`draft-card-${draftId}`)).toContainText(
-    draftArtifact.title,
-  );
+  await expect(page.getByTestId(`draft-card-${draftId}`)).toContainText(draftArtifact.title);
 
   await page.getByTestId(`draft-preview-${draftId}`).click();
   await expect(page.getByTestId("draft-detail-dialog")).toBeVisible();
-  await expect(page.getByTestId("draft-detail-dialog")).toContainText(
-    draftArtifact.body,
-  );
+  await expect(page.getByTestId("draft-detail-dialog")).toContainText(draftArtifact.body);
 
   await page
     .getByTestId("draft-detail-dialog")
@@ -490,9 +595,9 @@ test("updates nickname, bio, and avatar from the profile modal", async ({ page }
     buffer: Buffer.from("fake-avatar"),
   });
   await page.getByTestId("profile-nickname-input").fill("Updated profile name");
-  await page.getByTestId("profile-bio-input").fill(
-    "Updated profile bio for regression verification.",
-  );
+  await page
+    .getByTestId("profile-bio-input")
+    .fill("Updated profile bio for regression verification.");
   await page.getByTestId("profile-save-button").click();
 
   await expect(page.getByTestId("user-profile-modal")).toBeHidden();

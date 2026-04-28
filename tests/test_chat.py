@@ -1158,6 +1158,212 @@ def test_artifact_list_endpoint_returns_newest_user_drafts(client: TestClient):
     assert artifact.artifact_type == "content_draft"
 
 
+def legacy_template_list_endpoint_returns_builtin_templates(client: TestClient):
+    headers = register_user(client, username="alice-templates")
+
+    response = client.get("/api/v1/media/templates", headers=headers)
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["total"] == 3
+    assert [item["id"] for item in payload["items"]] == [
+        "template-xiaohongshu-travel-hotflow",
+        "template-xianyu-secondhand-sku",
+        "template-techblog-hardcore-markdown",
+    ]
+    assert [item["platform"] for item in payload["items"]] == [
+        "Xiaohongshu",
+        "Xianyu",
+        "TechBlog",
+    ]
+    assert payload["items"][0]["title"] == "文旅探店爆款流"
+    assert "周末短途游" in payload["items"][0]["description"]
+    assert "情绪价值" in payload["items"][0]["system_prompt"]
+    assert payload["items"][1]["title"] == "高转化二手闲置 SKU"
+    assert "精致穷" in payload["items"][1]["description"]
+    assert "闲鱼" in payload["items"][1]["system_prompt"]
+    assert payload["items"][2]["title"] == "硬核技术教程（如 IoT / 嵌入式）"
+    assert "Markdown" in payload["items"][2]["description"]
+    assert "Markdown" in payload["items"][2]["system_prompt"]
+
+
+def test_template_list_endpoint_returns_preset_templates(client: TestClient):
+    headers = register_user(client, username="alice-templates")
+
+    response = client.get("/api/v1/media/templates", headers=headers)
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["total"] == 6
+    assert [item["id"] for item in payload["items"]] == [
+        "template-preset-travel-hotflow",
+        "template-preset-finance-recovery",
+        "template-preset-beauty-overnight-repair",
+        "template-preset-tech-iot-markdown",
+        "template-preset-xianyu-secondhand-sku",
+        "template-preset-education-score-boost",
+    ]
+    assert [item["platform"] for item in payload["items"]] == [
+        "小红书",
+        "小红书",
+        "小红书",
+        "技术博客",
+        "闲鱼",
+        "抖音",
+    ]
+    assert [item["category"] for item in payload["items"]] == [
+        "美食文旅",
+        "职场金融",
+        "美妆护肤",
+        "数码科技",
+        "电商/闲鱼",
+        "教育/干货",
+    ]
+    assert payload["items"][0]["title"] == "文旅探店爆款流"
+    assert "周末短途游" in payload["items"][0]["description"]
+    assert "生活方式编辑" in payload["items"][0]["system_prompt"]
+    assert payload["items"][1]["title"] == "精致穷回血理财方案"
+    assert "28-35 岁女性" in payload["items"][1]["description"]
+    assert "同龄人焦虑" in payload["items"][1]["system_prompt"]
+    assert payload["items"][3]["title"] == "硬核技术教程（IoT / STM32）"
+    assert "STM32" in payload["items"][3]["description"]
+    assert "Markdown" in payload["items"][3]["system_prompt"]
+    assert all(item["is_preset"] is True for item in payload["items"])
+    assert all(item["created_at"].endswith("Z") for item in payload["items"])
+
+
+def test_template_create_endpoint_persists_user_template(client: TestClient):
+    headers = register_user(client, username="alice-template-create")
+
+    create_response = client.post(
+        "/api/v1/media/templates",
+        headers=headers,
+        json={
+            "title": "我的理财复盘模板",
+            "description": "适合 28-35 岁女性做月度预算复盘。",
+            "platform": "小红书",
+            "category": "职场金融",
+            "system_prompt": "请围绕精致穷、预算焦虑、温柔理财建议输出内容。",
+        },
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+    assert created["id"].startswith("template-user-")
+    assert created["title"] == "我的理财复盘模板"
+    assert created["platform"] == "小红书"
+    assert created["category"] == "职场金融"
+    assert created["is_preset"] is False
+    assert created["created_at"].endswith("Z")
+
+    list_response = client.get("/api/v1/media/templates", headers=headers)
+    assert list_response.status_code == 200
+    items = list_response.json()["items"]
+    assert len(items) == 7
+    assert any(item["id"] == created["id"] for item in items)
+
+
+def test_template_delete_endpoint_removes_only_owned_custom_template(
+    client: TestClient,
+):
+    alice_headers = register_user(client, username="alice-template-delete")
+    bob_headers = register_user(client, username="bob-template-delete")
+
+    create_response = client.post(
+        "/api/v1/media/templates",
+        headers=alice_headers,
+        json={
+            "title": "Alice 自定义模板",
+            "description": "Alice only",
+            "platform": "小红书",
+            "category": "美食文旅",
+            "system_prompt": "Alice prompt",
+        },
+    )
+    template_id = create_response.json()["id"]
+
+    delete_response = client.delete(
+        f"/api/v1/media/templates/{template_id}",
+        headers=alice_headers,
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {
+        "deleted_count": 1,
+        "deleted_ids": [template_id],
+    }
+
+    alice_list = client.get("/api/v1/media/templates", headers=alice_headers)
+    assert alice_list.status_code == 200
+    assert all(item["id"] != template_id for item in alice_list.json()["items"])
+
+    bob_delete = client.delete(
+        f"/api/v1/media/templates/{template_id}",
+        headers=bob_headers,
+    )
+    assert bob_delete.status_code == 404
+
+
+def test_template_batch_delete_endpoint_removes_selected_custom_templates(
+    client: TestClient,
+):
+    headers = register_user(client, username="alice-template-batch-delete")
+
+    created_ids: list[str] = []
+    for title, category in [
+        ("模板 A", "美食文旅"),
+        ("模板 B", "职场金融"),
+        ("模板 C", "教育/干货"),
+    ]:
+        response = client.post(
+            "/api/v1/media/templates",
+            headers=headers,
+            json={
+                "title": title,
+                "description": f"{title} description",
+                "platform": "小红书",
+                "category": category,
+                "system_prompt": f"{title} prompt",
+            },
+        )
+        assert response.status_code == 201
+        created_ids.append(response.json()["id"])
+
+    delete_response = client.request(
+        "DELETE",
+        "/api/v1/media/templates",
+        headers=headers,
+        json={"template_ids": created_ids[:2]},
+    )
+    assert delete_response.status_code == 200
+    delete_payload = delete_response.json()
+    assert delete_payload["deleted_count"] == 2
+    assert set(delete_payload["deleted_ids"]) == set(created_ids[:2])
+
+    list_response = client.get("/api/v1/media/templates", headers=headers)
+    assert list_response.status_code == 200
+    remaining_ids = {item["id"] for item in list_response.json()["items"]}
+    assert created_ids[0] not in remaining_ids
+    assert created_ids[1] not in remaining_ids
+    assert created_ids[2] in remaining_ids
+
+
+def test_template_delete_rejects_preset_templates(client: TestClient):
+    headers = register_user(client, username="alice-template-preset-guard")
+
+    single_delete = client.delete(
+        "/api/v1/media/templates/template-preset-travel-hotflow",
+        headers=headers,
+    )
+    assert single_delete.status_code == 403
+
+    batch_delete = client.request(
+        "DELETE",
+        "/api/v1/media/templates",
+        headers=headers,
+        json={"template_ids": ["template-preset-travel-hotflow"]},
+    )
+    assert batch_delete.status_code == 403
+
+
 def test_artifact_delete_endpoint_removes_only_owned_draft(client: TestClient):
     alice_headers = register_user(client, username="alice-delete-single")
     bob_headers = register_user(client, username="bob-delete-single")

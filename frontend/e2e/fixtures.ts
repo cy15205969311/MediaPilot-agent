@@ -11,6 +11,7 @@ import type {
   HistoryMessageItem,
   HistoryThreadSummary,
   MediaChatRequestPayload,
+  TemplateSummaryItem,
   ThreadMessagesApiResponse,
   UploadApiResponse,
 } from "../src/app/types";
@@ -34,6 +35,7 @@ export type MockBackendOptions = {
   user?: Partial<AuthenticatedUser>;
   threads?: HistoryThreadSummary[];
   drafts?: DraftSummaryItem[];
+  templates?: TemplateSummaryItem[];
   threadMessagesById?: Record<string, ThreadMessagesApiResponse>;
   sessions?: AuthSessionItem[];
   failOnceUnauthorizedPaths?: string[];
@@ -55,6 +57,7 @@ type MockBackendState = {
   user: AuthenticatedUser;
   threads: HistoryThreadSummary[];
   drafts: DraftSummaryItem[];
+  templates: TemplateSummaryItem[];
   threadMessagesById: Record<string, ThreadMessagesApiResponse>;
   sessions: AuthSessionItem[];
   unauthorizedOncePending: Set<string>;
@@ -111,7 +114,7 @@ export function createMockThreadMessages(
   return {
     thread_id: threadId,
     title: overrides.title ?? "E2E 默认会话",
-    system_prompt: overrides.system_prompt ?? "你是一位专业内容策划助手",
+    system_prompt: overrides.system_prompt ?? "你是一位专业内容策划助手。",
     messages: overrides.messages ?? [],
     materials: overrides.materials ?? [],
   };
@@ -179,6 +182,88 @@ export function createMockSession(
     created_at: overrides.created_at ?? "2026-04-28T07:00:00Z",
     is_current: overrides.is_current ?? false,
   };
+}
+
+export function createMockTemplate(
+  overrides: Partial<TemplateSummaryItem> = {},
+): TemplateSummaryItem {
+  return {
+    id: overrides.id ?? `template-${Math.random().toString(36).slice(2, 8)}`,
+    title: overrides.title ?? "模板标题",
+    description: overrides.description ?? "模板描述",
+    platform: overrides.platform ?? "小红书",
+    category: overrides.category ?? "美食文旅",
+    system_prompt:
+      overrides.system_prompt ??
+      "你是一个可复用的内容生产模板，用于快速生成符合场景的人设与提示词。",
+    is_preset: overrides.is_preset ?? false,
+    created_at: overrides.created_at ?? nowIso(),
+  };
+}
+
+function createDefaultTemplates(): TemplateSummaryItem[] {
+  return [
+    createMockTemplate({
+      id: "template-preset-travel-hotflow",
+      title: "文旅探店爆款流",
+      description: "突出情绪价值与在地体验，适合周末短途游与城市周边探店内容。",
+      platform: "小红书",
+      category: "美食文旅",
+      system_prompt:
+        "你是一名擅长小红书文旅探店内容策划的生活方式编辑，请围绕真实路线、氛围细节、出片机位与自然互动 CTA 组织内容。",
+      is_preset: true,
+    }),
+    createMockTemplate({
+      id: "template-preset-finance-recovery",
+      title: "精致穷回血理财方案",
+      description: "聚焦 28-35 岁女性的预算管理与温和理财表达，语气温柔且专业。",
+      platform: "小红书",
+      category: "职场金融",
+      system_prompt:
+        "你是一名擅长女性理财内容的品牌顾问，面对的是 28-35 岁、处于精致穷阶段并承受同龄人焦虑的职场女性。",
+      is_preset: true,
+    }),
+    createMockTemplate({
+      id: "template-preset-beauty-overnight-repair",
+      title: "熬夜党护肤急救方案",
+      description: "面向高压熬夜人群的护肤文案模板，强调情绪价值与即时改善感。",
+      platform: "小红书",
+      category: "美妆护肤",
+      system_prompt:
+        "你是一名懂成分也懂情绪价值的小红书护肤主编，请输出专业可信又带安慰感的护肤内容。",
+      is_preset: true,
+    }),
+    createMockTemplate({
+      id: "template-preset-tech-iot-markdown",
+      title: "硬核技术教程（IoT / STM32）",
+      description: "结构严谨的技术教程模板，适合 STM32、嵌入式与物联网工程实践分享。",
+      platform: "技术博客",
+      category: "数码科技",
+      system_prompt:
+        "你是一名擅长输出硬核技术教程的工程作者，请使用严格、清晰的 Markdown 结构组织内容。",
+      is_preset: true,
+    }),
+    createMockTemplate({
+      id: "template-preset-xianyu-secondhand-sku",
+      title: "高转化二手闲置 SKU",
+      description: "主打断舍离回血与同龄人焦虑语境下的真诚转化文案，适合闲鱼二手发布。",
+      platform: "闲鱼",
+      category: "电商/闲鱼",
+      system_prompt:
+        "你是一名擅长闲鱼高转化文案的二手运营助手，请站在断舍离回血、真实说明成色与使用场景的角度写文案。",
+      is_preset: true,
+    }),
+    createMockTemplate({
+      id: "template-preset-education-score-boost",
+      title: "初高中教辅引流标题",
+      description: "强调提分、逆袭与方法感，适合教辅资料、电商详情和家长沟通场景。",
+      platform: "抖音",
+      category: "教育/干货",
+      system_prompt:
+        "你是一名擅长教育内容增长的选题编辑，请围绕提分、逆袭、家长焦虑等真实场景生成标题与引流文案。",
+      is_preset: true,
+    }),
+  ];
 }
 
 export function buildAuthPayload(
@@ -291,9 +376,7 @@ function removeDraftsByMessageIds(
   messageIds: string[],
 ): DraftSummaryItem[] {
   const deletedSet = new Set(messageIds);
-  const deletedDrafts = state.drafts.filter((draft) =>
-    deletedSet.has(draft.message_id),
-  );
+  const deletedDrafts = state.drafts.filter((draft) => deletedSet.has(draft.message_id));
 
   if (deletedDrafts.length === 0) {
     return [];
@@ -349,10 +432,7 @@ function resolveUploadResponse(
       original_filename:
         options.uploadResponse.original_filename ?? context.filename,
       purpose: options.uploadResponse.purpose ?? context.purpose,
-      thread_id:
-        options.uploadResponse.thread_id ??
-        context.threadId ??
-        null,
+      thread_id: options.uploadResponse.thread_id ?? context.threadId ?? null,
     };
   }
 
@@ -368,6 +448,27 @@ function resolveUploadResponse(
   };
 }
 
+function createTemplateFromPayload(
+  body: {
+    title?: string;
+    description?: string;
+    platform?: TemplateSummaryItem["platform"];
+    category?: TemplateSummaryItem["category"];
+    system_prompt?: string;
+  },
+): TemplateSummaryItem {
+  return createMockTemplate({
+    id: `template-user-${Math.random().toString(36).slice(2, 10)}`,
+    title: body.title ?? "未命名模板",
+    description: body.description ?? "",
+    platform: body.platform ?? "小红书",
+    category: body.category ?? "美食文旅",
+    system_prompt: body.system_prompt ?? "",
+    is_preset: false,
+    created_at: nowIso(),
+  });
+}
+
 export async function mockBackend(page: Page, options: MockBackendOptions = {}) {
   const initialUser = {
     ...testUser,
@@ -378,6 +479,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
     user: initialUser,
     threads: clone(options.threads ?? []),
     drafts: clone(options.drafts ?? []),
+    templates: clone(options.templates ?? createDefaultTemplates()),
     threadMessagesById: clone(options.threadMessagesById ?? {}),
     sessions: clone(
       options.sessions ?? [
@@ -513,6 +615,86 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
       await fulfillJson(route, {
         items: state.drafts,
         total: state.drafts.length,
+      });
+      return;
+    }
+
+    if (path === "/api/v1/media/templates" && request.method() === "GET") {
+      await fulfillJson(route, {
+        items: state.templates,
+        total: state.templates.length,
+      });
+      return;
+    }
+
+    if (path === "/api/v1/media/templates" && request.method() === "POST") {
+      const body = parseJsonBody<{
+        title?: string;
+        description?: string;
+        platform?: TemplateSummaryItem["platform"];
+        category?: TemplateSummaryItem["category"];
+        system_prompt?: string;
+      }>(route);
+      const createdTemplate = createTemplateFromPayload(body);
+      const presets = state.templates.filter((template) => template.is_preset);
+      const customs = state.templates.filter((template) => !template.is_preset);
+      state.templates = [...presets, createdTemplate, ...customs];
+      await fulfillJson(route, createdTemplate, 201);
+      return;
+    }
+
+    const templateMatch = path.match(/^\/api\/v1\/media\/templates\/([^/]+)$/);
+    if (templateMatch && request.method() === "DELETE") {
+      const templateId = templateMatch[1];
+      const template = state.templates.find((item) => item.id === templateId);
+
+      if (!template) {
+        await fulfillJson(route, { detail: "未找到对应模板。" }, 404);
+        return;
+      }
+
+      if (template.is_preset) {
+        await fulfillJson(route, { detail: "系统预置模板不支持删除。" }, 403);
+        return;
+      }
+
+      state.templates = state.templates.filter((item) => item.id !== templateId);
+      await fulfillJson(route, {
+        deleted_count: 1,
+        deleted_ids: [templateId],
+      });
+      return;
+    }
+
+    if (path === "/api/v1/media/templates" && request.method() === "DELETE") {
+      const body = parseJsonBody<{ template_ids?: string[] }>(route);
+      const requestedIds = Array.from(new Set(body.template_ids ?? []));
+
+      if (requestedIds.length === 0) {
+        await fulfillJson(route, { detail: "请至少选择一个模板。" }, 400);
+        return;
+      }
+
+      const selectedTemplates = state.templates.filter((template) =>
+        requestedIds.includes(template.id),
+      );
+
+      if (selectedTemplates.length !== requestedIds.length) {
+        await fulfillJson(route, { detail: "部分模板不存在或已被删除。" }, 404);
+        return;
+      }
+
+      if (selectedTemplates.some((template) => template.is_preset)) {
+        await fulfillJson(route, { detail: "系统预置模板不支持删除。" }, 403);
+        return;
+      }
+
+      state.templates = state.templates.filter(
+        (template) => !requestedIds.includes(template.id),
+      );
+      await fulfillJson(route, {
+        deleted_count: requestedIds.length,
+        deleted_ids: requestedIds,
       });
       return;
     }

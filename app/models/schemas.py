@@ -41,6 +41,22 @@ class Platform(str, Enum):
     DOUYIN = "douyin"
 
 
+class TemplatePlatform(str, Enum):
+    XIAOHONGSHU = "小红书"
+    DOUYIN = "抖音"
+    XIANYU = "闲鱼"
+    TECH_BLOG = "技术博客"
+
+
+class TemplateCategory(str, Enum):
+    BEAUTY = "美妆护肤"
+    TRAVEL = "美食文旅"
+    FINANCE = "职场金融"
+    TECH = "数码科技"
+    XIANYU = "电商/闲鱼"
+    EDUCATION = "教育/干货"
+
+
 class TaskType(str, Enum):
     TOPIC_PLANNING = "topic_planning"
     CONTENT_GENERATION = "content_generation"
@@ -420,4 +436,59 @@ class ArtifactDeleteResponse(SchemaModel):
     cleared_all: bool = Field(
         default=False,
         description="Whether the request cleared all drafts for the current user.",
+    )
+
+
+class TemplateListItem(SchemaModel):
+    id: str = Field(..., description="Template identifier.")
+    title: str = Field(..., description="Template title shown in the workspace.")
+    description: str = Field(..., description="Short business-facing template summary.")
+    platform: TemplatePlatform = Field(..., description="Template platform.")
+    category: TemplateCategory = Field(..., description="Template industry category.")
+    system_prompt: str = Field(
+        ...,
+        description="Prebuilt system prompt copied into the new-thread modal.",
+    )
+    is_preset: bool = Field(..., description="Whether the template is a system preset.")
+    created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+
+
+class TemplateListResponse(SchemaModel):
+    items: list[TemplateListItem] = Field(
+        default_factory=list,
+        description="Built-in template list for the current user.",
+    )
+    total: int = Field(..., description="Returned template count.")
+
+
+class TemplateCreateRequest(SchemaModel):
+    title: str = Field(..., min_length=1, max_length=255, description="Template title.")
+    description: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Short user-facing description.",
+    )
+    platform: TemplatePlatform = Field(..., description="Template platform.")
+    category: TemplateCategory = Field(..., description="Template category.")
+    system_prompt: str = Field(
+        ...,
+        min_length=1,
+        max_length=6000,
+        description="System prompt body.",
+    )
+
+
+class TemplateDeleteBatchRequest(SchemaModel):
+    template_ids: list[str] = Field(
+        default_factory=list,
+        description="User-owned template IDs to delete.",
+    )
+
+
+class TemplateDeleteResponse(SchemaModel):
+    deleted_count: int = Field(..., description="Number of deleted templates.")
+    deleted_ids: list[str] = Field(
+        default_factory=list,
+        description="Deleted template IDs.",
     )

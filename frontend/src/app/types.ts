@@ -131,6 +131,49 @@ export type DraftsDeleteApiResponse = {
   cleared_all: boolean;
 };
 
+export type TemplatePlatform = "小红书" | "抖音" | "闲鱼" | "技术博客";
+
+export type TemplateCategory =
+  | "美妆护肤"
+  | "美食文旅"
+  | "职场金融"
+  | "数码科技"
+  | "电商/闲鱼"
+  | "教育/干货";
+
+export type TemplateSummaryItem = {
+  id: string;
+  title: string;
+  description: string;
+  platform: TemplatePlatform;
+  category: TemplateCategory;
+  system_prompt: string;
+  is_preset: boolean;
+  created_at: string;
+};
+
+export type TemplatesApiResponse = {
+  items: TemplateSummaryItem[];
+  total: number;
+};
+
+export type TemplateCreatePayload = {
+  title: string;
+  description: string;
+  platform: TemplatePlatform;
+  category: TemplateCategory;
+  system_prompt: string;
+};
+
+export type TemplateDeletePayload = {
+  template_ids: string[];
+};
+
+export type TemplateDeleteApiResponse = {
+  deleted_count: number;
+  deleted_ids: string[];
+};
+
 export type ThreadUpdatePayload = {
   title?: string;
   is_archived?: boolean;

@@ -21,10 +21,14 @@ import {
   clearStoredUser,
   completePasswordReset,
   createChatStream,
+  createTemplate,
   deleteArtifact,
   deleteArtifacts,
+  deleteTemplate,
+  deleteTemplates,
   deleteThread,
   fetchArtifacts,
+  fetchTemplates,
   fetchSessions,
   fetchThreadMessages,
   fetchThreads,
@@ -51,6 +55,7 @@ import { RightPanel } from "./components/RightPanel";
 import { ThreadSettingsModal } from "./components/ThreadSettingsModal";
 import { UserProfileModal } from "./components/UserProfileModal";
 import { DraftsView } from "./components/views/DraftsView";
+import { TemplatesView } from "./components/views/TemplatesView";
 import { quickActions, taskOptions } from "./data";
 import type {
   ArtifactAction,
@@ -65,6 +70,8 @@ import type {
   MediaChatMaterialPayload,
   MediaChatRequestPayload,
   ResetPasswordResponse,
+  TemplateCreatePayload,
+  TemplateSummaryItem,
   ThreadItem,
   ThreadsApiResponse,
   UiPlatform,
@@ -422,6 +429,20 @@ function AuthCard(props: {
   );
 }
 
+function mapTemplatePlatformToWorkspace(
+  platform: TemplateSummaryItem["platform"],
+): UiPlatform | null {
+  if (platform === "小红书") {
+    return "xiaohongshu";
+  }
+
+  if (platform === "抖音") {
+    return "douyin";
+  }
+
+  return null;
+}
+
 function NewThreadModal(props: {
   open: boolean;
   title: string;
@@ -473,8 +494,9 @@ function NewThreadModal(props: {
             <div className="mb-2 text-sm font-medium text-card-foreground">会话标题</div>
             <input
               className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+              data-testid="new-thread-title-input"
               onChange={(event) => onTitleChange(event.target.value)}
-              placeholder="For example: Annual portfolio review ideas"
+              placeholder="例如：五一福州周边文旅选题"
               value={title}
             />
           </label>
@@ -485,6 +507,7 @@ function NewThreadModal(props: {
             </div>
             <textarea
               className="min-h-36 w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm leading-7 text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+              data-testid="new-thread-system-prompt-input"
               onChange={(event) => onSystemPromptChange(event.target.value)}
               placeholder="请输入你希望我扮演的角色，留空则使用通用助手。"
               value={systemPrompt}
@@ -504,6 +527,7 @@ function NewThreadModal(props: {
             className="rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90"
             onClick={onConfirm}
             type="button"
+            data-testid="new-thread-confirm"
           >
             开始新会话
           </button>
@@ -563,6 +587,7 @@ function App() {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [drafts, setDrafts] = useState<DraftSummaryItem[]>([]);
+  const [templates, setTemplates] = useState<TemplateSummaryItem[]>([]);
   const [uploadedMaterials, setUploadedMaterials] = useState<UploadedMaterial[]>([]);
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
   const [statusText, setStatusText] = useState("等待新的内容任务");
@@ -573,12 +598,16 @@ function App() {
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
   const [isLoadingThreadHistory, setIsLoadingThreadHistory] = useState(false);
   const [isLoadingDrafts, setIsLoadingDrafts] = useState(false);
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
   const [isMutatingDrafts, setIsMutatingDrafts] = useState(false);
+  const [isMutatingTemplates, setIsMutatingTemplates] = useState(false);
   const [mutatingDraftMessageId, setMutatingDraftMessageId] = useState<string | null>(null);
+  const [mutatingTemplateId, setMutatingTemplateId] = useState<string | null>(null);
   const [mutatingThreadId, setMutatingThreadId] = useState<string | null>(null);
   const [isNewThreadModalOpen, setIsNewThreadModalOpen] = useState(false);
   const [draftThreadTitle, setDraftThreadTitle] = useState("");
   const [draftSystemPrompt, setDraftSystemPrompt] = useState("");
+  const [selectedTemplate, setSelectedTemplate] = useState<TemplateSummaryItem | null>(null);
   const [isThreadSettingsOpen, setIsThreadSettingsOpen] = useState(false);
   const [isSavingThreadSettings, setIsSavingThreadSettings] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
@@ -679,7 +708,7 @@ function App() {
     },
     templates: {
       title: "模板库",
-      description: "后续会在这里统一管理 System Prompt、人设模板和结构化输出模板。",
+      description: "集中管理官方预置与个人沉淀的人设模板，并一键带入新的会话。",
     },
     dashboard: {
       title: "数据看板",
@@ -784,7 +813,9 @@ function App() {
     setActiveView("chat");
     setAuthSessions([]);
     setDrafts([]);
+    setTemplates([]);
     setIsLoadingDrafts(false);
+    setIsLoadingTemplates(false);
     setIsMutatingDrafts(false);
     setMutatingDraftMessageId(null);
     setThreads([]);
@@ -798,6 +829,7 @@ function App() {
     setAuthPassword("");
     setAuthConfirmPassword("");
     setAuthResetToken("");
+    setSelectedTemplate(null);
     setIsProfileModalOpen(false);
     setIsThreadSettingsOpen(false);
     setRevokingSessionId(null);
@@ -984,6 +1016,177 @@ function App() {
     }
   };
 
+  const loadTemplates = async () => {
+    setIsLoadingTemplates(true);
+
+    try {
+      const payload = await fetchTemplates();
+      setTemplates(payload.items);
+      setStatusText(
+        payload.total > 0 ? `已载入 ${payload.total} 个模板` : "暂无可用模板",
+      );
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载模板库失败，请稍后重试。";
+
+      setStatusText("模板库加载失败");
+      appendSystemMessage({
+        id: createId("template-list-error"),
+        role: "error",
+        title: "模板库加载失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsLoadingTemplates(false);
+    }
+  };
+
+  const removeTemplatesFromState = (deletedIds: string[]) => {
+    if (deletedIds.length === 0) {
+      return;
+    }
+
+    const deletedIdSet = new Set(deletedIds);
+    setTemplates((current) => current.filter((template) => !deletedIdSet.has(template.id)));
+    setSelectedTemplate((current) =>
+      current && deletedIdSet.has(current.id) ? null : current,
+    );
+  };
+
+  const handleCreateTemplate = async (
+    payload: TemplateCreatePayload,
+  ): Promise<TemplateSummaryItem | null> => {
+    setIsMutatingTemplates(true);
+    setMutatingTemplateId("template-create");
+
+    try {
+      const createdTemplate = await createTemplate(payload);
+      setTemplates((current) => {
+        const presets = current.filter((template) => template.is_preset);
+        const customs = current.filter((template) => !template.is_preset);
+        return [createdTemplate, ...customs, ...presets].sort((left, right) => {
+          if (left.is_preset !== right.is_preset) {
+            return left.is_preset ? -1 : 1;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        });
+      });
+      setStatusText(`模板已创建：${createdTemplate.title}`);
+      return createdTemplate;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return null;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "创建模板失败，请稍后重试。";
+
+      setStatusText("模板创建失败");
+      appendSystemMessage({
+        id: createId("template-create-error"),
+        role: "error",
+        title: "模板创建失败",
+        content: errorMessage,
+      });
+      return null;
+    } finally {
+      setIsMutatingTemplates(false);
+      setMutatingTemplateId(null);
+    }
+  };
+
+  const handleDeleteTemplate = async (
+    template: TemplateSummaryItem,
+  ): Promise<boolean> => {
+    setIsMutatingTemplates(true);
+    setMutatingTemplateId(template.id);
+
+    try {
+      const response = await deleteTemplate(template.id);
+      removeTemplatesFromState(response.deleted_ids);
+      setStatusText(`模板已删除：${template.title}`);
+      return true;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return false;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "删除模板失败，请稍后重试。";
+
+      setStatusText("模板删除失败");
+      appendSystemMessage({
+        id: createId("template-delete-error"),
+        role: "error",
+        title: "模板删除失败",
+        content: errorMessage,
+      });
+      return false;
+    } finally {
+      setIsMutatingTemplates(false);
+      setMutatingTemplateId(null);
+    }
+  };
+
+  const handleDeleteTemplates = async (templateIds: string[]): Promise<boolean> => {
+    if (templateIds.length === 0) {
+      return false;
+    }
+
+    setIsMutatingTemplates(true);
+    setMutatingTemplateId("template-bulk");
+
+    try {
+      const response = await deleteTemplates({ template_ids: templateIds });
+      removeTemplatesFromState(response.deleted_ids);
+      setStatusText(`已删除 ${response.deleted_count} 个模板`);
+      return true;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return false;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "批量删除模板失败，请稍后重试。";
+
+      setStatusText("批量删除模板失败");
+      appendSystemMessage({
+        id: createId("template-bulk-delete-error"),
+        role: "error",
+        title: "批量删除模板失败",
+        content: errorMessage,
+      });
+      return false;
+    } finally {
+      setIsMutatingTemplates(false);
+      setMutatingTemplateId(null);
+    }
+  };
+
   const handleSelectView = (view: WorkspaceView) => {
     setActiveView(view);
     setLeftSidebarOpen(false);
@@ -996,6 +1199,11 @@ function App() {
     setRightPanelOpen(false);
     if (view === "drafts") {
       setStatusText("正在打开草稿箱");
+      return;
+    }
+
+    if (view === "templates") {
+      setStatusText("正在打开模板中心");
       return;
     }
 
@@ -1159,6 +1367,14 @@ function App() {
     void loadDrafts();
   }, [activeView, isAuthenticated]);
 
+  useEffect(() => {
+    if (!isAuthenticated || activeView !== "templates") {
+      return;
+    }
+
+    void loadTemplates();
+  }, [activeView, isAuthenticated]);
+
   const triggerFilePicker = (kind: UploadedMaterialKind) => {
     if (kind === "image") {
       imageInputRef.current?.click();
@@ -1299,9 +1515,36 @@ function App() {
   };
 
   const openNewThreadModal = () => {
+    setSelectedTemplate(null);
     setDraftThreadTitle("");
     setDraftSystemPrompt("");
     setIsNewThreadModalOpen(true);
+  };
+
+  const openTemplateNewThreadModal = (template: TemplateSummaryItem) => {
+    setSelectedTemplate(template);
+    setDraftThreadTitle(template.title);
+    setDraftSystemPrompt(template.system_prompt);
+    setIsNewThreadModalOpen(true);
+  };
+
+  const closeNewThreadModal = () => {
+    setIsNewThreadModalOpen(false);
+    setSelectedTemplate(null);
+  };
+
+  const handleUseTemplate = (template: TemplateSummaryItem) => {
+    setActiveView("chat");
+    setLeftSidebarOpen(false);
+    setRightPanelOpen(true);
+    setStatusText(`已载入模板：${template.title}`);
+
+    const mappedPlatform = mapTemplatePlatformToWorkspace(template.platform);
+    if (mappedPlatform) {
+      setPlatform(mappedPlatform);
+    }
+
+    openTemplateNewThreadModal(template);
   };
 
   const handleConfirmNewThread = () => {
@@ -1322,7 +1565,7 @@ function App() {
     setStatusText("准备新的内容任务");
     setRightPanelOpen(true);
     setLeftSidebarOpen(false);
-    setIsNewThreadModalOpen(false);
+    closeNewThreadModal();
   };
 
   const handleRenameThread = async (thread: ThreadItem) => {
@@ -1781,14 +2024,19 @@ function App() {
       setActiveView("chat");
       setAuthSessions([]);
       setDrafts([]);
+      setTemplates([]);
       setIsLoadingDrafts(false);
+      setIsLoadingTemplates(false);
       setIsMutatingDrafts(false);
+      setIsMutatingTemplates(false);
       setMutatingDraftMessageId(null);
+      setMutatingTemplateId(null);
       setAuthMode("login");
       setAuthPassword("");
       setAuthConfirmPassword("");
       setAuthResetToken("");
       setAuthSuccess("");
+      setSelectedTemplate(null);
       setThreads([]);
       resetWorkspace();
       setIsProfileModalOpen(false);
@@ -1949,6 +2197,7 @@ function App() {
             isDesktopCollapsed={isLeftSidebarCollapsed}
             isLoading={isLoadingThreads}
             mutatingThreadId={mutatingThreadId}
+            templateCount={templates.length > 0 ? templates.length : 6}
             onCreateThread={openNewThreadModal}
             onDeleteThread={(thread) => void handleDeleteThread(thread)}
             onLogout={() => void handleLogout()}
@@ -2130,6 +2379,18 @@ function App() {
                 onDeleteDrafts={(messageIds) => void handleDeleteDrafts(messageIds)}
                 onOpenThread={(draft) => void handleOpenDraftThread(draft)}
               />
+            ) : activeView === "templates" ? (
+              <TemplatesView
+                isLoading={isLoadingTemplates}
+                isMutating={isMutatingTemplates}
+                mutatingTemplateId={mutatingTemplateId}
+                onCreateTemplate={(payload) => handleCreateTemplate(payload)}
+                onDeleteTemplate={(template) => handleDeleteTemplate(template)}
+                onDeleteTemplates={(templateIds) => handleDeleteTemplates(templateIds)}
+                onUseTemplate={handleUseTemplate}
+                selectedTemplateId={selectedTemplate?.id ?? null}
+                templates={templates}
+              />
             ) : (
               <PlaceholderView
                 description={nonChatViewMeta[activeView].description}
@@ -2161,7 +2422,7 @@ function App() {
       </div>
 
       <NewThreadModal
-        onClose={() => setIsNewThreadModalOpen(false)}
+        onClose={closeNewThreadModal}
         onConfirm={handleConfirmNewThread}
         onSystemPromptChange={setDraftSystemPrompt}
         onTitleChange={setDraftThreadTitle}

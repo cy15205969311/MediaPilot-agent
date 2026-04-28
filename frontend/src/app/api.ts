@@ -3,6 +3,9 @@ import type {
   AuthenticatedUser,
   AuthResponse,
   ChatStreamEvent,
+  TemplateCreatePayload,
+  TemplateDeleteApiResponse,
+  TemplateDeletePayload,
   DraftsDeleteApiResponse,
   DraftsDeletePayload,
   DraftsApiResponse,
@@ -16,6 +19,8 @@ import type {
   ResetPasswordPayload,
   ResetPasswordResponse,
   SessionRevokeResponse,
+  TemplateSummaryItem,
+  TemplatesApiResponse,
   ThreadDeleteApiResponse,
   ThreadMessagesApiResponse,
   ThreadUpdatePayload,
@@ -655,6 +660,68 @@ export async function fetchArtifacts(): Promise<DraftsApiResponse> {
   );
 
   return (await response.json()) as DraftsApiResponse;
+}
+
+export async function fetchTemplates(): Promise<TemplatesApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/templates",
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TemplatesApiResponse;
+}
+
+export async function createTemplate(
+  payload: TemplateCreatePayload,
+): Promise<TemplateSummaryItem> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/templates",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TemplateSummaryItem;
+}
+
+export async function deleteTemplate(
+  templateId: string,
+): Promise<TemplateDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/templates/${templateId}`,
+    {
+      method: "DELETE",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TemplateDeleteApiResponse;
+}
+
+export async function deleteTemplates(
+  payload: TemplateDeletePayload,
+): Promise<TemplateDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/templates",
+    {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TemplateDeleteApiResponse;
 }
 
 export async function deleteArtifact(
