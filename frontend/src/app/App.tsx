@@ -21,7 +21,10 @@ import {
   clearStoredUser,
   completePasswordReset,
   createChatStream,
+  deleteArtifact,
+  deleteArtifacts,
   deleteThread,
+  fetchArtifacts,
   fetchSessions,
   fetchThreadMessages,
   fetchThreads,
@@ -47,6 +50,7 @@ import { LeftSidebar } from "./components/LeftSidebar";
 import { RightPanel } from "./components/RightPanel";
 import { ThreadSettingsModal } from "./components/ThreadSettingsModal";
 import { UserProfileModal } from "./components/UserProfileModal";
+import { DraftsView } from "./components/views/DraftsView";
 import { quickActions, taskOptions } from "./data";
 import type {
   ArtifactAction,
@@ -56,6 +60,7 @@ import type {
   ChatStreamEvent,
   ComposerSubmitPayload,
   ConversationMessage,
+  DraftSummaryItem,
   HistoryMessageItem,
   MediaChatMaterialPayload,
   MediaChatRequestPayload,
@@ -67,6 +72,7 @@ import type {
   UploadedMaterial,
   UploadedMaterialKind,
   UserProfileUpdatePayload,
+  WorkspaceView,
 } from "./types";
 import {
   createId,
@@ -507,6 +513,28 @@ function NewThreadModal(props: {
   );
 }
 
+function PlaceholderView(props: {
+  title: string;
+  description: string;
+}) {
+  const { title, description } = props;
+
+  return (
+    <div
+      className="flex flex-1 items-center justify-center px-6 py-10"
+      data-testid="workspace-placeholder-view"
+    >
+      <div className="max-w-xl rounded-[32px] border border-dashed border-border bg-card px-8 py-10 text-center shadow-sm">
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-brand-soft text-brand">
+          <Sparkles className="h-8 w-8" />
+        </div>
+        <h2 className="mt-5 text-2xl font-semibold text-foreground">{title}</h2>
+        <p className="mt-3 text-sm leading-7 text-muted-foreground">{description}</p>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authUsername, setAuthUsername] = useState("");
@@ -526,6 +554,7 @@ function App() {
     typeof window !== "undefined" ? window.innerWidth >= 1280 : true,
   );
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
+  const [activeView, setActiveView] = useState<WorkspaceView>("chat");
   const [platform, setPlatform] = useState<UiPlatform>("xiaohongshu");
   const [taskType, setTaskType] = useState<UiTaskType>("content_generation");
   const [message, setMessage] = useState(
@@ -533,6 +562,7 @@ function App() {
   );
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [threads, setThreads] = useState<ThreadItem[]>([]);
+  const [drafts, setDrafts] = useState<DraftSummaryItem[]>([]);
   const [uploadedMaterials, setUploadedMaterials] = useState<UploadedMaterial[]>([]);
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
   const [statusText, setStatusText] = useState("等待新的内容任务");
@@ -542,6 +572,9 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
   const [isLoadingThreadHistory, setIsLoadingThreadHistory] = useState(false);
+  const [isLoadingDrafts, setIsLoadingDrafts] = useState(false);
+  const [isMutatingDrafts, setIsMutatingDrafts] = useState(false);
+  const [mutatingDraftMessageId, setMutatingDraftMessageId] = useState<string | null>(null);
   const [mutatingThreadId, setMutatingThreadId] = useState<string | null>(null);
   const [isNewThreadModalOpen, setIsNewThreadModalOpen] = useState(false);
   const [draftThreadTitle, setDraftThreadTitle] = useState("");
@@ -631,6 +664,28 @@ function App() {
     }
     return "双平台内容工作台";
   }, [platform]);
+
+  const nonChatViewMeta: Record<
+    Exclude<WorkspaceView, "chat">,
+    { title: string; description: string }
+  > = {
+    drafts: {
+      title: "我的草稿",
+      description: "浏览各个会话里沉淀下来的结构化内容产物，并继续回到原始对话深挖。",
+    },
+    topics: {
+      title: "选题池",
+      description: "热点沉淀、选题归档和长期策划入口将在这里接入。",
+    },
+    templates: {
+      title: "模板库",
+      description: "后续会在这里统一管理 System Prompt、人设模板和结构化输出模板。",
+    },
+    dashboard: {
+      title: "数据看板",
+      description: "后续会在这里汇总生成量、平台分布、转化表现与消耗趋势。",
+    },
+  };
 
   const isUploading = useMemo(
     () => uploadedMaterials.some((item) => item.status === "uploading"),
@@ -726,7 +781,12 @@ function App() {
     clearStoredRefreshToken();
     clearStoredUser();
     setCurrentUser(null);
+    setActiveView("chat");
     setAuthSessions([]);
+    setDrafts([]);
+    setIsLoadingDrafts(false);
+    setIsMutatingDrafts(false);
+    setMutatingDraftMessageId(null);
     setThreads([]);
     setMessages([]);
     replaceUploadedMaterials([]);
@@ -796,6 +856,7 @@ function App() {
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
 
+    setActiveView("chat");
     setActiveThreadId(thread.id);
     setActiveThreadTitle(thread.title);
     setStatusText("正在加载历史会话");
@@ -891,6 +952,196 @@ function App() {
     }
   };
 
+  const loadDrafts = async () => {
+    setIsLoadingDrafts(true);
+
+    try {
+      const payload = await fetchArtifacts();
+      setDrafts(payload.items);
+      setStatusText(payload.total > 0 ? `已载入 ${payload.total} 份草稿` : "暂无草稿内容");
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载草稿箱失败，请稍后重试。";
+
+      setStatusText("草稿箱加载失败");
+      appendSystemMessage({
+        id: createId("draft-list-error"),
+        role: "error",
+        title: "草稿箱加载失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsLoadingDrafts(false);
+    }
+  };
+
+  const handleSelectView = (view: WorkspaceView) => {
+    setActiveView(view);
+    setLeftSidebarOpen(false);
+
+    if (view === "chat") {
+      setRightPanelOpen(true);
+      return;
+    }
+
+    setRightPanelOpen(false);
+    if (view === "drafts") {
+      setStatusText("正在打开草稿箱");
+      return;
+    }
+
+    setStatusText("该模块即将开放");
+  };
+
+  const handleOpenDraftThread = async (draft: DraftSummaryItem) => {
+    const threadPlatform =
+      draft.platform === "xiaohongshu" || draft.platform === "douyin"
+        ? draft.platform
+        : undefined;
+
+    const fallbackThread: ThreadItem = {
+      id: draft.thread_id,
+      title: draft.thread_title || draft.title || "Untitled thread",
+      time: formatRelativeTime(draft.created_at) || "刚刚",
+      ...(threadPlatform ? { platform: threadPlatform } : {}),
+    };
+
+    upsertThreadInList(fallbackThread);
+    await loadThreadHistory(fallbackThread);
+  };
+
+  const removeDraftsFromState = (deletedMessageIds: string[]) => {
+    if (deletedMessageIds.length === 0) {
+      return;
+    }
+
+    const deletedIds = new Set(deletedMessageIds);
+    setDrafts((current) =>
+      current.filter((draft) => !deletedIds.has(draft.message_id)),
+    );
+  };
+
+  const handleDeleteDraft = async (draft: DraftSummaryItem) => {
+    setIsMutatingDrafts(true);
+    setMutatingDraftMessageId(draft.message_id);
+
+    try {
+      const response = await deleteArtifact(draft.message_id);
+      removeDraftsFromState(response.deleted_message_ids);
+      setStatusText(`已删除草稿：${draft.title || "未命名草稿"}`);
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "删除草稿失败，请稍后重试。";
+
+      setStatusText("删除草稿失败");
+      appendSystemMessage({
+        id: createId("draft-delete-error"),
+        role: "error",
+        title: "草稿删除失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsMutatingDrafts(false);
+      setMutatingDraftMessageId(null);
+    }
+  };
+
+  const handleDeleteDrafts = async (messageIds: string[]) => {
+    if (messageIds.length === 0) {
+      return;
+    }
+
+    setIsMutatingDrafts(true);
+    setMutatingDraftMessageId(null);
+
+    try {
+      const response = await deleteArtifacts({ message_ids: messageIds });
+      removeDraftsFromState(response.deleted_message_ids);
+      setStatusText(`已删除 ${response.deleted_count} 份草稿`);
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "批量删除草稿失败，请稍后重试。";
+
+      setStatusText("批量删除草稿失败");
+      appendSystemMessage({
+        id: createId("draft-bulk-delete-error"),
+        role: "error",
+        title: "批量删除草稿失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsMutatingDrafts(false);
+      setMutatingDraftMessageId(null);
+    }
+  };
+
+  const handleClearAllDrafts = async () => {
+    if (drafts.length === 0) {
+      return;
+    }
+
+    setIsMutatingDrafts(true);
+    setMutatingDraftMessageId(null);
+
+    try {
+      const response = await deleteArtifacts({ clear_all: true });
+      removeDraftsFromState(response.deleted_message_ids);
+      setStatusText(
+        response.deleted_count > 0 ? "草稿箱已清空" : "当前没有可清空的草稿",
+      );
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "清空草稿箱失败，请稍后重试。";
+
+      setStatusText("清空草稿箱失败");
+      appendSystemMessage({
+        id: createId("draft-clear-error"),
+        role: "error",
+        title: "清空草稿箱失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsMutatingDrafts(false);
+      setMutatingDraftMessageId(null);
+    }
+  };
+
   useEffect(() => {
     if (!isAuthenticated || hasInitializedHistoryRef.current) {
       return;
@@ -899,6 +1150,14 @@ function App() {
     hasInitializedHistoryRef.current = true;
     void loadThreads(undefined, true);
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || activeView !== "drafts") {
+      return;
+    }
+
+    void loadDrafts();
+  }, [activeView, isAuthenticated]);
 
   const triggerFilePicker = (kind: UploadedMaterialKind) => {
     if (kind === "image") {
@@ -1053,6 +1312,7 @@ function App() {
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
+    setActiveView("chat");
     resetWorkspace(normalizedTitle, normalizedSystemPrompt);
     upsertThreadInList({
       id: "thread-new",
@@ -1116,6 +1376,7 @@ function App() {
     try {
       await deleteThread(thread.id);
       setStatusText("会话已删除");
+      setDrafts((current) => current.filter((item) => item.thread_id !== thread.id));
 
       const remainingThreads = threads.filter((item) => item.id !== thread.id);
       setThreads(remainingThreads);
@@ -1247,6 +1508,7 @@ function App() {
     replaceUploadedMaterials([]);
     assistantMessageIdRef.current = assistantMessageId;
     streamErrorRef.current = false;
+    setActiveView("chat");
     setArtifact(null);
     setActiveThreadId(nextThreadId);
     setActiveThreadTitle(nextThreadTitle);
@@ -1516,7 +1778,12 @@ function App() {
       clearStoredRefreshToken();
       clearStoredUser();
       setCurrentUser(null);
+      setActiveView("chat");
       setAuthSessions([]);
+      setDrafts([]);
+      setIsLoadingDrafts(false);
+      setIsMutatingDrafts(false);
+      setMutatingDraftMessageId(null);
       setAuthMode("login");
       setAuthPassword("");
       setAuthConfirmPassword("");
@@ -1613,6 +1880,7 @@ function App() {
       setAuthPassword("");
       setAuthConfirmPassword("");
       setAuthResetToken("");
+      setActiveView("chat");
       setStatusText("登录成功，正在加载工作台");
       hasInitializedHistoryRef.current = false;
       resetWorkspace();
@@ -1675,7 +1943,9 @@ function App() {
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <LeftSidebar
             activeThreadId={activeThreadId}
+            activeView={activeView}
             currentUser={currentUser}
+            draftCount={drafts.length > 0 ? drafts.length : undefined}
             isDesktopCollapsed={isLeftSidebarCollapsed}
             isLoading={isLoadingThreads}
             mutatingThreadId={mutatingThreadId}
@@ -1685,9 +1955,12 @@ function App() {
             onClose={() => setLeftSidebarOpen(false)}
             onOpenProfile={() => void handleOpenProfile()}
             onRenameThread={(thread) => void handleRenameThread(thread)}
+            onSelectView={handleSelectView}
             onSelectThread={(thread) => {
+              setActiveView("chat");
               if (thread.id === "thread-new") {
                 resetWorkspace(thread.title);
+                setRightPanelOpen(true);
                 return;
               }
               void loadThreadHistory(thread);
@@ -1708,151 +1981,182 @@ function App() {
           ) : null}
 
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-            <div className="border-b border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="flex min-w-0 items-center gap-3">
-                  {isLeftSidebarCollapsed ? (
-                    <button
-                      aria-label="展开左侧边栏"
-                      className="hidden h-12 w-12 items-center justify-center rounded-2xl border border-border bg-muted text-muted-foreground transition hover:border-brand/40 hover:text-foreground lg:inline-flex"
-                      onClick={() => setIsLeftSidebarCollapsed(false)}
-                      type="button"
-                    >
-                      <Menu className="h-5 w-5" />
-                    </button>
-                  ) : null}
+            {activeView === "chat" ? (
+              <>
+                <div className="border-b border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex min-w-0 items-center gap-3">
+                      {isLeftSidebarCollapsed ? (
+                        <button
+                          aria-label="展开左侧边栏"
+                          className="hidden h-12 w-12 items-center justify-center rounded-2xl border border-border bg-muted text-muted-foreground transition hover:border-brand/40 hover:text-foreground lg:inline-flex"
+                          onClick={() => setIsLeftSidebarCollapsed(false)}
+                          type="button"
+                        >
+                          <Menu className="h-5 w-5" />
+                        </button>
+                      ) : null}
 
-                  <div className="min-w-0">
-                    <h2
-                      className="text-2xl font-bold tracking-tight text-foreground"
-                      data-testid="workspace-title"
-                    >
-                      {workspaceTitle}
-                    </h2>
-                  </div>
-                </div>
-
-                <div className="ml-auto flex items-center gap-3">
-                  <div
-                    className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${isStreaming ? "bg-warning-surface text-warning-foreground" : "bg-success-surface text-success-foreground"
-                      }`}
-                    data-testid="workspace-status"
-                  >
-                    {isStreaming ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="h-4 w-4" />
-                    )}
-                    {statusText}
-                  </div>
-
-                  <button
-                    aria-expanded={isWorkspaceHeaderExpanded}
-                    aria-label={isWorkspaceHeaderExpanded ? "收起快捷操作区" : "展开快捷操作区"}
-                    className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground transition hover:border-brand/40 hover:text-foreground"
-                    onClick={() => setIsWorkspaceHeaderExpanded((expanded) => !expanded)}
-                    type="button"
-                  >
-                    {isWorkspaceHeaderExpanded ? (
-                      <ChevronUp className="h-4 w-4" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              <div
-                className={`grid overflow-hidden transition-all duration-300 ease-in-out ${isWorkspaceHeaderExpanded ? "mt-4 grid-rows-[1fr] opacity-100" : "mt-0 grid-rows-[0fr] opacity-0"
-                  }`}
-              >
-                <div className="min-h-0">
-                  <div className="mb-4 text-sm text-muted-foreground">
-                    当前任务：{activeTaskLabel} · 线程：{activeThreadTitle} · ID：
-                    {activeThreadId}
-                  </div>
-
-                  <div className="mb-4 flex flex-wrap items-center gap-2">
-                    <div className="inline-flex max-w-3xl items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
-                      <Sparkles className="h-3.5 w-3.5" />
-                      <span className="truncate" data-testid="workspace-persona-badge">
-                        当前人设：{activeSystemPrompt || "通用助手"}
-                      </span>
+                      <div className="min-w-0">
+                        <h2
+                          className="text-2xl font-bold tracking-tight text-foreground"
+                          data-testid="workspace-title"
+                        >
+                          {workspaceTitle}
+                        </h2>
+                      </div>
                     </div>
-                    <button
-                      className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-card-foreground transition hover:border-brand/40 hover:text-brand"
-                      onClick={() => setIsThreadSettingsOpen(true)}
-                      type="button"
-                      data-testid="open-thread-settings"
-                    >
-                      <Settings2 className="h-3.5 w-3.5" />
-                      {isDraftThread ? "草稿设置" : "会话设置"}
-                    </button>
-                  </div>
 
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    {quickActions.map((action) => (
+                    <div className="ml-auto flex items-center gap-3">
+                      <div
+                        className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${
+                          isStreaming
+                            ? "bg-warning-surface text-warning-foreground"
+                            : "bg-success-surface text-success-foreground"
+                        }`}
+                        data-testid="workspace-status"
+                      >
+                        {isStreaming ? (
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="h-4 w-4" />
+                        )}
+                        {statusText}
+                      </div>
+
                       <button
-                        key={action}
-                        className="rounded-2xl border border-border bg-card p-4 text-left text-sm font-medium text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft hover:shadow-sm"
-                        onClick={() => setMessage(action)}
+                        aria-expanded={isWorkspaceHeaderExpanded}
+                        aria-label={isWorkspaceHeaderExpanded ? "收起快捷操作区" : "展开快捷操作区"}
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground transition hover:border-brand/40 hover:text-foreground"
+                        onClick={() => setIsWorkspaceHeaderExpanded((expanded) => !expanded)}
                         type="button"
                       >
-                        {action}
+                        {isWorkspaceHeaderExpanded ? (
+                          <ChevronUp className="h-4 w-4" />
+                        ) : (
+                          <ChevronDown className="h-4 w-4" />
+                        )}
                       </button>
-                    ))}
+                    </div>
+                  </div>
+
+                  <div
+                    className={`grid overflow-hidden transition-all duration-300 ease-in-out ${
+                      isWorkspaceHeaderExpanded
+                        ? "mt-4 grid-rows-[1fr] opacity-100"
+                        : "mt-0 grid-rows-[0fr] opacity-0"
+                    }`}
+                  >
+                    <div className="min-h-0">
+                      <div className="mb-4 text-sm text-muted-foreground">
+                        当前任务：{activeTaskLabel} · 线程：{activeThreadTitle} · ID：
+                        {activeThreadId}
+                      </div>
+
+                      <div className="mb-4 flex flex-wrap items-center gap-2">
+                        <div className="inline-flex max-w-3xl items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <span className="truncate" data-testid="workspace-persona-badge">
+                            当前人设：{activeSystemPrompt || "通用助手"}
+                          </span>
+                        </div>
+                        <button
+                          className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-card-foreground transition hover:border-brand/40 hover:text-brand"
+                          onClick={() => setIsThreadSettingsOpen(true)}
+                          type="button"
+                          data-testid="open-thread-settings"
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                          {isDraftThread ? "草稿设置" : "会话设置"}
+                        </button>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        {quickActions.map((action) => (
+                          <button
+                            key={action}
+                            className="rounded-2xl border border-border bg-card p-4 text-left text-sm font-medium text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft hover:shadow-sm"
+                            onClick={() => setMessage(action)}
+                            type="button"
+                          >
+                            {action}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </div>
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div className="flex-1 overflow-y-auto px-4 py-6 lg:px-6">
-                <ChatFeed
-                  currentUser={currentUser}
-                  endRef={chatEndRef}
-                  isLoadingHistory={isLoadingThreadHistory}
-                  isStreaming={isStreaming}
-                  messages={messages}
-                />
-              </div>
+                <div
+                  className="flex min-h-0 flex-1 flex-col overflow-hidden"
+                  data-testid="workspace-chat-view"
+                >
+                  <div className="flex-1 overflow-y-auto px-4 py-6 lg:px-6">
+                    <ChatFeed
+                      currentUser={currentUser}
+                      endRef={chatEndRef}
+                      isLoadingHistory={isLoadingThreadHistory}
+                      isStreaming={isStreaming}
+                      messages={messages}
+                    />
+                  </div>
 
-              <div className="border-t border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
-                <Composer
-                  imageInputRef={imageInputRef}
-                  isStreaming={isStreaming}
-                  isUploading={isUploading}
-                  message={message}
-                  onFilesSelected={onFilesSelected}
-                  onMessageChange={setMessage}
-                  onRemoveMaterial={removeMaterial}
-                  onSubmit={(payload) => void handleSubmit(payload)}
-                  onTriggerFilePicker={triggerFilePicker}
-                  textInputRef={textInputRef}
-                  uploadedMaterials={uploadedMaterials}
-                  videoInputRef={videoInputRef}
-                />
-              </div>
-            </div>
+                  <div className="border-t border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
+                    <Composer
+                      imageInputRef={imageInputRef}
+                      isStreaming={isStreaming}
+                      isUploading={isUploading}
+                      message={message}
+                      onFilesSelected={onFilesSelected}
+                      onMessageChange={setMessage}
+                      onRemoveMaterial={removeMaterial}
+                      onSubmit={(payload) => void handleSubmit(payload)}
+                      onTriggerFilePicker={triggerFilePicker}
+                      textInputRef={textInputRef}
+                      uploadedMaterials={uploadedMaterials}
+                      videoInputRef={videoInputRef}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : activeView === "drafts" ? (
+              <DraftsView
+                drafts={drafts}
+                isLoading={isLoadingDrafts}
+                isMutating={isMutatingDrafts}
+                mutatingMessageId={mutatingDraftMessageId}
+                onClearAllDrafts={() => void handleClearAllDrafts()}
+                onDeleteDraft={(draft) => void handleDeleteDraft(draft)}
+                onDeleteDrafts={(messageIds) => void handleDeleteDrafts(messageIds)}
+                onOpenThread={(draft) => void handleOpenDraftThread(draft)}
+              />
+            ) : (
+              <PlaceholderView
+                description={nonChatViewMeta[activeView].description}
+                title={nonChatViewMeta[activeView].title}
+              />
+            )}
           </main>
 
-          <RightPanel
-            activeTaskLabel={activeTaskLabel}
-            artifact={artifact}
-            artifactActions={artifactActions}
-            isDesktopCollapsed={isRightPanelCollapsed}
-            onClose={() => setRightPanelOpen(false)}
-            onOpen={() => {
-              setIsRightPanelCollapsed(false);
-              setRightPanelOpen(true);
-            }}
-            onToggleDesktopCollapse={() =>
-              setIsRightPanelCollapsed((collapsed) => !collapsed)
-            }
-            open={rightPanelOpen}
-            platform={platform}
-            taskType={taskType}
-          />
+          {activeView === "chat" ? (
+            <RightPanel
+              activeTaskLabel={activeTaskLabel}
+              artifact={artifact}
+              artifactActions={artifactActions}
+              isDesktopCollapsed={isRightPanelCollapsed}
+              onClose={() => setRightPanelOpen(false)}
+              onOpen={() => {
+                setIsRightPanelCollapsed(false);
+                setRightPanelOpen(true);
+              }}
+              onToggleDesktopCollapse={() =>
+                setIsRightPanelCollapsed((collapsed) => !collapsed)
+              }
+              open={rightPanelOpen}
+              platform={platform}
+              taskType={taskType}
+            />
+          ) : null}
         </div>
       </div>
 

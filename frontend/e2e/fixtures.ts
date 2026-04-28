@@ -2,10 +2,12 @@ import type { Page, Route } from "@playwright/test";
 import { expect } from "@playwright/test";
 
 import type {
+  ArtifactPayload,
   AuthResponse,
   AuthSessionItem,
   AuthenticatedUser,
   ChatStreamEvent,
+  DraftSummaryItem,
   HistoryMessageItem,
   HistoryThreadSummary,
   MediaChatRequestPayload,
@@ -31,6 +33,7 @@ export const testUser: AuthenticatedUser = {
 export type MockBackendOptions = {
   user?: Partial<AuthenticatedUser>;
   threads?: HistoryThreadSummary[];
+  drafts?: DraftSummaryItem[];
   threadMessagesById?: Record<string, ThreadMessagesApiResponse>;
   sessions?: AuthSessionItem[];
   failOnceUnauthorizedPaths?: string[];
@@ -51,6 +54,7 @@ export type MockBackendOptions = {
 type MockBackendState = {
   user: AuthenticatedUser;
   threads: HistoryThreadSummary[];
+  drafts: DraftSummaryItem[];
   threadMessagesById: Record<string, ThreadMessagesApiResponse>;
   sessions: AuthSessionItem[];
   unauthorizedOncePending: Set<string>;
@@ -125,6 +129,41 @@ export function createMockHistoryMessage(
     created_at: overrides.created_at ?? nowIso(),
     artifact: overrides.artifact ?? null,
     materials: overrides.materials ?? [],
+  };
+}
+
+function buildDraftExcerpt(artifact: ArtifactPayload): string {
+  if (artifact.artifact_type === "content_draft") {
+    return artifact.body;
+  }
+  if (artifact.artifact_type === "topic_list") {
+    return artifact.topics.map((topic) => `${topic.title}：${topic.angle}`).join("；");
+  }
+  if (artifact.artifact_type === "hot_post_analysis") {
+    return artifact.analysis_dimensions
+      .map((dimension) => `${dimension.dimension}：${dimension.insight}`)
+      .join("；");
+  }
+  return artifact.suggestions
+    .map((suggestion) => `${suggestion.comment_type}：${suggestion.reply}`)
+    .join("；");
+}
+
+export function createMockDraftSummary(
+  overrides: Partial<DraftSummaryItem> & { artifact: ArtifactPayload },
+): DraftSummaryItem {
+  return {
+    id: overrides.id ?? `draft-${Math.random().toString(36).slice(2, 8)}`,
+    thread_id: overrides.thread_id ?? "thread-e2e-001",
+    thread_title: overrides.thread_title ?? "E2E 默认会话",
+    message_id:
+      overrides.message_id ?? `message-${Math.random().toString(36).slice(2, 8)}`,
+    artifact_type: overrides.artifact_type ?? overrides.artifact.artifact_type,
+    title: overrides.title ?? overrides.artifact.title,
+    excerpt: overrides.excerpt ?? buildDraftExcerpt(overrides.artifact),
+    platform: overrides.platform ?? "xiaohongshu",
+    created_at: overrides.created_at ?? nowIso(),
+    artifact: overrides.artifact,
   };
 }
 
@@ -247,6 +286,31 @@ function upsertThreadSummary(
   state.threads = nextThreads;
 }
 
+function removeDraftsByMessageIds(
+  state: MockBackendState,
+  messageIds: string[],
+): DraftSummaryItem[] {
+  const deletedSet = new Set(messageIds);
+  const deletedDrafts = state.drafts.filter((draft) =>
+    deletedSet.has(draft.message_id),
+  );
+
+  if (deletedDrafts.length === 0) {
+    return [];
+  }
+
+  state.drafts = state.drafts.filter((draft) => !deletedSet.has(draft.message_id));
+
+  Object.entries(state.threadMessagesById).forEach(([threadId, payload]) => {
+    state.threadMessagesById[threadId] = {
+      ...payload,
+      messages: payload.messages.filter((message) => !deletedSet.has(message.id)),
+    };
+  });
+
+  return deletedDrafts;
+}
+
 function resolveStreamEvents(
   options: MockBackendOptions,
   payload: MediaChatRequestPayload,
@@ -313,6 +377,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
   const state: MockBackendState = {
     user: initialUser,
     threads: clone(options.threads ?? []),
+    drafts: clone(options.drafts ?? []),
     threadMessagesById: clone(options.threadMessagesById ?? {}),
     sessions: clone(
       options.sessions ?? [
@@ -444,6 +509,72 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
       return;
     }
 
+    if (path === "/api/v1/media/artifacts" && request.method() === "GET") {
+      await fulfillJson(route, {
+        items: state.drafts,
+        total: state.drafts.length,
+      });
+      return;
+    }
+
+    const artifactMessageMatch = path.match(/^\/api\/v1\/media\/artifacts\/([^/]+)$/);
+    if (artifactMessageMatch && request.method() === "DELETE") {
+      const messageId = artifactMessageMatch[1];
+      const deletedDrafts = removeDraftsByMessageIds(state, [messageId]);
+
+      if (deletedDrafts.length === 0) {
+        await fulfillJson(route, { detail: "Artifact draft not found." }, 404);
+        return;
+      }
+
+      await fulfillJson(route, {
+        deleted_count: 1,
+        deleted_message_ids: [messageId],
+        cleared_all: false,
+      });
+      return;
+    }
+
+    if (path === "/api/v1/media/artifacts" && request.method() === "DELETE") {
+      const body = parseJsonBody<{
+        message_ids?: string[];
+        clear_all?: boolean;
+      }>(route);
+      const clearAll = Boolean(body.clear_all);
+      const requestedIds = Array.from(new Set(body.message_ids ?? []));
+
+      if (!clearAll && requestedIds.length === 0) {
+        await fulfillJson(
+          route,
+          { detail: "At least one artifact message_id is required." },
+          400,
+        );
+        return;
+      }
+
+      const deletedMessageIds = clearAll
+        ? state.drafts.map((draft) => draft.message_id)
+        : requestedIds;
+
+      if (
+        !clearAll &&
+        state.drafts.filter((draft) => requestedIds.includes(draft.message_id)).length !==
+          requestedIds.length
+      ) {
+        await fulfillJson(route, { detail: "Some artifact drafts were not found." }, 404);
+        return;
+      }
+
+      const deletedDrafts = removeDraftsByMessageIds(state, deletedMessageIds);
+
+      await fulfillJson(route, {
+        deleted_count: deletedDrafts.length,
+        deleted_message_ids: deletedDrafts.map((draft) => draft.message_id),
+        cleared_all: clearAll,
+      });
+      return;
+    }
+
     const threadMessagesMatch = path.match(/^\/api\/v1\/media\/threads\/([^/]+)\/messages$/);
     if (threadMessagesMatch && request.method() === "GET") {
       const threadId = threadMessagesMatch[1];
@@ -496,6 +627,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
     if (threadMutationMatch && request.method() === "DELETE") {
       const threadId = threadMutationMatch[1];
       state.threads = state.threads.filter((thread) => thread.id !== threadId);
+      state.drafts = state.drafts.filter((draft) => draft.thread_id !== threadId);
       delete state.threadMessagesById[threadId];
       await fulfillJson(route, { id: threadId, deleted: true });
       return;
@@ -513,6 +645,12 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         )
         .map((event) => event.delta)
         .join("");
+      const artifactEvent = events.find(
+        (
+          event,
+        ): event is Extract<ChatStreamEvent, { event: "artifact" }> =>
+          event.event === "artifact",
+      );
       const createdAt = nowIso();
 
       const requestMaterials = body.materials.map((material, index) => ({
@@ -578,6 +716,25 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         is_archived: false,
         updated_at: createdAt,
       });
+
+      if (artifactEvent) {
+        state.drafts = [
+          createMockDraftSummary({
+            id: `draft-${body.thread_id}-${Date.now()}`,
+            thread_id: body.thread_id,
+            thread_title:
+              body.thread_title ??
+              existingThreadMessages.title ??
+              state.threads.find((thread) => thread.id === body.thread_id)?.title ??
+              "Untitled thread",
+            message_id: assistantMessage.id,
+            platform: body.platform,
+            created_at: createdAt,
+            artifact: artifactEvent.artifact,
+          }),
+          ...state.drafts.filter((draft) => draft.thread_id !== body.thread_id),
+        ];
+      }
 
       await route.fulfill({
         status: 200,

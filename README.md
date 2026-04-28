@@ -202,10 +202,10 @@ pip install -r requirements.txt
 ```bash
 python -m pytest -q
 ```
-Current backend regression baseline: `77 passed`.
+Current backend regression baseline: `81 passed`.
 
 默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
-当前后端回归基线为 `69 passed`。
+当前后端回归基线为 `81 passed`。
 
 执行前端构建：
 
@@ -221,7 +221,7 @@ cd frontend
 npx playwright test
 ```
 
-当前前端 E2E 回归基线为 `14 passed`。
+当前前端 E2E 回归基线为 `19 passed`。
 
 打开 Playwright 可视化测试面板：
 
@@ -238,5 +238,17 @@ npx playwright test --ui
   - 面向中文读者的快速上手、运行说明与项目概览
 - `DEVELOPMENT.md`
   - 面向开发与维护的工程基线、接口约束、实现状态与变更规则
+
+## 9. 草稿箱与工作台视图
+
+当前工作台已经具备轻量级的业务视图切换能力，左侧边栏的“我的草稿”会进入独立的草稿箱页面，而点击具体会话会返回聊天视图。
+
+- 草稿数据来自后端 `GET /api/v1/media/artifacts`
+- 每条草稿都聚合自持久化的 `ArtifactRecord`
+- 草稿卡片支持搜索、平台筛选、全文预览，以及“在会话中打开”
+- 草稿箱现已支持单条删除、多选批量删除与一键清空，适合日常高频整理废稿和中间产物
+- 重新打开草稿时，前端会跳回原始 `thread_id` 并加载对应历史会话
+
+这一步让 MediaPilot 不再只是单一聊天页，而是开始具备“内容资产管理工作台”的基础骨架。
 
 后续每次完成功能、接口、持久化、流程、测试基线或重要 UI 变更时，都必须同步更新 `README.md` 与 `DEVELOPMENT.md` 中相关章节，确保仓库文档与代码保持一致。

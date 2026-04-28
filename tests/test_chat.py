@@ -156,6 +156,32 @@ def assert_artifact_matches_schema(
     return artifact
 
 
+def create_artifact_draft(
+    client: TestClient,
+    *,
+    headers: dict[str, str],
+    thread_id: str,
+    platform: str = "xiaohongshu",
+    task_type: str = "content_generation",
+    message: str = "Create a saved artifact draft for regression coverage.",
+    system_prompt: str = "You are a helpful media copilot.",
+    thread_title: str = "Artifact regression thread",
+) -> None:
+    collect_stream_events(
+        client,
+        {
+            "thread_id": thread_id,
+            "platform": platform,
+            "task_type": task_type,
+            "message": message,
+            "materials": [],
+            "system_prompt": system_prompt,
+            "thread_title": thread_title,
+        },
+        headers=headers,
+    )
+
+
 @pytest.fixture()
 def no_sleep(monkeypatch: pytest.MonkeyPatch):
     async def immediate_sleep(_: float) -> None:
@@ -1057,6 +1083,283 @@ def test_history_endpoints_are_isolated_by_user_and_store_system_prompt(client: 
         headers=bob_headers,
     )
     assert bob_messages_response.status_code == 404
+
+
+def test_artifact_list_endpoint_returns_newest_user_drafts(client: TestClient):
+    alice_headers = register_user(client, username="alice-drafts")
+    bob_headers = register_user(client, username="bob-drafts")
+
+    collect_stream_events(
+        client,
+        {
+            "thread_id": "thread-draft-content",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请生成一篇适合小红书发布的福州周边探店草稿",
+            "materials": [],
+            "system_prompt": "你是一名小红书本地生活内容策划。",
+            "thread_title": "福州周边探店",
+        },
+        headers=alice_headers,
+    )
+
+    collect_stream_events(
+        client,
+        {
+            "thread_id": "thread-draft-topic",
+            "platform": "douyin",
+            "task_type": "topic_planning",
+            "message": "请帮我整理一组适合抖音知识口播的初中教辅选题",
+            "materials": [],
+            "system_prompt": "你是一名抖音教育带货编导。",
+            "thread_title": "教辅选题池",
+        },
+        headers=alice_headers,
+    )
+
+    collect_stream_events(
+        client,
+        {
+            "thread_id": "thread-draft-bob",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "给我一篇个人使用的草稿",
+            "materials": [],
+            "system_prompt": "你是一名小红书创作者。",
+            "thread_title": "Bob 私有草稿",
+        },
+        headers=bob_headers,
+    )
+
+    response = client.get("/api/v1/media/artifacts", headers=alice_headers)
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["total"] == 2
+    assert [item["thread_id"] for item in payload["items"]] == [
+        "thread-draft-topic",
+        "thread-draft-content",
+    ]
+
+    newest_item = payload["items"][0]
+    assert newest_item["thread_title"] == "教辅选题池"
+    assert newest_item["artifact_type"] == "topic_list"
+    assert newest_item["platform"] == "douyin"
+    assert newest_item["excerpt"]
+    assert newest_item["created_at"].endswith("Z")
+    assert newest_item["artifact"]["artifact_type"] == "topic_list"
+
+    older_item = payload["items"][1]
+    assert older_item["thread_title"] == "福州周边探店"
+    assert older_item["artifact_type"] == "content_draft"
+    assert older_item["platform"] == "xiaohongshu"
+    assert older_item["excerpt"]
+    artifact = ContentGenerationArtifactPayload.model_validate(older_item["artifact"])
+    assert artifact.artifact_type == "content_draft"
+
+
+def test_artifact_delete_endpoint_removes_only_owned_draft(client: TestClient):
+    alice_headers = register_user(client, username="alice-delete-single")
+    bob_headers = register_user(client, username="bob-delete-single")
+
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-delete-single-a",
+        message="Create Alice draft A.",
+        thread_title="Alice draft A",
+    )
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-delete-single-b",
+        platform="douyin",
+        task_type="topic_planning",
+        message="Create Alice draft B.",
+        system_prompt="You are a Douyin education planner.",
+        thread_title="Alice draft B",
+    )
+    create_artifact_draft(
+        client,
+        headers=bob_headers,
+        thread_id="thread-delete-single-bob",
+        message="Create Bob draft.",
+        thread_title="Bob draft",
+    )
+
+    alice_list_response = client.get("/api/v1/media/artifacts", headers=alice_headers)
+    assert alice_list_response.status_code == 200
+    alice_items = alice_list_response.json()["items"]
+    assert len(alice_items) == 2
+
+    deleted_message_id = alice_items[0]["message_id"]
+    deleted_thread_id = alice_items[0]["thread_id"]
+    remaining_message_id = alice_items[1]["message_id"]
+
+    delete_response = client.delete(
+        f"/api/v1/media/artifacts/{deleted_message_id}",
+        headers=alice_headers,
+    )
+    assert delete_response.status_code == 200
+    delete_payload = delete_response.json()
+    assert delete_payload == {
+        "deleted_count": 1,
+        "deleted_message_ids": [deleted_message_id],
+        "cleared_all": False,
+    }
+
+    alice_after_response = client.get("/api/v1/media/artifacts", headers=alice_headers)
+    assert alice_after_response.status_code == 200
+    alice_after_payload = alice_after_response.json()
+    assert alice_after_payload["total"] == 1
+    assert [item["message_id"] for item in alice_after_payload["items"]] == [
+        remaining_message_id,
+    ]
+
+    deleted_thread_messages_response = client.get(
+        f"/api/v1/media/threads/{deleted_thread_id}/messages",
+        headers=alice_headers,
+    )
+    assert deleted_thread_messages_response.status_code == 200
+    deleted_thread_messages = deleted_thread_messages_response.json()["messages"]
+    assert not any(
+        item["message_type"] == "artifact"
+        for item in deleted_thread_messages
+    )
+
+    bob_after_response = client.get("/api/v1/media/artifacts", headers=bob_headers)
+    assert bob_after_response.status_code == 200
+    assert bob_after_response.json()["total"] == 1
+
+
+def test_artifact_batch_delete_endpoint_removes_selected_owned_drafts(
+    client: TestClient,
+):
+    alice_headers = register_user(client, username="alice-delete-batch")
+    bob_headers = register_user(client, username="bob-delete-batch")
+
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-delete-batch-a",
+        message="Create Alice batch draft A.",
+        thread_title="Alice batch A",
+    )
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-delete-batch-b",
+        platform="douyin",
+        task_type="topic_planning",
+        message="Create Alice batch draft B.",
+        system_prompt="You are a Douyin topic planner.",
+        thread_title="Alice batch B",
+    )
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-delete-batch-c",
+        task_type="hot_post_analysis",
+        message="Create Alice batch draft C.",
+        system_prompt="You are a hot-post analyst.",
+        thread_title="Alice batch C",
+    )
+    create_artifact_draft(
+        client,
+        headers=bob_headers,
+        thread_id="thread-delete-batch-bob",
+        message="Create Bob batch draft.",
+        thread_title="Bob batch draft",
+    )
+
+    alice_before_response = client.get("/api/v1/media/artifacts", headers=alice_headers)
+    assert alice_before_response.status_code == 200
+    alice_before_items = alice_before_response.json()["items"]
+    assert len(alice_before_items) == 3
+
+    deleted_ids = [alice_before_items[0]["message_id"], alice_before_items[1]["message_id"]]
+    remaining_id = alice_before_items[2]["message_id"]
+
+    delete_response = client.request(
+        "DELETE",
+        "/api/v1/media/artifacts",
+        headers=alice_headers,
+        json={"message_ids": deleted_ids},
+    )
+    assert delete_response.status_code == 200
+    delete_payload = delete_response.json()
+    assert delete_payload["deleted_count"] == 2
+    assert set(delete_payload["deleted_message_ids"]) == set(deleted_ids)
+    assert delete_payload["cleared_all"] is False
+
+    alice_after_response = client.get("/api/v1/media/artifacts", headers=alice_headers)
+    assert alice_after_response.status_code == 200
+    alice_after_payload = alice_after_response.json()
+    assert alice_after_payload["total"] == 1
+    assert [item["message_id"] for item in alice_after_payload["items"]] == [remaining_id]
+
+    bob_after_response = client.get("/api/v1/media/artifacts", headers=bob_headers)
+    assert bob_after_response.status_code == 200
+    assert bob_after_response.json()["total"] == 1
+
+
+def test_artifact_clear_all_endpoint_removes_all_current_user_drafts(
+    client: TestClient,
+):
+    alice_headers = register_user(client, username="alice-delete-clear")
+    bob_headers = register_user(client, username="bob-delete-clear")
+
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-delete-clear-a",
+        message="Create Alice clear draft A.",
+        thread_title="Alice clear A",
+    )
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-delete-clear-b",
+        platform="douyin",
+        task_type="comment_reply",
+        message="Create Alice clear draft B.",
+        system_prompt="You are a comment reply operator.",
+        thread_title="Alice clear B",
+    )
+    create_artifact_draft(
+        client,
+        headers=bob_headers,
+        thread_id="thread-delete-clear-bob",
+        message="Create Bob clear draft.",
+        thread_title="Bob clear draft",
+    )
+
+    alice_before_response = client.get("/api/v1/media/artifacts", headers=alice_headers)
+    assert alice_before_response.status_code == 200
+    alice_before_message_ids = {
+        item["message_id"] for item in alice_before_response.json()["items"]
+    }
+    assert len(alice_before_message_ids) == 2
+
+    clear_response = client.request(
+        "DELETE",
+        "/api/v1/media/artifacts",
+        headers=alice_headers,
+        json={"clear_all": True},
+    )
+    assert clear_response.status_code == 200
+    clear_payload = clear_response.json()
+    assert clear_payload["deleted_count"] == 2
+    assert set(clear_payload["deleted_message_ids"]) == alice_before_message_ids
+    assert clear_payload["cleared_all"] is True
+
+    alice_after_response = client.get("/api/v1/media/artifacts", headers=alice_headers)
+    assert alice_after_response.status_code == 200
+    assert alice_after_response.json() == {"items": [], "total": 0}
+
+    bob_after_response = client.get("/api/v1/media/artifacts", headers=bob_headers)
+    assert bob_after_response.status_code == 200
+    assert bob_after_response.json()["total"] == 1
 
 
 def test_thread_history_returns_user_message_image_material(client: TestClient):

@@ -13,7 +13,11 @@ import {
   X,
 } from "lucide-react";
 
-import type { AuthenticatedUser, ThreadItem } from "../types";
+import type {
+  AuthenticatedUser,
+  ThreadItem,
+  WorkspaceView,
+} from "../types";
 import { buildAbsoluteUrl, getDisplayName } from "../utils";
 
 type LeftSidebarProps = {
@@ -22,24 +26,43 @@ type LeftSidebarProps = {
   threads: ThreadItem[];
   isLoading: boolean;
   activeThreadId: string;
+  activeView: WorkspaceView;
   mutatingThreadId: string | null;
   currentUser: AuthenticatedUser;
+  draftCount?: number;
   onCreateThread: () => void;
   onDeleteThread: (thread: ThreadItem) => void;
   onRenameThread: (thread: ThreadItem) => void;
   onSelectThread: (thread: ThreadItem) => void;
+  onSelectView: (view: WorkspaceView) => void;
   onOpenProfile: () => void;
   onLogout: () => void;
   onClose: () => void;
   onToggleDesktopCollapse: () => void;
 };
 
-const shortcuts = [
-  { label: "选题池", count: 12, icon: Target },
-  { label: "模板库", count: 8, icon: FileText },
-  { label: "数据看板", count: undefined, icon: BarChart3 },
-  { label: "草稿箱", count: 3, icon: Clock },
+const shortcuts: Array<{
+  id: Exclude<WorkspaceView, "chat">;
+  label: string;
+  count?: number;
+  icon: typeof Target;
+}> = [
+  { id: "topics", label: "选题池", count: 12, icon: Target },
+  { id: "templates", label: "模板库", count: 8, icon: FileText },
+  { id: "dashboard", label: "数据看板", icon: BarChart3 },
+  { id: "drafts", label: "我的草稿", icon: Clock },
 ];
+
+function getShortcutCount(
+  shortcutId: Exclude<WorkspaceView, "chat">,
+  draftCount?: number,
+): number | undefined {
+  if (shortcutId === "drafts") {
+    return draftCount;
+  }
+
+  return shortcuts.find((item) => item.id === shortcutId)?.count;
+}
 
 export function LeftSidebar({
   open,
@@ -47,12 +70,15 @@ export function LeftSidebar({
   threads,
   isLoading,
   activeThreadId,
+  activeView,
   mutatingThreadId,
   currentUser,
+  draftCount,
   onCreateThread,
   onDeleteThread,
   onRenameThread,
   onSelectThread,
+  onSelectView,
   onOpenProfile,
   onLogout,
   onClose,
@@ -73,7 +99,9 @@ export function LeftSidebar({
         }`}
       >
         <div className="flex items-center justify-between border-b border-border px-5 py-5">
-          <div className="text-2xl font-bold tracking-tight text-foreground">工作区</div>
+          <div className="text-2xl font-bold tracking-tight text-foreground">
+            工作区
+          </div>
           <div className="flex items-center gap-2">
             <button
               aria-expanded={!isDesktopCollapsed}
@@ -171,12 +199,13 @@ export function LeftSidebar({
 
             {!isLoading && threads.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-border bg-muted p-4 text-sm leading-6 text-muted-foreground">
-                暂无历史会话。点击右上角的加号，创建一个带标题和人设配置的新会话。
+                暂无历史会话。点击右上角加号，为下一次内容任务创建新的标题和人设。
               </div>
             ) : null}
 
             {threads.map((thread) => {
-              const isActive = activeThreadId === thread.id;
+              const isActive =
+                activeView === "chat" && activeThreadId === thread.id;
               const isMutating = mutatingThreadId === thread.id;
 
               return (
@@ -238,23 +267,34 @@ export function LeftSidebar({
           </div>
 
           <div className="mt-8 border-t border-border pt-6">
-            <h3 className="mb-3 text-sm font-semibold text-foreground">快捷入口</h3>
+            <h3 className="mb-3 text-sm font-semibold text-foreground">业务模块</h3>
             <div className="space-y-2">
-              {shortcuts.map((item) => (
-                <button
-                  key={item.label}
-                  className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-sm text-card-foreground transition hover:bg-muted"
-                  type="button"
-                >
-                  <item.icon className="h-4 w-4" />
-                  <span className="flex-1 text-left">{item.label}</span>
-                  {item.count ? (
-                    <span className="rounded-full bg-secondary px-2.5 py-0.5 text-xs text-secondary-foreground">
-                      {item.count}
-                    </span>
-                  ) : null}
-                </button>
-              ))}
+              {shortcuts.map((item) => {
+                const count = getShortcutCount(item.id, draftCount);
+                const isActive = activeView === item.id;
+
+                return (
+                  <button
+                    key={item.id}
+                    className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-sm transition ${
+                      isActive
+                        ? "bg-secondary text-foreground"
+                        : "text-card-foreground hover:bg-muted"
+                    }`}
+                    data-testid={`sidebar-shortcut-${item.id}`}
+                    onClick={() => onSelectView(item.id)}
+                    type="button"
+                  >
+                    <item.icon className="h-4 w-4" />
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {typeof count === "number" ? (
+                      <span className="rounded-full bg-card px-2.5 py-0.5 text-xs text-muted-foreground">
+                        {count}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

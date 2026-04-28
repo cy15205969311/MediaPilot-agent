@@ -6,6 +6,13 @@ export type UiTaskType =
   | "hot_post_analysis"
   | "comment_reply";
 
+export type WorkspaceView =
+  | "chat"
+  | "drafts"
+  | "topics"
+  | "templates"
+  | "dashboard";
+
 export type BackendPlatform = "xiaohongshu" | "douyin";
 
 export type BackendTaskType =
@@ -93,6 +100,35 @@ export type ThreadsApiResponse = {
   total: number;
   page: number;
   page_size: number;
+};
+
+export type DraftSummaryItem = {
+  id: string;
+  thread_id: string;
+  thread_title: string;
+  message_id: string;
+  artifact_type: ArtifactPayload["artifact_type"];
+  title: string;
+  excerpt: string;
+  platform?: UiPlatform | null;
+  created_at: string;
+  artifact: ArtifactPayload;
+};
+
+export type DraftsApiResponse = {
+  items: DraftSummaryItem[];
+  total: number;
+};
+
+export type DraftsDeletePayload = {
+  message_ids?: string[];
+  clear_all?: boolean;
+};
+
+export type DraftsDeleteApiResponse = {
+  deleted_count: number;
+  deleted_message_ids: string[];
+  cleared_all: boolean;
 };
 
 export type ThreadUpdatePayload = {

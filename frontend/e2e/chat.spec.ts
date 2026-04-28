@@ -5,6 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 import type { ContentGenerationArtifactPayload } from "../src/app/types";
 import {
   buildAuthPayload,
+  createMockDraftSummary,
   createMockHistoryMessage,
   createMockSession,
   createMockThreadMessages,
@@ -88,6 +89,263 @@ test("loads existing thread history and replays persisted messages on startup", 
   await expect(page.getByTestId("workspace-persona-badge")).toContainText(
     "Replay persona: focused planning copilot",
   );
+});
+
+test("shows the drafts empty state when no saved artifacts exist", async ({ page }) => {
+  await openWorkspace(page);
+
+  await page.getByTestId("sidebar-shortcut-drafts").click();
+
+  await expect(page.getByTestId("drafts-view")).toBeVisible();
+  await expect(page.getByTestId("drafts-empty-state")).toBeVisible();
+});
+
+test("opens a saved draft preview and jumps back into its conversation", async ({
+  page,
+}) => {
+  const threadId = "thread-draft-e2e";
+  const draftId = "draft-e2e-001";
+  const draftArtifact: ContentGenerationArtifactPayload = {
+    artifact_type: "content_draft",
+    title: "福州周边文旅探店笔记",
+    title_candidates: ["福州周边周末微度假", "福州人私藏探店路线"],
+    body: "这是一篇已经保存下来的草稿正文，包含路线、拍照点和收尾 CTA。",
+    platform_cta: "评论区回复“福州”领取完整路线。",
+  };
+
+  await openWorkspace(page, {
+    drafts: [
+      createMockDraftSummary({
+        id: draftId,
+        thread_id: threadId,
+        thread_title: "福州文旅选题会话",
+        platform: "xiaohongshu",
+        artifact: draftArtifact,
+      }),
+    ],
+    threads: [
+      createMockThreadSummary({
+        id: threadId,
+        title: "福州文旅选题会话",
+        latest_message_excerpt: "Artifact ready",
+      }),
+    ],
+    threadMessagesById: {
+      [threadId]: createMockThreadMessages({
+        thread_id: threadId,
+        title: "福州文旅选题会话",
+        system_prompt: "小红书本地生活主理人",
+        messages: [
+          createMockHistoryMessage({
+            id: "draft-user-1",
+            thread_id: threadId,
+            role: "user",
+            content: "帮我策划一篇福州周边的文旅探店笔记。",
+          }),
+          createMockHistoryMessage({
+            id: "draft-assistant-1",
+            thread_id: threadId,
+            role: "assistant",
+            content: "这里是草稿生成前的上下文说明。",
+          }),
+          createMockHistoryMessage({
+            id: "draft-artifact-1",
+            thread_id: threadId,
+            role: "assistant",
+            message_type: "artifact",
+            content: draftArtifact.title,
+            artifact: draftArtifact,
+          }),
+        ],
+      }),
+    },
+  });
+
+  await page.getByTestId("sidebar-shortcut-drafts").click();
+  await expect(page.getByTestId("drafts-view")).toBeVisible();
+  await expect(page.getByTestId(`draft-card-${draftId}`)).toContainText(
+    draftArtifact.title,
+  );
+
+  await page.getByTestId(`draft-preview-${draftId}`).click();
+  await expect(page.getByTestId("draft-detail-dialog")).toBeVisible();
+  await expect(page.getByTestId("draft-detail-dialog")).toContainText(
+    draftArtifact.body,
+  );
+
+  await page
+    .getByTestId("draft-detail-dialog")
+    .getByRole("button", { name: "在会话中打开" })
+    .click();
+
+  await expect(page.getByTestId("workspace-chat-view")).toBeVisible();
+  await expect(page.getByTestId("drafts-view")).toBeHidden();
+  await expect(
+    page
+      .getByTestId("chat-message-user")
+      .filter({ hasText: "帮我策划一篇福州周边的文旅探店笔记。" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("workspace-persona-badge")).toContainText(
+    "小红书本地生活主理人",
+  );
+});
+
+test("deletes a single draft card from the drafts view", async ({ page }) => {
+  const draftArtifact: ContentGenerationArtifactPayload = {
+    artifact_type: "content_draft",
+    title: "Single delete draft",
+    title_candidates: ["Single delete title"],
+    body: "Draft body for single delete coverage.",
+    platform_cta: "Comment for the checklist.",
+  };
+
+  await openWorkspace(page, {
+    drafts: [
+      createMockDraftSummary({
+        id: "draft-delete-one",
+        message_id: "message-delete-one",
+        thread_id: "thread-delete-one",
+        thread_title: "Thread delete one",
+        platform: "xiaohongshu",
+        artifact: draftArtifact,
+      }),
+      createMockDraftSummary({
+        id: "draft-delete-two",
+        message_id: "message-delete-two",
+        thread_id: "thread-delete-two",
+        thread_title: "Thread delete two",
+        platform: "douyin",
+        artifact: {
+          ...draftArtifact,
+          title: "Draft that should remain",
+        },
+      }),
+    ],
+  });
+
+  await page.getByTestId("sidebar-shortcut-drafts").click();
+  await expect(page.getByTestId("drafts-view")).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    await dialog.accept();
+  });
+
+  await page.getByTestId("draft-delete-draft-delete-one").click();
+
+  await expect(page.getByTestId("draft-card-draft-delete-one")).toBeHidden();
+  await expect(page.getByTestId("draft-card-draft-delete-two")).toBeVisible();
+});
+
+test("deletes selected drafts from the bulk action bar", async ({ page }) => {
+  const draftArtifact: ContentGenerationArtifactPayload = {
+    artifact_type: "content_draft",
+    title: "Bulk delete seed",
+    title_candidates: ["Bulk delete candidate"],
+    body: "Bulk delete body for selection mode.",
+    platform_cta: "Collect more examples in comments.",
+  };
+
+  await openWorkspace(page, {
+    drafts: [
+      createMockDraftSummary({
+        id: "draft-bulk-a",
+        message_id: "message-bulk-a",
+        thread_id: "thread-bulk-a",
+        thread_title: "Bulk thread A",
+        artifact: {
+          ...draftArtifact,
+          title: "Bulk delete A",
+        },
+      }),
+      createMockDraftSummary({
+        id: "draft-bulk-b",
+        message_id: "message-bulk-b",
+        thread_id: "thread-bulk-b",
+        thread_title: "Bulk thread B",
+        artifact: {
+          ...draftArtifact,
+          title: "Bulk delete B",
+        },
+      }),
+      createMockDraftSummary({
+        id: "draft-bulk-c",
+        message_id: "message-bulk-c",
+        thread_id: "thread-bulk-c",
+        thread_title: "Bulk thread C",
+        artifact: {
+          ...draftArtifact,
+          title: "Bulk delete survivor",
+        },
+      }),
+    ],
+  });
+
+  await page.getByTestId("sidebar-shortcut-drafts").click();
+  await page.getByTestId("draft-checkbox-draft-bulk-a").check();
+  await page.getByTestId("draft-checkbox-draft-bulk-b").check();
+  await expect(page.getByTestId("drafts-selected-count")).toContainText("已选择 2 项");
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    await dialog.accept();
+  });
+
+  await page.getByTestId("draft-delete-selected").click();
+
+  await expect(page.getByTestId("draft-card-draft-bulk-a")).toBeHidden();
+  await expect(page.getByTestId("draft-card-draft-bulk-b")).toBeHidden();
+  await expect(page.getByTestId("draft-card-draft-bulk-c")).toBeVisible();
+});
+
+test("clears all drafts from the drafts header action", async ({ page }) => {
+  const draftArtifact: ContentGenerationArtifactPayload = {
+    artifact_type: "content_draft",
+    title: "Clear all draft",
+    title_candidates: ["Clear all candidate"],
+    body: "Draft body for clear all coverage.",
+    platform_cta: "Reply to get the template.",
+  };
+
+  await openWorkspace(page, {
+    drafts: [
+      createMockDraftSummary({
+        id: "draft-clear-a",
+        message_id: "message-clear-a",
+        thread_id: "thread-clear-a",
+        thread_title: "Clear thread A",
+        artifact: {
+          ...draftArtifact,
+          title: "Clear me A",
+        },
+      }),
+      createMockDraftSummary({
+        id: "draft-clear-b",
+        message_id: "message-clear-b",
+        thread_id: "thread-clear-b",
+        thread_title: "Clear thread B",
+        artifact: {
+          ...draftArtifact,
+          title: "Clear me B",
+        },
+      }),
+    ],
+  });
+
+  await page.getByTestId("sidebar-shortcut-drafts").click();
+  await expect(page.getByTestId("draft-card-draft-clear-a")).toBeVisible();
+  await expect(page.getByTestId("draft-card-draft-clear-b")).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    await dialog.accept();
+  });
+
+  await page.getByTestId("draft-clear-all").click();
+
+  await expect(page.getByTestId("draft-card-draft-clear-a")).toBeHidden();
+  await expect(page.getByTestId("draft-card-draft-clear-b")).toBeHidden();
+  await expect(page.getByTestId("drafts-empty-state")).toBeVisible();
 });
 
 test("updates thread settings and reflects the saved title and system prompt", async ({

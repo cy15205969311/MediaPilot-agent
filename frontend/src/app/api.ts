@@ -3,6 +3,9 @@ import type {
   AuthenticatedUser,
   AuthResponse,
   ChatStreamEvent,
+  DraftsDeleteApiResponse,
+  DraftsDeletePayload,
+  DraftsApiResponse,
   LogoutResponse,
   MediaChatRequestPayload,
   PasswordResetConfirmPayload,
@@ -640,6 +643,50 @@ export async function fetchThreadMessages(
   );
 
   return (await response.json()) as ThreadMessagesApiResponse;
+}
+
+export async function fetchArtifacts(): Promise<DraftsApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/artifacts",
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as DraftsApiResponse;
+}
+
+export async function deleteArtifact(
+  messageId: string,
+): Promise<DraftsDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/artifacts/${messageId}`,
+    {
+      method: "DELETE",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as DraftsDeleteApiResponse;
+}
+
+export async function deleteArtifacts(
+  payload: DraftsDeletePayload,
+): Promise<DraftsDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/artifacts",
+    {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as DraftsDeleteApiResponse;
 }
 
 export async function updateThread(

@@ -3,7 +3,7 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.11`
+- Current version: `v1.13.13`
 - Updated on: `2026-04-28`
 - Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, and artifact-action flows, documentation baseline, and verification baseline
 
@@ -70,8 +70,10 @@ The current baseline includes:
 28. Vite development server now binds to `0.0.0.0` so devices on the same LAN can access the frontend workspace directly.
 29. Frontend workspace now supports persisted Light / Dark themes through CSS variables, semantic chat-bubble tokens, and root HTML theme classes.
 30. Shared storage client abstraction now supports either local disk or Aliyun OSS uploads, signed delivery URL resolution, temporary-prefix staging, lifecycle helper provisioning, copy-based promotion, and deletion.
-31. Playwright end-to-end browser coverage for auth, password reset, refresh retry, thread lifecycle, replay, profile/session security, uploads, artifact follow-up actions, and streamed chat flows.
+31. Playwright end-to-end browser coverage for auth, password reset, refresh retry, thread lifecycle, replay, profile/session security, uploads, artifact follow-up actions, drafts lifecycle management, and streamed chat flows.
 32. Extensible LangGraph Business Tools architecture with tool-call routing, local Python tool execution, and `<business_tool_context>` injection before drafting.
+33. Sidebar-driven workspace view routing with an authenticated drafts aggregation page backed by persisted `ArtifactRecord` history.
+34. Draft lifecycle management across single delete, batch delete, and clear-all operations for authenticated artifact cards.
 
 ### 3.2 Out of Scope
 
@@ -191,6 +193,8 @@ omnimedia-agent/
 |           |- RightPanel.tsx
 |           |- ThreadSettingsModal.tsx
 |           |- UserProfileModal.tsx
+|           |- views/
+|           |  '- DraftsView.tsx
 |           '- artifacts/
 |              |- CommentReplyArtifact.tsx
 |              |- ContentGenerationArtifact.tsx
@@ -400,6 +404,7 @@ alembic upgrade head
 | `POST` | `/api/v1/media/chat/stream` | authenticated SSE media task stream |
 | `GET` | `/api/v1/media/threads` | authenticated paginated thread list |
 | `GET` | `/api/v1/media/threads/{thread_id}/messages` | authenticated thread replay |
+| `GET` | `/api/v1/media/artifacts` | authenticated artifact aggregation for drafts workspace |
 | `PATCH` | `/api/v1/media/threads/{thread_id}` | rename, archive, or update thread prompt |
 | `DELETE` | `/api/v1/media/threads/{thread_id}` | delete owned thread |
 | `POST` | `/api/v1/media/upload` | authenticated user-scoped upload via the active storage backend |
@@ -611,7 +616,46 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 
 `MessageHistoryItem.materials` is the authoritative location for attachments submitted with a user message. Frontend history replay SHOULD render message-level materials first and treat top-level `materials` as a legacy compatibility field.
 
-### 9.5 Artifact Contracts
+### 9.5 Draft Aggregation Contracts
+
+#### `ArtifactListItem`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `id` | `str` | artifact record identifier |
+| `thread_id` | `str` | owning thread identifier |
+| `thread_title` | `str` | owning thread title for navigation fallback |
+| `message_id` | `str` | linked assistant message identifier |
+| `artifact_type` | artifact discriminator | mirrors the structured artifact union |
+| `title` | `str` | card title |
+| `excerpt` | `str` | concise preview text derived from the artifact payload |
+| `platform` | `"xiaohongshu" \| "douyin" \| "both" \| null` | best-effort inferred platform |
+| `created_at` | ISO 8601 UTC string | artifact creation timestamp |
+| `artifact` | `ArtifactPayloadModel` | full structured payload for detail preview |
+
+#### `ArtifactListResponse`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `items` | `list[ArtifactListItem]` | newest-first drafts payload |
+| `total` | `int` | returned item count |
+
+#### `ArtifactDeleteBatchRequest`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `message_ids` | `list[str]` | selected assistant message identifiers to delete |
+| `clear_all` | `bool` | when `true`, deletes every owned artifact-linked draft for the current user |
+
+#### `ArtifactDeleteResponse`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `deleted_count` | `int` | number of deleted artifact-linked messages |
+| `deleted_message_ids` | `list[str]` | deleted assistant message identifiers |
+| `cleared_all` | `bool` | indicates whether the mutation was a full clear-all operation |
+
+### 9.6 Artifact Contracts
 
 Current stable artifact payloads:
 
@@ -622,7 +666,7 @@ Current stable artifact payloads:
 
 These payloads are shared by backend validation, SSE `artifact` events, history replay, and frontend right-panel rendering.
 
-### 9.6 Timestamp Contract
+### 9.7 Timestamp Contract
 
 The repository now standardizes message, material, thread, and user timestamps with the following rules:
 
@@ -896,6 +940,9 @@ Current enforced boundaries:
 19. global theme state persistence for `light` and `dark`
 20. root-level HTML class switching that keeps Tailwind semantic color tokens in sync with the active theme
 21. themed workspace surfaces across the header, sidebars, feed, composer, right panel, and modal overlays
+22. lightweight workspace view routing between `chat`, `drafts`, and placeholder business modules without introducing a full client router
+23. authenticated drafts aggregation loading and thread handoff from artifact cards back into persisted chat history
+24. optimistic local drafts lifecycle updates after single delete, batch delete, and clear-all mutations
 
 ### 13.2 Composer and Chat Material Flow
 
@@ -929,6 +976,9 @@ The current frontend material flow is:
 - `uploadMedia()` with optional `threadId`
 - `fetchThreads()`
 - `fetchThreadMessages()`
+- `fetchArtifacts()`
+- `deleteArtifact()`
+- `deleteArtifacts()`
 - `updateThread()`
 - `deleteThread()`
 - `createChatStream()`
@@ -1134,6 +1184,8 @@ Covered cases:
 58. signed OSS delivery policy is bounded by min/max expiry controls and accepts both custom public-base URLs plus canonical bucket endpoint signed URLs during normalization
 59. the scheduler can automatically roll out OSS lifecycle rules on startup and every 24 hours when `OSS_AUTO_SETUP_LIFECYCLE=true`
 60. `GET /api/v1/media/retention` exposes an authenticated, user-scoped retention summary for upload counts, byte totals, stale temporary uploads, and effective lifecycle/signed-URL policy values
+61. `GET /api/v1/media/artifacts` returns user-scoped structured drafts ordered newest-first with thread handoff metadata and best-effort platform inference
+62. Playwright workspace coverage verifies the drafts empty state, draft-detail preview, and "open in conversation" navigation flow
 
 ### 15.2 E2E Browser Automation
 
@@ -1157,7 +1209,7 @@ The Playwright config starts the Vite dev server automatically with `npm run dev
 
 ### 15.3 Latest Verification Result
 
-The following checks were executed for the current Tavily-backed Business Tool integration change set on `2026-04-28` and passed:
+The following checks were executed for the current drafts-workspace change set on `2026-04-28` and passed:
 
 ```bash
 python -m pytest -q
@@ -1168,10 +1220,10 @@ npx playwright test
 
 Observed result baseline:
 
-- full backend test suite: 77 passed
+- full backend test suite: 81 passed
 - frontend production build: passed
-- frontend Playwright E2E suite: 14 passed
-- covered browser flows: auth bootstrap, password-reset request UX, logout cleanup, protected-route refresh retry, thread creation/replay/settings/rename/delete, profile avatar/nickname/bio updates, active-session refresh and revoke, in-session password change, upload plus tool-call streaming feedback, and right-panel artifact follow-up actions
+- frontend Playwright E2E suite: 19 passed
+- covered browser flows: auth bootstrap, password-reset request UX, logout cleanup, protected-route refresh retry, thread creation/replay/settings/rename/delete, drafts empty-state/reopen/single-delete/bulk-delete/clear-all flow, profile avatar/nickname/bio updates, active-session refresh and revoke, in-session password change, upload plus tool-call streaming feedback, and right-panel artifact follow-up actions
 - existing auth, scheduler, upload-retention, OSS signed-delivery, LangGraph search/tool, Tavily-backed business-tool live/fallback, and multimodal OCR regression suites remain green under the expanded browser baseline
 
 ### 15.4 Current Warning
@@ -1180,7 +1232,27 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.11
+### 16.1 Completed in v1.13.13
+
+This version adds or solidifies:
+
+1. `DELETE /api/v1/media/artifacts/{message_id}` now removes a single owned artifact-linked assistant message and cascades its persisted `ArtifactRecord`.
+2. `DELETE /api/v1/media/artifacts` now supports both selected batch deletion through `message_ids` and a full clear-all mutation through `clear_all=true`.
+3. `frontend/src/app/App.tsx` now owns draft-mutation callbacks and keeps the drafts workspace responsive by filtering deleted cards out of local state immediately after successful mutations.
+4. `frontend/src/app/components/views/DraftsView.tsx` now adds selection state, card-level delete actions, a bulk action bar, and a clear-all affordance while preserving search, filters, detail preview, and thread handoff.
+5. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now lock backend ownership-safe draft deletion plus browser coverage for single delete, bulk delete, and clear-all flows.
+
+### 16.2 Completed in v1.13.12
+
+This version adds or solidifies:
+
+1. `GET /api/v1/media/artifacts` now aggregates user-owned `ArtifactRecord` rows into a drafts-friendly API payload that includes excerpt text, thread handoff metadata, full structured artifact payloads, and best-effort platform inference.
+2. `frontend/src/app/App.tsx` now owns a lightweight workspace view switcher so the authenticated shell can move between chat, drafts, and future business modules without destabilizing the existing chat workflow.
+3. `frontend/src/app/components/views/DraftsView.tsx` now delivers a dedicated drafts page with responsive artifact cards, search, platform filters, empty state, modal detail preview, and one-click navigation back to the source conversation.
+4. `frontend/src/app/components/LeftSidebar.tsx` now upgrades the business-module area from static placeholders into real workspace navigation, while cleaning up the current Chinese labels and wiring "我的草稿" to the new view.
+5. `frontend/e2e/fixtures.ts`, `frontend/e2e/chat.spec.ts`, and `tests/test_chat.py` now lock the drafts aggregation API plus end-to-end browser behavior for empty-state rendering and draft-to-thread reopen flows.
+
+### 16.3 Completed in v1.13.11
 
 This version adds or solidifies:
 
@@ -1190,7 +1262,7 @@ This version adds or solidifies:
 4. `.env.example` now documents that `TAVILY_API_KEY` powers both LangGraph search retrieval and the market-intelligence business tool path.
 5. `README.md` and `DEVELOPMENT.md` now document the live-or-fallback Business Tool baseline so the roadmap no longer treats all market-trend tooling as purely mock data.
 
-### 16.2 Completed in v1.13.10
+### 16.4 Completed in v1.13.10
 
 This version adds or solidifies:
 
@@ -1201,7 +1273,7 @@ This version adds or solidifies:
 5. Playwright browser coverage now spans the full high-frequency authenticated workspace lifecycle except archive-specific and live-backend delivery paths, reducing regression risk across the operator journey.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded `14 passed` browser baseline and the narrowed remaining E2E gaps.
 
-### 16.3 Completed in v1.13.9
+### 16.5 Completed in v1.13.9
 
 This version adds or solidifies:
 
@@ -1212,7 +1284,7 @@ This version adds or solidifies:
 5. Playwright coverage now exercises much more of the authenticated workspace lifecycle without requiring a live backend, reducing regression risk across the highest-frequency operator flows.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded browser verification baseline and the increased E2E surface area.
 
-### 16.4 Completed in v1.13.8
+### 16.6 Completed in v1.13.8
 
 This version adds or solidifies:
 
@@ -1223,7 +1295,7 @@ This version adds or solidifies:
 5. LangGraph OCR image resolution can now consume OSS-managed image materials by converting normalized stored paths into signed delivery URLs before remote download.
 6. `tests/test_oss.py`, `tests/test_oss_client.py`, `README.md`, `.env.example`, and `DEVELOPMENT.md` now lock the signed delivery, lifecycle, promotion, and normalization baseline.
 
-### 16.5 Completed in v1.13.7
+### 16.7 Completed in v1.13.7
 
 This version adds or solidifies:
 
@@ -1234,7 +1306,7 @@ This version adds or solidifies:
 5. `pytest.ini` constrains default discovery to `tests/`, so `python -m pytest -q` no longer walks transient `uploads/` directories during collection.
 6. `tests/test_graph_tools.py`, `README.md`, and `DEVELOPMENT.md` now lock the sequential Business Tools baseline, title-only single-tool fallback, and the updated verification entrypoint.
 
-### 16.6 Completed in v1.13.6
+### 16.8 Completed in v1.13.6
 
 This version adds or solidifies:
 
@@ -1245,7 +1317,7 @@ This version adds or solidifies:
 5. `tests/test_graph_tools.py` locks the tool schema export, mock tool output, and ReAct loopback behavior without requiring live model credentials.
 6. `README.md` and `DEVELOPMENT.md` now document the Business Tools architecture and preserve the mandatory documentation-update rule.
 
-### 16.7 Completed in v1.13.5
+### 16.9 Completed in v1.13.5
 
 This version adds or solidifies:
 
@@ -1256,7 +1328,7 @@ This version adds or solidifies:
 5. frontend components now expose stable accessibility labels and `data-testid` anchors for critical auth, workspace, composer, and chat-bubble assertions.
 6. `README.md` and `DEVELOPMENT.md` now document E2E setup, commands, coverage scope, and the mandatory documentation-update rule for future changes.
 
-### 16.8 Completed in v1.13.4
+### 16.10 Completed in v1.13.4
 
 This version adds or solidifies:
 
@@ -1267,7 +1339,7 @@ This version adds or solidifies:
 5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the password-reset capability, reset-token lifetime, and global forced sign-out behavior
 6. regression coverage and frontend production build validation now explicitly include account-recovery and password-reset compatibility
 
-### 16.9 Current Non-Blocking Gaps
+### 16.10 Current Non-Blocking Gaps
 
 The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 

@@ -371,3 +371,53 @@ class ThreadMessagesResponse(SchemaModel):
         default_factory=list,
         description="Thread materials.",
     )
+
+
+class ArtifactListItem(SchemaModel):
+    id: str = Field(..., description="Artifact record ID.")
+    thread_id: str = Field(..., description="Owning thread ID.")
+    thread_title: str = Field(default="", description="Owning thread title.")
+    message_id: str = Field(..., description="Assistant message ID linked to the artifact.")
+    artifact_type: ArtifactType = Field(..., description="Artifact discriminator.")
+    title: str = Field(default="", description="Artifact title.")
+    excerpt: str = Field(default="", description="Short preview excerpt for card rendering.")
+    platform: Literal["xiaohongshu", "douyin", "both"] | None = Field(
+        default=None,
+        description="Best-effort inferred target platform.",
+    )
+    created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+    artifact: ArtifactPayloadModel = Field(
+        ...,
+        description="Full structured artifact payload for preview and expansion.",
+    )
+
+
+class ArtifactListResponse(SchemaModel):
+    items: list[ArtifactListItem] = Field(
+        default_factory=list,
+        description="Artifacts for the current user ordered by newest first.",
+    )
+    total: int = Field(..., description="Total artifact count returned.")
+
+
+class ArtifactDeleteBatchRequest(SchemaModel):
+    message_ids: list[str] = Field(
+        default_factory=list,
+        description="Artifact-linked assistant message IDs to delete.",
+    )
+    clear_all: bool = Field(
+        default=False,
+        description="Whether to delete all artifact-linked assistant messages for the current user.",
+    )
+
+
+class ArtifactDeleteResponse(SchemaModel):
+    deleted_count: int = Field(..., description="Number of deleted artifact-linked messages.")
+    deleted_message_ids: list[str] = Field(
+        default_factory=list,
+        description="Deleted assistant message IDs.",
+    )
+    cleared_all: bool = Field(
+        default=False,
+        description="Whether the request cleared all drafts for the current user.",
+    )
