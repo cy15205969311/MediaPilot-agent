@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.7`
+- Current version: `v1.13.8`
 - Updated on: `2026-04-28`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, upload cleanup, scheduled material GC, thread-linked material retention, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, Playwright E2E browser baseline, documentation baseline, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, UTC timestamp normalization, user profile management, session visibility, frontend workspace, global dual-theme support, Playwright E2E browser baseline, documentation baseline, and verification baseline
 
 Document set:
 
@@ -69,7 +69,7 @@ The current baseline includes:
 27. FastAPI now supports environment-variable-driven CORS origin configuration for local frontend-backend integration.
 28. Vite development server now binds to `0.0.0.0` so devices on the same LAN can access the frontend workspace directly.
 29. Frontend workspace now supports persisted Light / Dark themes through CSS variables, semantic chat-bubble tokens, and root HTML theme classes.
-30. Shared storage client abstraction now supports either local disk or Aliyun OSS uploads, public URLs, and deletion.
+30. Shared storage client abstraction now supports either local disk or Aliyun OSS uploads, signed delivery URL resolution, temporary-prefix staging, lifecycle helper provisioning, copy-based promotion, and deletion.
 31. Playwright end-to-end browser coverage for auth, password reset, logout, new-thread setup, and streamed chat smoke flows.
 32. Extensible LangGraph Business Tools architecture with tool-call routing, local Python tool execution, and `<business_tool_context>` injection before drafting.
 
@@ -81,9 +81,9 @@ The following capabilities are intentionally not production-complete yet:
 2. access-token revocation lists, device fingerprints, or organization-wide session-management dashboards
 3. production observability, rate limiting, or audit logging
 4. deeper external business integrations beyond the current mock Business Tools baseline
-6. managed OSS lifecycle policies, signed URLs, CDN invalidation, or bucket-level governance
-7. real email/SMS delivery for password-reset links and broader account-recovery operations
-8. advanced avatar processing such as cropping, compression, and CDN hosting
+5. automated OSS lifecycle rollout hooks, CDN invalidation, multi-bucket governance, or an operator-facing retention control plane
+6. real email/SMS delivery for password-reset links and broader account-recovery operations
+7. advanced avatar processing such as cropping, compression, and CDN hosting
 
 ## 4. Architecture Overview
 
@@ -287,6 +287,10 @@ Current supported runtime variables:
 - `OSS_BUCKET_NAME`
 - `OSS_REGION`
 - `OSS_PUBLIC_BASE_URL`
+- `OSS_SIGNED_URL_EXPIRE_SECONDS`
+- `OSS_TMP_UPLOAD_EXPIRE_DAYS`
+- `OSS_THREAD_UPLOAD_TRANSITION_DAYS`
+- `OSS_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS`
 
 The committed `.env.example` now includes:
 
@@ -295,6 +299,7 @@ The committed `.env.example` now includes:
 - vision-model placeholders for multimodal OCR
 - optional Tavily search placeholders for real-time web retrieval
 - optional OSS storage placeholders with `auto`, `local`, and `oss` backend selection
+- signed delivery URL and lifecycle tuning placeholders for OSS production rollouts
 - password-reset token lifetime placeholder for local development
 - local SQLite and JWT defaults for development
 
@@ -308,6 +313,10 @@ LLM_MODEL=qwen3.5-flash
 LLM_ARTIFACT_MODEL=qwen3.5-flash
 OPENAI_TIMEOUT_SECONDS=60
 OMNIMEDIA_STORAGE_BACKEND=auto
+OSS_SIGNED_URL_EXPIRE_SECONDS=3600
+OSS_TMP_UPLOAD_EXPIRE_DAYS=3
+OSS_THREAD_UPLOAD_TRANSITION_DAYS=30
+OSS_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS=IA
 JWT_SECRET_KEY=change-this-secret-in-production
 JWT_ALGORITHM=HS256
 JWT_ACCESS_EXPIRE_MINUTES=30
@@ -422,8 +431,8 @@ alembic upgrade head
 1. ownership check for `thread_id`
 2. thread upsert with `user_id`, `title`, and `system_prompt`
 3. user message persistence
-4. material persistence
-5. upload-record thread backfill for local `/uploads/...` and OSS public material URLs
+4. material reference normalization and persistence
+5. upload-record thread backfill plus OSS temporary-object promotion for newly bound material uploads
 6. provider stream execution
 7. assistant text persistence before `done`
 8. artifact persistence into `ArtifactRecord`
@@ -441,7 +450,7 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 | Field | Type | Required | Default |
 | --- | --- | --- | --- |
 | `type` | `MaterialType` | yes | none |
-| `url` | `HttpUrl \| None` | no | `None` |
+| `url` | `str \| None` | no | `None` |
 | `text` | `str` | no | `""` |
 
 #### `MediaChatRequest`
@@ -552,7 +561,7 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 | `username` | `str` | yes | login name |
 | `nickname` | `str \| None` | no | display name override |
 | `bio` | `str \| None` | no | short profile bio |
-| `avatar_url` | `str \| None` | no | avatar image URL, usually a local `/uploads/...` path or an OSS public URL |
+| `avatar_url` | `str \| None` | no | resolved avatar delivery URL; persistence MAY store a normalized managed-storage path internally |
 | `created_at` | ISO 8601 UTC string | yes | serialized with trailing `Z` |
 
 #### `UserProfileUpdate`
@@ -561,7 +570,7 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 | --- | --- | --- | --- |
 | `nickname` | `str \| None` | no | empty or null clears the value |
 | `bio` | `str \| None` | no | empty or null clears the value |
-| `avatar_url` | `str \| None` | no | empty or null clears the value |
+| `avatar_url` | `str \| None` | no | empty or null clears the value; signed upload URLs are normalized before persistence |
 
 ### 9.3 Upload Contracts
 
@@ -577,7 +586,7 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `url` | `str` | storage-backed preview URL returned by the active backend |
+| `url` | `str` | frontend delivery URL returned by the active backend; OSS responses are signed and time-limited |
 | `file_type` | `str` | image, video, or document |
 | `content_type` | `str` | MIME type |
 | `filename` | `str` | stored filename |
@@ -839,15 +848,20 @@ Current enforced boundaries:
 7. uploads require a valid bearer token
 8. files are streamed to the active backend after validation, without first assembling the full payload in application memory
 9. local storage uses `{user_id}/{filename}` object keys and returns `/uploads/{user_id}/{filename}` preview URLs
-10. OSS storage uses `uploads/{user_id}/{filename}` object keys and returns the configured public OSS base URL
-11. each saved file is tracked in `UploadRecord`
-12. material uploads MAY include an owned `thread_id` when the upload already belongs to an existing thread
-13. local or OSS material URLs used in chat persistence SHOULD backfill `UploadRecord.thread_id` once the thread is created or confirmed
-14. avatar uploads can be cleaned up after profile changes when they become stale orphan files
-15. stale material uploads older than `24h` are eligible for cleanup when they are still unbound or their thread no longer exists
-16. deleting a thread triggers immediate cleanup of linked material upload files and records
-17. an APScheduler background job runs `cleanup_abandoned_materials()` every hour and deletes the physical file through the resolved storage backend before removing the database record
-18. partial files are cleaned up on failure
+10. OSS material uploads without a bound thread are staged under `uploads/tmp/{user_id}/{filename}` until they are attached to a confirmed thread
+11. once an unbound OSS material is linked to a thread, the backend promotes it to `uploads/{user_id}/{filename}` through a storage-level copy and rewrites the stored path metadata
+12. normalized storage paths, rather than long-lived public URLs, are the preferred persistence format for managed uploads
+13. OSS delivery URLs returned to the frontend are signed and time-limited; local delivery continues to use `/uploads/...`
+14. each saved file is tracked in `UploadRecord`
+15. material uploads MAY include an owned `thread_id` when the upload already belongs to an existing thread
+16. local paths, signed OSS URLs, or normalized storage references used in chat persistence SHOULD backfill `UploadRecord.thread_id` once the thread is created or confirmed
+17. profile avatars and replayed material items resolve frontend-facing delivery URLs dynamically from normalized stored paths
+18. avatar uploads can be cleaned up after profile changes when they become stale orphan files
+19. stale material uploads older than `24h` are eligible for cleanup when they are still unbound or their thread no longer exists
+20. deleting a thread triggers immediate cleanup of linked material upload files and records
+21. an APScheduler background job runs `cleanup_abandoned_materials()` every hour and deletes the physical file through the resolved storage backend before removing the database record
+22. Aliyun OSS can additionally apply `setup_bucket_lifecycle()` so `uploads/tmp/` objects expire automatically and aged `uploads/` objects transition to colder storage classes
+23. partial files are cleaned up on failure
 
 ## 13. Frontend Engineering Baseline
 
@@ -1103,6 +1117,11 @@ Covered cases:
 47. Playwright workspace coverage verifies new-thread modal creation and streamed chat bubble rendering with user-avatar fallback
 48. Business Tool registry exports OpenAI-compatible function schemas and typed mock tool outputs
 49. LangGraph business-tool execution routes from draft generation to local tool execution and loops back with `<business_tool_context>` before review
+50. OSS delivery URLs are generated as signed previews instead of persisted long-lived public links
+51. profile avatars and thread-history materials resolve frontend URLs dynamically from normalized storage references
+52. unbound OSS material uploads are staged under a temporary prefix and promoted to permanent object keys on thread bind
+53. Aliyun OSS lifecycle setup provisions both temporary-object expiration and aged-object storage transitions
+54. upload persistence normalization accepts signed OSS URLs and rewrites them back to managed storage paths safely
 
 ### 15.2 E2E Browser Automation
 
@@ -1126,21 +1145,17 @@ The Playwright config starts the Vite dev server automatically with `npm run dev
 
 ### 15.3 Latest Verification Result
 
-The following checks were executed for the current LangGraph Business Tools loop change set on `2026-04-28` and passed:
+The following checks were executed for the current OSS signed-delivery and lifecycle hardening change set on `2026-04-28` and passed:
 
 ```bash
-python -m pytest tests/test_graph_tools.py tests/test_graph_search.py tests/test_graph_vision.py -q
-python -m pytest tests/test_chat.py -q
 python -m pytest -q
 ```
 
 Observed result baseline:
 
-- Business Tool regression suite: 5 passed
-- LangGraph search/vision regression suites: 14 passed
-- chat route and SSE regression suite: 28 passed
-- full backend test suite: 66 passed
-- covered Business Tools flows: LangChain-style `bind_tools` adapter binding, structured mock trend output, autonomous tool consideration for planning requests, sequential `analyze_market_trends -> generate_content_outline` loopback, targeted single-tool title generation, `<business_tool_context>` injection, and default `pytest` collection constrained to `tests/` via `pytest.ini`
+- full backend test suite: 69 passed
+- covered storage-hardening flows: signed preview URL generation, bucket lifecycle rule provisioning, temporary-prefix OSS material staging, copy-based promotion on thread bind, normalized avatar/media persistence, and signed thread-history replay URLs
+- existing auth, scheduler, upload-retention, LangGraph search/tool, and multimodal OCR regression suites remain green under the new storage-reference normalization flow
 
 The previous Playwright E2E baseline remains: `5 passed` for auth, password reset, logout, new-thread setup, and streamed chat rendering.
 
@@ -1150,7 +1165,18 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.7
+### 16.1 Completed in v1.13.8
+
+This version adds or solidifies:
+
+1. `AliyunOSSClient` now exposes `generate_presigned_url()` and `setup_bucket_lifecycle()` so production deployments can serve time-limited delivery URLs and provision native OSS lifecycle rules for temporary cleanup plus cold-storage transition.
+2. the shared storage abstraction now supports `build_delivery_url(...)`, `build_temporary_object_key(...)`, and synchronous copy-based promotion, keeping local and OSS behavior aligned behind the same persistence boundary.
+3. unbound OSS material uploads are now staged under `uploads/tmp/{user_id}/{filename}`, while thread binding promotes them to permanent `uploads/{user_id}/{filename}` object keys and rewrites `UploadRecord` plus `Material` storage references accordingly.
+4. profile avatars, thread-history materials, and upload responses now persist normalized managed-storage paths and resolve frontend-facing URLs dynamically, so the database no longer depends on long-lived OSS public URLs.
+5. LangGraph OCR image resolution can now consume OSS-managed image materials by converting normalized stored paths into signed delivery URLs before remote download.
+6. `tests/test_oss.py`, `tests/test_oss_client.py`, `README.md`, `.env.example`, and `DEVELOPMENT.md` now lock the signed delivery, lifecycle, promotion, and normalization baseline.
+
+### 16.2 Completed in v1.13.7
 
 This version adds or solidifies:
 
@@ -1161,7 +1187,7 @@ This version adds or solidifies:
 5. `pytest.ini` constrains default discovery to `tests/`, so `python -m pytest -q` no longer walks transient `uploads/` directories during collection.
 6. `tests/test_graph_tools.py`, `README.md`, and `DEVELOPMENT.md` now lock the sequential Business Tools baseline, title-only single-tool fallback, and the updated verification entrypoint.
 
-### 16.2 Completed in v1.13.6
+### 16.3 Completed in v1.13.6
 
 This version adds or solidifies:
 
@@ -1172,7 +1198,7 @@ This version adds or solidifies:
 5. `tests/test_graph_tools.py` locks the tool schema export, mock tool output, and ReAct loopback behavior without requiring live model credentials.
 6. `README.md` and `DEVELOPMENT.md` now document the Business Tools architecture and preserve the mandatory documentation-update rule.
 
-### 16.3 Completed in v1.13.5
+### 16.4 Completed in v1.13.5
 
 This version adds or solidifies:
 
@@ -1183,7 +1209,7 @@ This version adds or solidifies:
 5. frontend components now expose stable accessibility labels and `data-testid` anchors for critical auth, workspace, composer, and chat-bubble assertions.
 6. `README.md` and `DEVELOPMENT.md` now document E2E setup, commands, coverage scope, and the mandatory documentation-update rule for future changes.
 
-### 16.4 Completed in v1.13.4
+### 16.5 Completed in v1.13.4
 
 This version adds or solidifies:
 
@@ -1194,13 +1220,13 @@ This version adds or solidifies:
 5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the password-reset capability, reset-token lifetime, and global forced sign-out behavior
 6. regression coverage and frontend production build validation now explicitly include account-recovery and password-reset compatibility
 
-### 16.5 Current Non-Blocking Gaps
+### 16.6 Current Non-Blocking Gaps
 
 The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 
 1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
-3. upload cleanup now covers avatars plus local and OSS-backed material retention, but still lacks managed bucket lifecycle policies, signed URLs, and CDN governance
+3. upload cleanup now covers avatars plus local and OSS-backed material retention, and OSS delivery now uses signed URLs with lifecycle-ready prefixes, but the project still lacks automated lifecycle rollout hooks, CDN invalidation, and operator-facing retention governance
 4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, and sequential mock Business Tools, but still lacks deeper retrieval and live external business-system integrations
 5. E2E smoke coverage now exists for auth, password reset, logout, new-thread setup, and streamed chat rendering, but still needs expansion for replay, uploads, avatar updates, refresh rotation, session management, thread settings, and full LangGraph flows
 
@@ -1209,7 +1235,7 @@ The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 The next engineering steps SHOULD prioritize:
 
 1. deepen LangGraph retrieval and replace the current sequential mock Business Tools baseline with live external business-system integrations
-2. add managed OSS lifecycle rules, signed delivery URLs, and richer production retention controls on top of the current backend-level cleanup
+2. harden OSS governance with automated lifecycle rollout, CDN invalidation, signed-download policy tuning, and richer retention analytics on top of the current signed-delivery baseline
 3. expand end-to-end browser coverage beyond the initial Playwright smoke suite to include replay, uploads, avatar updates, refresh flows, session management, thread settings, and deeper SSE/LangGraph flows
 4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain
 

@@ -50,6 +50,7 @@ from app.services.auth import (
     validate_refresh_session,
 )
 from app.services.persistence import cleanup_orphaned_avatars
+from app.services.persistence import normalize_media_reference, resolve_media_reference
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -64,7 +65,18 @@ def _build_auth_response(
     return AuthTokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
-        user=UserProfile.model_validate(user, from_attributes=True),
+        user=_build_user_profile(user),
+    )
+
+
+def _build_user_profile(user: User) -> UserProfile:
+    return UserProfile(
+        id=user.id,
+        username=user.username,
+        nickname=user.nickname,
+        bio=user.bio,
+        avatar_url=resolve_media_reference(user.avatar_url),
+        created_at=user.created_at,
     )
 
 
@@ -405,7 +417,7 @@ async def update_profile(
     avatar_changed = False
     if "avatar_url" in payload.model_fields_set:
         avatar_url = payload.avatar_url.strip() if payload.avatar_url else ""
-        current_user.avatar_url = avatar_url or None
+        current_user.avatar_url = normalize_media_reference(avatar_url) if avatar_url else None
         avatar_changed = True
 
     try:
@@ -422,4 +434,4 @@ async def update_profile(
         await cleanup_orphaned_avatars(db, user_id=current_user.id)
         db.refresh(current_user)
 
-    return UserProfile.model_validate(current_user, from_attributes=True)
+    return _build_user_profile(current_user)

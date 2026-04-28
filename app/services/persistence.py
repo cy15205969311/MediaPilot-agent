@@ -15,9 +15,12 @@ from app.models.schemas import (
     PersistedMessageType,
 )
 from app.services.oss_client import (
-    build_public_url_from_stored_path,
+    build_delivery_url_from_stored_path,
+    build_stored_file_path,
     create_storage_client,
     extract_upload_object_key,
+    is_temporary_upload_object_key,
+    normalize_storage_reference,
     parse_stored_file_path,
 )
 
@@ -161,7 +164,7 @@ def build_material_history_item(material: Material) -> MaterialHistoryItem:
         thread_id=material.thread_id,
         message_id=material.message_id,
         type=material_type_from_db(material.type),
-        url=material.url,
+        url=resolve_media_reference(material.url),
         text=material.text,
         created_at=material.created_at,
     )
@@ -169,15 +172,39 @@ def build_material_history_item(material: Material) -> MaterialHistoryItem:
 
 def build_upload_url(record: UploadRecord) -> str:
     try:
-        return build_public_url_from_stored_path(record.file_path)
+        return build_delivery_url_from_stored_path(record.file_path)
     except RuntimeError:
         logger.warning("Unable to build public URL for upload record %s", record.id)
         return record.file_path
 
 
 def extract_upload_relative_path(url: str | None) -> str | None:
-    storage_client = create_storage_client("local")
-    return storage_client.extract_object_key_from_url(url)
+    normalized_reference = normalize_storage_reference(url)
+    if normalized_reference is None:
+        return None
+    if normalized_reference.startswith("http://") or normalized_reference.startswith("https://"):
+        return None
+    backend_name, object_key = parse_stored_file_path(normalized_reference)
+    if backend_name != "local":
+        return None
+    return object_key or None
+
+
+def normalize_media_reference(url: str | None) -> str | None:
+    return normalize_storage_reference(url)
+
+
+def resolve_media_reference(url: str | None) -> str | None:
+    normalized_reference = normalize_storage_reference(url)
+    if normalized_reference is None:
+        return None
+    if normalized_reference.startswith("http://") or normalized_reference.startswith("https://"):
+        return normalized_reference
+    try:
+        return build_delivery_url_from_stored_path(normalized_reference)
+    except RuntimeError:
+        logger.warning("Unable to build delivery URL for media reference %s", normalized_reference)
+        return normalized_reference
 
 
 def bind_material_uploads_to_thread(
@@ -186,6 +213,7 @@ def bind_material_uploads_to_thread(
     user_id: str,
     thread_id: str,
     material_urls: list[str | None],
+    material_items: list[Material] | None = None,
 ) -> int:
     logger.info(
         "persistence.bind_material_uploads_to_thread start thread_id=%s material_urls=%s",
@@ -212,16 +240,36 @@ def bind_material_uploads_to_thread(
     )
 
     updated_count = 0
+    rewritten_paths: dict[str, str] = {}
     for record in records:
-        _, object_key = parse_stored_file_path(record.file_path)
+        backend_name, object_key = parse_stored_file_path(record.file_path)
         if object_key not in candidate_paths:
             continue
         if record.thread_id == thread_id:
             continue
         if record.thread_id:
             continue
+
+        if is_temporary_upload_object_key(object_key):
+            storage_client = create_storage_client(backend_name)
+            destination_object_key = storage_client.build_object_key(
+                user_id=user_id,
+                filename=record.filename,
+            )
+            if destination_object_key != object_key:
+                storage_client.copy_file_sync(object_key, destination_object_key)
+                next_file_path = build_stored_file_path(backend_name, destination_object_key)
+                rewritten_paths[record.file_path] = next_file_path
+                record.file_path = next_file_path
+
         record.thread_id = thread_id
         updated_count += 1
+
+    if material_items and rewritten_paths:
+        for material in material_items:
+            normalized_material_reference = normalize_storage_reference(material.url)
+            if normalized_material_reference in rewritten_paths:
+                material.url = rewritten_paths[normalized_material_reference]
 
     logger.info(
         "persistence.bind_material_uploads_to_thread updated thread_id=%s updated_count=%s",
@@ -257,9 +305,9 @@ async def cleanup_orphaned_avatars(
 
     deleted_count = 0
 
+    normalized_current_avatar = normalize_storage_reference(current_avatar_url)
     for record in records:
-        record_url = build_upload_url(record)
-        if current_avatar_url and current_avatar_url == record_url:
+        if normalized_current_avatar and normalized_current_avatar == record.file_path:
             continue
         if record.created_at > cutoff:
             continue

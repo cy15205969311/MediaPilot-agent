@@ -14,7 +14,7 @@ import app.api.v1.oss as oss_module
 import app.services.oss_client as storage_module
 import app.services.persistence as persistence_module
 from app.db.database import Base, get_db
-from app.db.models import Thread, UploadRecord, User
+from app.db.models import Material, Message, Thread, UploadRecord, User
 from app.main import app
 from app.models.schemas import MediaChatRequest
 
@@ -193,6 +193,9 @@ def test_upload_media_uses_oss_storage_backend_when_configured(
     class FakeOSSStorageClient:
         backend_name = "oss"
 
+        def build_temporary_object_key(self, *, user_id: str, filename: str) -> str:
+            return f"uploads/tmp/{user_id}/{filename}"
+
         async def upload_file_stream(
             self,
             *,
@@ -200,21 +203,27 @@ def test_upload_media_uses_oss_storage_backend_when_configured(
             filename: str,
             content_type: str,
             file_stream,
+            object_key: str | None = None,
         ):
             captured["upload"] = {
                 "user_id": user_id,
                 "filename": filename,
                 "content_type": content_type,
                 "data": file_stream.read(),
+                "object_key": object_key,
             }
             return storage_module.StoredUpload(
                 backend_name="oss",
-                object_key=f"uploads/{user_id}/{filename}",
-                public_url=f"https://media-bucket.oss-cn-hangzhou.aliyuncs.com/uploads/{user_id}/{filename}",
+                object_key=object_key or f"uploads/{user_id}/{filename}",
+                public_url=f"https://media-bucket.oss-cn-hangzhou.aliyuncs.com/{object_key or f'uploads/{user_id}/{filename}'}",
             )
 
         async def delete_file(self, object_key: str) -> None:
             captured["deleted"] = object_key
+
+        def build_delivery_url(self, object_key: str, *, expires_in: int | None = None) -> str:
+            resolved_expires = expires_in or 3600
+            return f"https://signed-media.example.com/{object_key}?Expires={resolved_expires}"
 
     monkeypatch.setattr(oss_module, "create_storage_client", lambda: FakeOSSStorageClient())
 
@@ -226,12 +235,13 @@ def test_upload_media_uses_oss_storage_backend_when_configured(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["url"].startswith("https://media-bucket.oss-cn-hangzhou.aliyuncs.com/uploads/")
+    assert payload["url"].startswith("https://signed-media.example.com/uploads/tmp/")
     assert captured["upload"] == {
         "user_id": str(user["id"]),
         "filename": payload["filename"],
         "content_type": "image/png",
         "data": b"oss-image",
+        "object_key": f"uploads/tmp/{user['id']}/{payload['filename']}",
     }
 
     with session_factory() as db:
@@ -243,7 +253,7 @@ def test_upload_media_uses_oss_storage_backend_when_configured(
         )
 
     assert record is not None
-    assert record.file_path == f"oss://uploads/{user['id']}/{payload['filename']}"
+    assert record.file_path == f"oss://uploads/tmp/{user['id']}/{payload['filename']}"
 
 
 def test_upload_media_rejects_unsupported_type(client: TestClient):
@@ -337,9 +347,73 @@ def test_profile_update_cleans_orphaned_avatar_uploads(
         records = list(
             db.scalars(select(UploadRecord).where(UploadRecord.user_id == user_id)).all()
         )
+        refreshed_user = db.get(User, user_id)
 
     assert len(records) == 1
     assert records[0].filename == "current-avatar.webp"
+    assert refreshed_user is not None
+    assert refreshed_user.avatar_url == f"{user_id}/current-avatar.webp"
+
+
+def test_thread_history_returns_signed_oss_material_url(
+    client: TestClient,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    headers, user = register_user(client, username="alice-history-oss-signed")
+    user_id = str(user["id"])
+
+    class FakeOSSStorageClient:
+        backend_name = "oss"
+
+        def build_delivery_url(self, object_key: str, *, expires_in: int | None = None) -> str:
+            resolved_expires = expires_in or 3600
+            return f"https://signed-media.example.com/{object_key}?Expires={resolved_expires}"
+
+    monkeypatch.setattr(
+        storage_module,
+        "create_storage_client",
+        lambda preferred_backend=None: FakeOSSStorageClient()
+        if preferred_backend == "oss"
+        else storage_module.LocalStorageClient(),
+    )
+
+    with session_factory() as db:
+        db.add(
+            Thread(
+                id="thread-oss-history",
+                user_id=user_id,
+                title="OSS History",
+                system_prompt="",
+            )
+        )
+        message = Message(
+            thread_id="thread-oss-history",
+            role="user",
+            content="请分析这张图",
+        )
+        db.add(message)
+        db.flush()
+        db.add(
+            Material(
+                thread_id="thread-oss-history",
+                message_id=message.id,
+                type="image",
+                url=f"oss://uploads/{user_id}/cover.png",
+                text="cover.png",
+            )
+        )
+        db.commit()
+
+    response = client.get(
+        "/api/v1/media/threads/thread-oss-history/messages",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    material = payload["messages"][0]["materials"][0]
+    assert material["url"] == f"https://signed-media.example.com/uploads/{user_id}/cover.png?Expires=3600"
 
 
 def test_cleanup_abandoned_materials_removes_stale_unbound_uploads(
@@ -580,12 +654,32 @@ def test_persist_chat_request_backfills_oss_material_upload_thread_id(
             "OSS_PUBLIC_BASE_URL",
             "https://media-bucket.oss-cn-hangzhou.aliyuncs.com",
         )
+        copied_objects: list[tuple[str, str]] = []
+
+        class FakeOSSStorageClient:
+            backend_name = "oss"
+
+            def build_object_key(self, *, user_id: str, filename: str) -> str:
+                return f"uploads/{user_id}/{filename}"
+
+            def copy_file_sync(
+                self,
+                source_object_key: str,
+                destination_object_key: str,
+            ) -> None:
+                copied_objects.append((source_object_key, destination_object_key))
+
+        monkeypatch.setattr(
+            persistence_module,
+            "create_storage_client",
+            lambda preferred_backend=None: FakeOSSStorageClient(),
+        )
 
         engine_session.add(
             UploadRecord(
                 user_id=user_id,
                 filename="brief.md",
-                file_path=f"oss://uploads/{user_id}/brief.md",
+                file_path=f"oss://uploads/tmp/{user_id}/brief.md",
                 mime_type="text/markdown",
                 file_size=8,
                 purpose="material",
@@ -604,7 +698,7 @@ def test_persist_chat_request_backfills_oss_material_upload_thread_id(
                 "materials": [
                     {
                         "type": "text_link",
-                        "url": f"https://media-bucket.oss-cn-hangzhou.aliyuncs.com/uploads/{user_id}/brief.md",
+                        "url": f"https://media-bucket.oss-cn-hangzhou.aliyuncs.com/uploads/tmp/{user_id}/brief.md?Expires=3600&Signature=test",
                         "text": "素材摘要",
                     }
                 ],
@@ -626,7 +720,11 @@ def test_persist_chat_request_backfills_oss_material_upload_thread_id(
 
         assert record is not None
         assert record.thread_id == "thread-bind-after-oss-chat"
+        assert record.file_path == f"oss://uploads/{user_id}/brief.md"
         assert thread is not None
         assert thread.user_id == user_id
+        assert copied_objects == [
+            (f"uploads/tmp/{user_id}/brief.md", f"uploads/{user_id}/brief.md")
+        ]
     finally:
         engine_session.close()

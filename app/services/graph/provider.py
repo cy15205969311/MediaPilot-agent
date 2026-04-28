@@ -44,6 +44,11 @@ from app.models.schemas import (
     TopicPlanningArtifactPayload,
     TopicPlanningItem,
 )
+from app.services.oss_client import (
+    build_delivery_url_from_stored_path,
+    normalize_storage_reference,
+    parse_stored_file_path,
+)
 from app.services.persistence import extract_upload_relative_path
 from app.services.providers import (
     BaseLLMProvider,
@@ -1985,11 +1990,30 @@ async def _build_image_content_part(url: object | None) -> dict[str, object] | N
     if not raw_url:
         return None
 
-    if raw_url.startswith("http://") or raw_url.startswith("https://"):
-        logger.info("Downloading remote image for vision analysis: %s", raw_url)
-        return await _build_remote_image_content_part(raw_url)
+    normalized_reference = normalize_storage_reference(raw_url)
+    if normalized_reference and (
+        normalized_reference.startswith("http://")
+        or normalized_reference.startswith("https://")
+    ):
+        logger.info("Downloading remote image for vision analysis: %s", normalized_reference)
+        return await _build_remote_image_content_part(normalized_reference)
 
-    relative_path = extract_upload_relative_path(raw_url)
+    if normalized_reference and not (
+        normalized_reference.startswith("http://")
+        or normalized_reference.startswith("https://")
+    ):
+        backend_name, object_key = parse_stored_file_path(normalized_reference)
+        if backend_name == "oss":
+            signed_url = build_delivery_url_from_stored_path(normalized_reference)
+            logger.info(
+                "Resolved OSS image for vision analysis: raw_url=%s object_key=%s signed_url=%s",
+                raw_url,
+                object_key,
+                signed_url,
+            )
+            return await _build_remote_image_content_part(signed_url)
+
+    relative_path = extract_upload_relative_path(normalized_reference or raw_url)
     if relative_path:
         file_path = UPLOADS_DIR / relative_path
         logger.info(

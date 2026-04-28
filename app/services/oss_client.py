@@ -30,6 +30,11 @@ LOCAL_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 LOCAL_STORAGE_BACKEND = "local"
 OSS_STORAGE_BACKEND = "oss"
 OSS_STORED_PATH_PREFIX = "oss://"
+OSS_TEMP_OBJECT_PREFIX = "uploads/tmp"
+DEFAULT_SIGNED_URL_EXPIRE_SECONDS = 3600
+DEFAULT_TEMP_UPLOAD_EXPIRY_DAYS = 3
+DEFAULT_THREAD_UPLOAD_TRANSITION_DAYS = 30
+DEFAULT_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS = "IA"
 
 
 @dataclass(frozen=True)
@@ -46,9 +51,17 @@ class BaseStorageClient(ABC):
     def build_object_key(self, *, user_id: str, filename: str) -> str:
         """Build the backend-specific object key."""
 
+    def build_temporary_object_key(self, *, user_id: str, filename: str) -> str:
+        """Build a temporary object key used before a material is bound to a thread."""
+        return self.build_object_key(user_id=user_id, filename=filename)
+
     @abstractmethod
     def build_public_url(self, object_key: str) -> str:
         """Build a public URL for the stored object."""
+
+    def build_delivery_url(self, object_key: str, *, expires_in: int | None = None) -> str:
+        """Build a frontend-facing delivery URL for the stored object."""
+        return self.build_public_url(object_key)
 
     @abstractmethod
     def extract_object_key_from_url(self, url: str | None) -> str | None:
@@ -62,6 +75,7 @@ class BaseStorageClient(ABC):
         filename: str,
         content_type: str,
         data: bytes,
+        object_key: str | None = None,
     ) -> StoredUpload:
         """Upload a file and return its storage metadata."""
 
@@ -73,6 +87,7 @@ class BaseStorageClient(ABC):
         filename: str,
         content_type: str,
         file_stream: BinaryIO,
+        object_key: str | None = None,
     ) -> StoredUpload:
         """Upload a file-like object and return its storage metadata."""
 
@@ -80,12 +95,21 @@ class BaseStorageClient(ABC):
     async def delete_file(self, object_key: str) -> None:
         """Delete a file from the storage backend."""
 
+    def copy_file_sync(self, source_object_key: str, destination_object_key: str) -> None:
+        """Synchronously copy a stored file to a new backend-specific object key."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support file copy operations.",
+        )
+
 
 class LocalStorageClient(BaseStorageClient):
     backend_name = LOCAL_STORAGE_BACKEND
 
     def build_object_key(self, *, user_id: str, filename: str) -> str:
         return f"{user_id}/{filename}"
+
+    def build_temporary_object_key(self, *, user_id: str, filename: str) -> str:
+        return f"tmp/{user_id}/{filename}"
 
     def build_public_url(self, object_key: str) -> str:
         normalized_key = object_key.strip("/")
@@ -111,13 +135,14 @@ class LocalStorageClient(BaseStorageClient):
         filename: str,
         content_type: str,
         data: bytes,
+        object_key: str | None = None,
     ) -> StoredUpload:
-        object_key = self.build_object_key(user_id=user_id, filename=filename)
-        await run_in_threadpool(self._write_file, object_key, data)
+        resolved_object_key = object_key or self.build_object_key(user_id=user_id, filename=filename)
+        await run_in_threadpool(self._write_file, resolved_object_key, data)
         return StoredUpload(
             backend_name=self.backend_name,
-            object_key=object_key,
-            public_url=self.build_public_url(object_key),
+            object_key=resolved_object_key,
+            public_url=self.build_public_url(resolved_object_key),
         )
 
     async def upload_file_stream(
@@ -127,13 +152,14 @@ class LocalStorageClient(BaseStorageClient):
         filename: str,
         content_type: str,
         file_stream: BinaryIO,
+        object_key: str | None = None,
     ) -> StoredUpload:
-        object_key = self.build_object_key(user_id=user_id, filename=filename)
-        await run_in_threadpool(self._write_stream, object_key, file_stream)
+        resolved_object_key = object_key or self.build_object_key(user_id=user_id, filename=filename)
+        await run_in_threadpool(self._write_stream, resolved_object_key, file_stream)
         return StoredUpload(
             backend_name=self.backend_name,
-            object_key=object_key,
-            public_url=self.build_public_url(object_key),
+            object_key=resolved_object_key,
+            public_url=self.build_public_url(resolved_object_key),
         )
 
     def _write_file(self, object_key: str, data: bytes) -> None:
@@ -170,6 +196,12 @@ class LocalStorageClient(BaseStorageClient):
         file_path = LOCAL_UPLOADS_DIR / object_key
         file_path.unlink(missing_ok=True)
 
+    def copy_file_sync(self, source_object_key: str, destination_object_key: str) -> None:
+        source_path = LOCAL_UPLOADS_DIR / source_object_key
+        destination_path = LOCAL_UPLOADS_DIR / destination_object_key
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, destination_path)
+
 
 class AliyunOSSClient(BaseStorageClient):
     backend_name = OSS_STORAGE_BACKEND
@@ -184,9 +216,18 @@ class AliyunOSSClient(BaseStorageClient):
     def build_object_key(self, *, user_id: str, filename: str) -> str:
         return f"uploads/{user_id}/{filename}"
 
+    def build_temporary_object_key(self, *, user_id: str, filename: str) -> str:
+        return f"{OSS_TEMP_OBJECT_PREFIX}/{user_id}/{filename}"
+
     def build_public_url(self, object_key: str) -> str:
         normalized_key = quote(object_key.strip("/"), safe="/")
         return f"{self.settings.public_base_url.rstrip('/')}/{normalized_key}"
+
+    def build_delivery_url(self, object_key: str, *, expires_in: int | None = None) -> str:
+        return self.generate_presigned_url(
+            object_key,
+            expires_in=expires_in or _get_signed_url_expire_seconds(),
+        )
 
     def extract_object_key_from_url(self, url: str | None) -> str | None:
         if not url:
@@ -208,13 +249,14 @@ class AliyunOSSClient(BaseStorageClient):
         filename: str,
         content_type: str,
         data: bytes,
+        object_key: str | None = None,
     ) -> StoredUpload:
-        object_key = self.build_object_key(user_id=user_id, filename=filename)
-        await run_in_threadpool(self._upload_sync, object_key, content_type, data)
+        resolved_object_key = object_key or self.build_object_key(user_id=user_id, filename=filename)
+        await run_in_threadpool(self._upload_sync, resolved_object_key, content_type, data)
         return StoredUpload(
             backend_name=self.backend_name,
-            object_key=object_key,
-            public_url=self.build_public_url(object_key),
+            object_key=resolved_object_key,
+            public_url=self.build_public_url(resolved_object_key),
         )
 
     async def upload_file_stream(
@@ -224,18 +266,19 @@ class AliyunOSSClient(BaseStorageClient):
         filename: str,
         content_type: str,
         file_stream: BinaryIO,
+        object_key: str | None = None,
     ) -> StoredUpload:
-        object_key = self.build_object_key(user_id=user_id, filename=filename)
+        resolved_object_key = object_key or self.build_object_key(user_id=user_id, filename=filename)
         await run_in_threadpool(
             self._upload_stream_sync,
-            object_key,
+            resolved_object_key,
             content_type,
             file_stream,
         )
         return StoredUpload(
             backend_name=self.backend_name,
-            object_key=object_key,
-            public_url=self.build_public_url(object_key),
+            object_key=resolved_object_key,
+            public_url=self.build_public_url(resolved_object_key),
         )
 
     def _upload_sync(self, object_key: str, content_type: str, data: bytes) -> None:
@@ -257,6 +300,55 @@ class AliyunOSSClient(BaseStorageClient):
 
     def _delete_sync(self, object_key: str) -> None:
         self._get_bucket().delete_object(object_key)
+
+    def copy_file_sync(self, source_object_key: str, destination_object_key: str) -> None:
+        self._get_bucket().copy_object(
+            self.settings.bucket_name,
+            source_object_key,
+            destination_object_key,
+        )
+
+    def generate_presigned_url(self, object_name: str, expires_in: int = 3600) -> str:
+        return self._get_bucket().sign_url(
+            "GET",
+            object_name,
+            expires_in,
+            slash_safe=True,
+        )
+
+    def setup_bucket_lifecycle(self) -> None:
+        bucket = self._get_bucket()
+        if oss2 is None:
+            raise RuntimeError(
+                "The 'oss2' package is not installed. Run 'pip install -r requirements.txt'.",
+            )
+
+        tmp_rule = oss2.models.LifecycleRule(
+            id="cleanup-temporary-material-uploads",
+            prefix=f"{OSS_TEMP_OBJECT_PREFIX}/",
+            status="Enabled",
+            expiration=oss2.models.LifecycleExpiration(
+                days=_get_temp_upload_expiry_days(),
+            ),
+            abort_multipart_upload=oss2.models.AbortMultipartUpload(days=1),
+        )
+        storage_transition_rule = oss2.models.LifecycleRule(
+            id="transition-thread-material-uploads",
+            prefix="uploads/",
+            status="Enabled",
+            storage_transitions=[
+                oss2.models.StorageTransition(
+                    days=_get_thread_upload_transition_days(),
+                    storage_class=_get_thread_upload_transition_storage_class(),
+                    allow_small_file=True,
+                )
+            ],
+        )
+        bucket.put_bucket_lifecycle(
+            oss2.models.BucketLifecycle(
+                rules=[tmp_rule, storage_transition_rule],
+            )
+        )
 
     def _get_bucket(self):
         if oss2 is None:
@@ -321,11 +413,23 @@ def parse_stored_file_path(stored_path: str) -> tuple[str, str]:
 
 
 def build_public_url_from_stored_path(stored_path: str) -> str:
-    if stored_path.startswith("http://") or stored_path.startswith("https://"):
-        return stored_path
+    return build_delivery_url_from_stored_path(stored_path)
 
-    backend_name, object_key = parse_stored_file_path(stored_path)
-    return create_storage_client(backend_name).build_public_url(object_key)
+
+def build_delivery_url_from_stored_path(
+    stored_path: str,
+    *,
+    expires_in: int | None = None,
+) -> str:
+    normalized_reference = normalize_storage_reference(stored_path)
+    if normalized_reference is None:
+        raise RuntimeError("Stored path is empty.")
+    if normalized_reference.startswith("http://") or normalized_reference.startswith("https://"):
+        return normalized_reference
+
+    backend_name, object_key = parse_stored_file_path(normalized_reference)
+    storage_client = create_storage_client(backend_name)
+    return storage_client.build_delivery_url(object_key, expires_in=expires_in)
 
 
 def delete_stored_file_sync_safe(stored_path: str) -> None:
@@ -353,6 +457,29 @@ def delete_stored_file_sync_safe(stored_path: str) -> None:
 
 
 def extract_upload_object_key(url: str | None) -> str | None:
+    normalized_reference = normalize_storage_reference(url)
+    if normalized_reference is None:
+        return None
+    if normalized_reference.startswith("http://") or normalized_reference.startswith("https://"):
+        return None
+
+    _, object_key = parse_stored_file_path(normalized_reference)
+    return object_key or None
+
+
+def normalize_storage_reference(reference: str | None) -> str | None:
+    if reference is None:
+        return None
+
+    normalized = str(reference).strip()
+    if not normalized:
+        return None
+
+    if normalized.startswith(OSS_STORED_PATH_PREFIX):
+        _, object_key = parse_stored_file_path(normalized)
+        return build_stored_file_path(OSS_STORAGE_BACKEND, object_key)
+
+    parsed = urlparse(normalized)
     settings = get_oss_settings(required=False)
     if settings is not None:
         try:
@@ -360,9 +487,86 @@ def extract_upload_object_key(url: str | None) -> str | None:
         except RuntimeError:
             oss_client = None
         if oss_client is not None:
-            oss_key = oss_client.extract_object_key_from_url(url)
-            if oss_key:
-                return oss_key
+            oss_object_key = oss_client.extract_object_key_from_url(normalized)
+            if oss_object_key:
+                return build_stored_file_path(OSS_STORAGE_BACKEND, oss_object_key)
 
     local_client = LocalStorageClient()
-    return local_client.extract_object_key_from_url(url)
+    if not parsed.scheme and not parsed.netloc:
+        local_object_key = local_client.extract_object_key_from_url(normalized)
+        if local_object_key:
+            return build_stored_file_path(LOCAL_STORAGE_BACKEND, local_object_key)
+    elif _is_local_upload_host(parsed.netloc) and parsed.path.startswith("/uploads/"):
+        local_object_key = local_client.extract_object_key_from_url(normalized)
+        if local_object_key:
+            return build_stored_file_path(LOCAL_STORAGE_BACKEND, local_object_key)
+
+    if not parsed.scheme and not parsed.netloc and "/" in normalized and not normalized.startswith("/"):
+        return build_stored_file_path(LOCAL_STORAGE_BACKEND, normalized)
+
+    return normalized
+
+
+def is_temporary_upload_object_key(object_key: str) -> bool:
+    normalized_key = object_key.strip("/")
+    return normalized_key.startswith(f"{OSS_TEMP_OBJECT_PREFIX}/")
+
+
+def _get_signed_url_expire_seconds() -> int:
+    return _read_positive_int_env(
+        "OSS_SIGNED_URL_EXPIRE_SECONDS",
+        DEFAULT_SIGNED_URL_EXPIRE_SECONDS,
+    )
+
+
+def _get_temp_upload_expiry_days() -> int:
+    return _read_positive_int_env(
+        "OSS_TMP_UPLOAD_EXPIRE_DAYS",
+        DEFAULT_TEMP_UPLOAD_EXPIRY_DAYS,
+    )
+
+
+def _get_thread_upload_transition_days() -> int:
+    return _read_positive_int_env(
+        "OSS_THREAD_UPLOAD_TRANSITION_DAYS",
+        DEFAULT_THREAD_UPLOAD_TRANSITION_DAYS,
+    )
+
+
+def _get_thread_upload_transition_storage_class() -> str:
+    return (
+        os.getenv(
+            "OSS_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS",
+            DEFAULT_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS,
+        )
+        .strip()
+        or DEFAULT_THREAD_UPLOAD_TRANSITION_STORAGE_CLASS
+    )
+
+
+def _read_positive_int_env(env_name: str, default: int) -> int:
+    raw_value = os.getenv(env_name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        logger.warning("Invalid integer value for %s=%s. Falling back to %s.", env_name, raw_value, default)
+        return default
+    if parsed <= 0:
+        logger.warning("Non-positive value for %s=%s. Falling back to %s.", env_name, raw_value, default)
+        return default
+    return parsed
+
+
+def _is_local_upload_host(netloc: str) -> bool:
+    normalized_netloc = netloc.strip().lower()
+    return normalized_netloc in {
+        "testserver",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "localhost:8000",
+        "127.0.0.1:8000",
+        "[::1]:8000",
+    }

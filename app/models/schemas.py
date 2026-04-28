@@ -64,7 +64,7 @@ class MaterialInput(SchemaModel):
     type: MaterialType = Field(..., description="Material category.")
     url: str | None = Field(
         default=None,
-        description="Original material URL or local /uploads path.",
+        description="Original material URL, signed upload URL, or managed storage path.",
     )
     text: str = Field(default="", description="Extracted or supplementary text.")
 
@@ -89,7 +89,7 @@ class MediaChatRequest(SchemaModel):
 
 
 class UploadMediaResponse(SchemaModel):
-    url: str = Field(..., description="Static access path.")
+    url: str = Field(..., description="Frontend delivery URL or signed preview URL.")
     file_type: str = Field(..., description="Top-level file type.")
     content_type: str = Field(..., description="MIME type.")
     filename: str = Field(..., description="Stored filename.")
@@ -175,7 +175,7 @@ class UserProfile(SchemaModel):
     username: str = Field(..., description="Username.")
     nickname: str | None = Field(default=None, description="Display nickname.")
     bio: str | None = Field(default=None, description="Profile bio.")
-    avatar_url: str | None = Field(default=None, description="Profile avatar URL.")
+    avatar_url: str | None = Field(default=None, description="Resolved profile avatar delivery URL.")
     created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
 
 
@@ -185,7 +185,7 @@ class UserProfileUpdate(SchemaModel):
     avatar_url: str | None = Field(
         default=None,
         max_length=2048,
-        description="Avatar URL. Empty or null clears the value.",
+        description="Avatar URL or signed upload URL. Empty or null clears the value.",
     )
 
 

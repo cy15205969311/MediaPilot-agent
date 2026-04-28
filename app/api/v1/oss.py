@@ -17,6 +17,7 @@ from app.models.schemas import UploadMediaResponse, UploadPurpose
 from app.services.auth import get_current_user
 from app.services.oss_client import (
     LOCAL_UPLOADS_DIR,
+    OSS_STORAGE_BACKEND,
     build_stored_file_path,
     create_storage_client,
 )
@@ -99,6 +100,16 @@ async def upload_media(
     total_size = 0
     content_type = file.content_type or mimetypes.guess_type(original_filename)[0]
     storage_client = create_storage_client()
+    upload_object_key: str | None = None
+    if (
+        purpose == UploadPurpose.MATERIAL
+        and resolved_thread_id is None
+        and getattr(storage_client, "backend_name", "") == OSS_STORAGE_BACKEND
+    ):
+        upload_object_key = storage_client.build_temporary_object_key(
+            user_id=current_user.id,
+            filename=stored_name,
+        )
 
     try:
         while chunk := await file.read(READ_CHUNK_SIZE):
@@ -123,6 +134,7 @@ async def upload_media(
             filename=stored_name,
             content_type=content_type or "application/octet-stream",
             file_stream=file.file,
+            object_key=upload_object_key,
         )
     except RuntimeError as exc:
         logger.warning("Storage upload failed before persistence: %s", exc)
@@ -163,7 +175,11 @@ async def upload_media(
         ) from exc
 
     return UploadMediaResponse(
-        url=stored_upload.public_url,
+        url=(
+            storage_client.build_delivery_url(stored_upload.object_key)
+            if hasattr(storage_client, "build_delivery_url")
+            else stored_upload.public_url
+        ),
         file_type=ALLOWED_EXTENSIONS[suffix],
         content_type=content_type or "application/octet-stream",
         filename=stored_name,

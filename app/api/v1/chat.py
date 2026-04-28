@@ -11,7 +11,11 @@ from app.db.models import Material, Message, Thread, User
 from app.models.schemas import MediaChatRequest
 from app.services.agent import media_agent_workflow
 from app.services.auth import get_current_user
-from app.services.persistence import bind_material_uploads_to_thread, derive_thread_title
+from app.services.persistence import (
+    bind_material_uploads_to_thread,
+    derive_thread_title,
+    normalize_media_reference,
+)
 
 router = APIRouter(prefix="/api/v1/media", tags=["media-chat"])
 logger = logging.getLogger(__name__)
@@ -67,24 +71,29 @@ def persist_chat_request(
     db.add(user_message)
     db.flush()
 
+    persisted_materials: list[Material] = []
+    normalized_material_urls: list[str | None] = []
     for material in request.materials:
-        db.add(
-            Material(
-                thread_id=request.thread_id,
-                message_id=user_message.id,
-                type=material.type.value,
-                url=str(material.url) if material.url else None,
-                text=material.text,
-            )
+        normalized_material_url = normalize_media_reference(
+            str(material.url) if material.url else None,
         )
+        normalized_material_urls.append(normalized_material_url)
+        persisted_material = Material(
+            thread_id=request.thread_id,
+            message_id=user_message.id,
+            type=material.type.value,
+            url=normalized_material_url,
+            text=material.text,
+        )
+        persisted_materials.append(persisted_material)
+        db.add(persisted_material)
 
     bound_uploads = bind_material_uploads_to_thread(
         db,
         user_id=current_user.id,
         thread_id=request.thread_id,
-        material_urls=[
-            str(material.url) if material.url else None for material in request.materials
-        ],
+        material_urls=normalized_material_urls,
+        material_items=persisted_materials,
     )
 
     logger.info(
