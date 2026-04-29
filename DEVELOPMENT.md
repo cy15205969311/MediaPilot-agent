@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.17`
+- Current version: `v1.13.20`
 - Updated on: `2026-04-29`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, conversation-to-template capture, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion and scope management, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, and drafting-state transitions, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -75,6 +75,7 @@ The current baseline includes:
 33. Sidebar-driven workspace view routing with an authenticated drafts aggregation page backed by persisted `ArtifactRecord` history.
 34. Draft lifecycle management across single delete, batch delete, and clear-all operations for authenticated artifact cards.
 35. Persistent template-library API with preset seeding, user-scoped CRUD, Chinese management UI, and new-thread cascade prefill.
+36. Multi-tenant knowledge-base management with authenticated scope listing, txt/md upload chunking, per-user scope deletion, and a dedicated frontend knowledge workspace.
 
 ### 3.2 Out of Scope
 
@@ -200,6 +201,7 @@ omnimedia-agent/
 |           |- UserProfileModal.tsx
 |           |- views/
 |           |  |- DraftsView.tsx
+|           |  |- TopicsView.tsx
 |           |  '- TemplatesView.tsx
 |           '- artifacts/
 |              |- CommentReplyArtifact.tsx
@@ -240,6 +242,7 @@ omnimedia-agent/
 - `python-dotenv==1.0.1`
 - `langgraph==1.1.9`
 - `langchain-core==1.3.1`
+- `langchain-text-splitters==0.3.11`
 - `PyJWT==2.10.1`
 - `passlib[bcrypt]==1.7.4`
 - `bcrypt==4.0.1`
@@ -411,6 +414,13 @@ alembic upgrade head
 | `GET` | `/api/v1/media/threads` | authenticated paginated thread list |
 | `GET` | `/api/v1/media/threads/{thread_id}/messages` | authenticated thread replay |
 | `GET` | `/api/v1/media/artifacts` | authenticated artifact aggregation for drafts workspace |
+| `GET` | `/api/v1/media/knowledge/scopes` | list owned knowledge scopes with chunk and source counts |
+| `POST` | `/api/v1/media/knowledge/upload` | upload txt/md knowledge content into an owned scope |
+| `DELETE` | `/api/v1/media/knowledge/scopes/{scope}` | delete all owned chunks for one knowledge scope |
+| `GET` | `/api/v1/media/topics` | authenticated topic-pool list with optional status filter |
+| `POST` | `/api/v1/media/topics` | create a new owned topic idea |
+| `PATCH` | `/api/v1/media/topics/{topic_id}` | update owned topic content or lifecycle status |
+| `DELETE` | `/api/v1/media/topics/{topic_id}` | delete an owned topic record |
 | `PATCH` | `/api/v1/media/threads/{thread_id}` | rename, archive, or update thread prompt |
 | `DELETE` | `/api/v1/media/threads/{thread_id}` | delete owned thread |
 | `POST` | `/api/v1/media/upload` | authenticated user-scoped upload via the active storage backend |
@@ -1266,20 +1276,19 @@ The Playwright config starts the Vite dev server automatically with `npm run dev
 
 ### 15.3 Latest Verification Result
 
-The following checks were executed for the current drafts-workspace change set on `2026-04-28` and passed:
+The following checks were executed for the current knowledge-workspace change set on `2026-04-29` and passed:
 
 ```bash
 python -m pytest -q
 cd frontend
 npm run build
-npx playwright test
 ```
 
 Observed result baseline:
 
-- full backend test suite: 86 passed
+- full backend test suite: 97 passed
 - frontend production build: passed
-- frontend Playwright E2E suite: 21 passed
+- frontend Playwright E2E suite: last verified at 21 passed on the previous frontend-focused change set
 - covered browser flows: auth bootstrap, password-reset request UX, logout cleanup, protected-route refresh retry, thread creation/replay/settings/rename/delete, drafts empty-state/reopen/single-delete/bulk-delete/clear-all flow, template-center render/use-template cascade flow, preset/custom template creation plus batch deletion, profile avatar/nickname/bio updates, active-session refresh and revoke, in-session password change, upload plus tool-call streaming feedback, and right-panel artifact follow-up actions
 - existing auth, scheduler, upload-retention, OSS signed-delivery, LangGraph search/tool, Tavily-backed business-tool live/fallback, and multimodal OCR regression suites remain green under the expanded browser baseline
 
@@ -1289,18 +1298,30 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.17
+### 16.1 Completed in v1.13.20
 
 This version adds or solidifies:
 
-1. `Template` plus `Thread` now persist `knowledge_base_scope`, backed by Alembic migrations `20260428_02_template_growth_ecosystem.py` and `20260429_01_thread_knowledge_base_scope.py`, so template-bound knowledge scopes survive from template selection through thread creation, replay, follow-up turns, and final generation.
-2. `app/services/template_library.py` now generates and runtime-syncs `100+` preset templates across 美妆护肤、美食文旅、职场金融、数码科技、电商/闲鱼、教育/干货、房产/家居、汽车/出行、母婴/宠物、情感/心理 10 大行业, while preserving deterministic legacy ids for key cards and pruning stale preset rows from older seed sets.
-3. `frontend/src/app/components/views/TemplatesView.tsx` now returns to a local-first template center, hiding the main Skills discovery UI and surfacing a simpler workspace with keyword search, 10 category pills, local card-grid browsing, preset/custom badges, batch selection, batch deletion, and one-click apply.
-4. `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `app/models/schemas.py` now expand template platform/category contracts to include `双平台` plus the new 10-category taxonomy, while keeping template-to-chat prefill, artifact-to-template capture, and `knowledge_base_scope` cascade behavior aligned.
-5. `app/services/knowledge_base.py` now introduces a lightweight retrieval layer that prefers Chroma when installed, falls back to a deterministic local JSON plus hashing retriever in bare development environments, and seeds additional scope-specific mock knowledge for repeatable RAG verification across the expanded preset library.
-6. LangGraph `generate_draft_node` now performs a real retrieval hop for template-bound scopes before final generation, appending retrieved knowledge context into the effective draft prompt, while `app/services/graph/provider.py` also injects a current-date time anchor into routing/search planning prompts so time-sensitive query extraction stops defaulting to stale years.
-7. `GET /api/v1/media/skills/search` remains available as a backend-only future extension surface powered by Tavily live search when configured, but the primary production workflow now emphasizes fast local presets instead of cloud-side discovery UI.
-8. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now cover the larger preset inventory, hidden Skills entry, new category tabs, local-first template-center behavior, and artifact-to-template capture, while `python -m pytest` plus Playwright browser coverage remain green.
+- `app/services/knowledge_base.py` now provides a multi-tenant knowledge service keyed by `user_id + scope + source`, with normalized scope handling, text chunking, Chroma persistence, and a JSON fallback store.
+- the knowledge service preserves built-in seed scopes as system-owned documents while keeping uploaded user documents tenant-isolated.
+- `app/api/v1/knowledge.py` now exposes authenticated scope listing, txt/md upload ingestion, and per-scope deletion routes.
+- upload ingestion now decodes `utf-8-sig`, `utf-8`, and `gb18030`, then chunks content before persistence and reports normalized scope plus chunk counts back to the frontend.
+- `app/services/graph/provider.py` now injects tenant-scoped knowledge retrieval before final generation and logs `RAG Activated for user ...` when matching chunks are found.
+- `frontend/src/app/components/views/KnowledgeView.tsx`, `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `frontend/src/app/components/LeftSidebar.tsx` now deliver a dedicated knowledge workspace with upload, list, and delete interactions.
+- `tests/test_chat.py` now covers user-scoped upload/list/delete flows plus seeded-knowledge fallback, and the current repository baseline is verified by `97 passed` backend tests plus a passing frontend production build.
+
+1. `TopicRecord` now persists an optional `thread_id`, backed by Alembic migration `20260429_03_topic_thread_binding.py`, so every topic can bind to a single drafting conversation and avoid spawning duplicate chat threads.
+2. `app/api/v1/topics.py`, `app/models/schemas.py`, and `frontend/src/app/types.ts` now expose `thread_id` across topic read/write contracts, allowing topic cards to distinguish first-time drafting from resume-drafting flows.
+3. `frontend/src/app/App.tsx` now splits topic actions into two paths: first-time drafting binds a generated thread identifier and opens the existing new-thread modal, while already-bound topics skip the modal and jump directly back into the original chat history.
+4. When a bound topic points to a thread that no longer exists in persisted history, the workspace now falls back to a restored draft session using the same reserved `thread_id`, instead of silently creating a second fragmented conversation chain.
+5. `frontend/src/app/components/views/TopicsView.tsx` now upgrades the primary card CTA from “一键生成草稿” to “继续撰写” whenever a topic already owns a bound thread, making the lifecycle state obvious from the board itself.
+6. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now cover topic thread binding, resume-drafting behavior, and the topic-to-chat cascade alongside the earlier topic-pool CRUD baseline.
+7. `TopicRecord` remains part of the ORM baseline through `20260429_02_topic_pool_records.py`, and the topics workspace still provides authenticated CRUD, status filtering, a Chinese three-column kanban view, and stable left/right state transitions instead of drag-and-drop risk.
+8. Triggering topic drafting continues to align workspace platform, prefill a topic-specific system prompt, and advance status toward `drafting`, preserving the content-ops loop from inspiration capture into generation.
+9. `Template` plus `Thread` continue to persist `knowledge_base_scope`, backed by Alembic migrations `20260428_02_template_growth_ecosystem.py` and `20260429_01_thread_knowledge_base_scope.py`, so template-bound knowledge scopes survive from template selection through thread creation, replay, follow-up turns, and final generation.
+10. `app/services/template_library.py` continues to generate and runtime-sync `100+` preset templates across 美妆护肤、美食文旅、职场金融、数码科技、电商/闲鱼、教育/干货、房产/家居、汽车/出行、母婴/宠物、情感/心理 10 大行业, while preserving deterministic legacy ids for key cards and pruning stale preset rows from older seed sets.
+11. `frontend/src/app/components/views/TemplatesView.tsx` remains a local-first template center with hidden Skills UI, keyword search, 10 category pills, preset/custom badges, batch selection, batch deletion, and one-click apply.
+12. `python -m pytest` plus Playwright browser coverage remain green for topic thread binding, resume drafting, topic CRUD, the larger preset inventory, hidden Skills entry, new category tabs, and artifact-to-template capture.
 
 ### 16.2 Completed in v1.13.15
 
@@ -1436,14 +1457,14 @@ The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
 3. upload cleanup now covers avatars plus local and OSS-backed material retention, OSS delivery now uses signed URLs with lifecycle-ready prefixes, lifecycle rollout can be automated, and users can inspect retention summaries, but the project still lacks CDN invalidation, multi-bucket governance, and a full admin retention console
-4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a local-first template center that can persist knowledge-base scopes while keeping the Skills backend surface reserved for future re-entry, but the project still lacks user-managed document ingestion, richer first-party knowledge execution, product/CRM integrations, and broader live business-system connectivity
+4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a user-managed multi-tenant knowledge workspace, but the project still lacks richer document loaders such as PDF/Docx, citation surfacing in the chat UI, advanced vector backends, product/CRM integrations, and broader live business-system connectivity
 5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, artifact-side follow-up actions, local-first template-center management, and artifact-to-template capture, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
 
 ## 17. Recommended Next Steps
 
 The next engineering steps SHOULD prioritize:
 
-1. evolve the current template-bound lightweight RAG into a full ingestion pipeline with user-managed document upload, chunking, vector indexing, scope administration, and richer internal or external business-system integrations such as product, competitor, CRM, or private knowledge sources
+1. evolve the current tenant-scoped RAG ingestion baseline into a richer document pipeline with PDF/Docx loaders, citation surfacing, chunk inspection, stronger embeddings or vector backends, and broader internal or external business-system integrations such as product, competitor, CRM, or private knowledge sources
 2. harden OSS governance further with CDN invalidation, multi-bucket policy rollout, admin retention analytics, and richer signed-download policy controls on top of the current lifecycle rollout and retention-summary baseline
 3. expand browser coverage further into archive controls, clipboard/export interactions, and live backend/OSS delivery flows beyond the current mocked regression baseline
 4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain

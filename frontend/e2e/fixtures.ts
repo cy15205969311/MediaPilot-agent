@@ -11,6 +11,7 @@ import type {
   HistoryMessageItem,
   HistoryThreadSummary,
   MediaChatRequestPayload,
+  TopicItem,
   TemplateSkillDiscoveryItem,
   TemplateSummaryItem,
   ThreadMessagesApiResponse,
@@ -36,6 +37,7 @@ export type MockBackendOptions = {
   user?: Partial<AuthenticatedUser>;
   threads?: HistoryThreadSummary[];
   drafts?: DraftSummaryItem[];
+  topics?: TopicItem[];
   templates?: TemplateSummaryItem[];
   templateSkills?: TemplateSkillDiscoveryItem[];
   threadMessagesById?: Record<string, ThreadMessagesApiResponse>;
@@ -59,6 +61,7 @@ type MockBackendState = {
   user: AuthenticatedUser;
   threads: HistoryThreadSummary[];
   drafts: DraftSummaryItem[];
+  topics: TopicItem[];
   templates: TemplateSummaryItem[];
   templateSkills: TemplateSkillDiscoveryItem[];
   threadMessagesById: Record<string, ThreadMessagesApiResponse>;
@@ -224,6 +227,20 @@ export function createMockTemplateSkill(
     source_title: overrides.source_title ?? "Mock Skills Discovery",
     source_url: overrides.source_url ?? null,
     data_mode: overrides.data_mode ?? "mock",
+  };
+}
+
+export function createMockTopic(overrides: Partial<TopicItem> = {}): TopicItem {
+  const timestamp = overrides.updated_at ?? nowIso();
+  return {
+    id: overrides.id ?? `topic-${Math.random().toString(36).slice(2, 8)}`,
+    title: overrides.title ?? "默认选题灵感",
+    inspiration: overrides.inspiration ?? "补充灵感备注",
+    platform: overrides.platform ?? "小红书",
+    status: overrides.status ?? "idea",
+    thread_id: overrides.thread_id ?? null,
+    created_at: overrides.created_at ?? timestamp,
+    updated_at: timestamp,
   };
 }
 
@@ -526,6 +543,25 @@ function createTemplateFromPayload(
   });
 }
 
+function createTopicFromPayload(
+  body: {
+    title?: string;
+    inspiration?: string;
+    platform?: TopicItem["platform"];
+  },
+): TopicItem {
+  return createMockTopic({
+    id: `topic-${Math.random().toString(36).slice(2, 10)}`,
+    title: body.title ?? "未命名选题",
+    inspiration: body.inspiration ?? "",
+    platform: body.platform ?? "小红书",
+    status: "idea",
+    thread_id: null,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  });
+}
+
 export async function mockBackend(page: Page, options: MockBackendOptions = {}) {
   const initialUser = {
     ...testUser,
@@ -536,6 +572,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
     user: initialUser,
     threads: clone(options.threads ?? []),
     drafts: clone(options.drafts ?? []),
+    topics: clone(options.topics ?? []),
     templates: clone(options.templates ?? createDefaultTemplates()),
     templateSkills: clone(options.templateSkills ?? createDefaultTemplateSkills()),
     threadMessagesById: clone(options.threadMessagesById ?? {}),
@@ -677,6 +714,18 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
       return;
     }
 
+    if (path === "/api/v1/media/topics" && request.method() === "GET") {
+      const status = url.searchParams.get("status");
+      const items = status
+        ? state.topics.filter((topic) => topic.status === status)
+        : state.topics;
+      await fulfillJson(route, {
+        items: items.sort((left, right) => right.updated_at.localeCompare(left.updated_at)),
+        total: items.length,
+      });
+      return;
+    }
+
     if (path === "/api/v1/media/templates" && request.method() === "GET") {
       await fulfillJson(route, {
         items: state.templates,
@@ -715,6 +764,18 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
       return;
     }
 
+    if (path === "/api/v1/media/topics" && request.method() === "POST") {
+      const body = parseJsonBody<{
+        title?: string;
+        inspiration?: string;
+        platform?: TopicItem["platform"];
+      }>(route);
+      const createdTopic = createTopicFromPayload(body);
+      state.topics = [createdTopic, ...state.topics];
+      await fulfillJson(route, createdTopic, 201);
+      return;
+    }
+
     const templateMatch = path.match(/^\/api\/v1\/media\/templates\/([^/]+)$/);
     if (templateMatch && request.method() === "DELETE") {
       const templateId = templateMatch[1];
@@ -735,6 +796,52 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         deleted_count: 1,
         deleted_ids: [templateId],
       });
+      return;
+    }
+
+    const topicMatch = path.match(/^\/api\/v1\/media\/topics\/([^/]+)$/);
+    if (topicMatch && request.method() === "PATCH") {
+      const topicId = topicMatch[1];
+      const body = parseJsonBody<{
+        title?: string;
+        inspiration?: string;
+        platform?: TopicItem["platform"];
+        status?: TopicItem["status"];
+        thread_id?: string | null;
+      }>(route);
+      const existingTopic = state.topics.find((topic) => topic.id === topicId);
+      if (!existingTopic) {
+        await fulfillJson(route, { detail: "未找到对应选题。" }, 404);
+        return;
+      }
+
+      const nextTopic: TopicItem = {
+        ...existingTopic,
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.inspiration !== undefined ? { inspiration: body.inspiration } : {}),
+        ...(body.platform !== undefined ? { platform: body.platform } : {}),
+        ...(body.status !== undefined ? { status: body.status } : {}),
+        ...(body.thread_id !== undefined ? { thread_id: body.thread_id } : {}),
+        updated_at: nowIso(),
+      };
+
+      state.topics = state.topics
+        .map((topic) => (topic.id === topicId ? nextTopic : topic))
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+      await fulfillJson(route, nextTopic);
+      return;
+    }
+
+    if (topicMatch && request.method() === "DELETE") {
+      const topicId = topicMatch[1];
+      const existingTopic = state.topics.find((topic) => topic.id === topicId);
+      if (!existingTopic) {
+        await fulfillJson(route, { detail: "未找到对应选题。" }, 404);
+        return;
+      }
+
+      state.topics = state.topics.filter((topic) => topic.id !== topicId);
+      await fulfillJson(route, { id: topicId, deleted: true });
       return;
     }
 

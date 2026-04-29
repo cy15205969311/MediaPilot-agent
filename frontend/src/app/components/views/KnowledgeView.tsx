@@ -1,0 +1,258 @@
+import { useMemo, useRef, useState, type DragEvent } from "react";
+
+import {
+  BookOpenText,
+  Database,
+  FileUp,
+  FolderOpen,
+  Search,
+  Trash2,
+} from "lucide-react";
+
+import type { KnowledgeScopeItem } from "../../types";
+
+type KnowledgeViewProps = {
+  scopes: KnowledgeScopeItem[];
+  isLoading: boolean;
+  isMutating: boolean;
+  mutatingScope: string | null;
+  onDeleteScope: (scope: string) => Promise<boolean>;
+  onUploadFiles: (scope: string, files: File[]) => Promise<void>;
+};
+
+function formatUpdatedAt(value?: string | null): string {
+  if (!value) {
+    return "刚刚更新";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "刚刚更新";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+export function KnowledgeView(props: KnowledgeViewProps) {
+  const { scopes, isLoading, isMutating, mutatingScope, onDeleteScope, onUploadFiles } = props;
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [scopeInput, setScopeInput] = useState("");
+  const [searchValue, setSearchValue] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+
+  const filteredScopes = useMemo(() => {
+    const normalizedSearch = searchValue.trim().toLowerCase();
+    if (!normalizedSearch) {
+      return scopes;
+    }
+    return scopes.filter((scope) =>
+      [scope.scope, `${scope.chunk_count}`, `${scope.source_count}`]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedSearch),
+    );
+  }, [scopes, searchValue]);
+
+  const handleFileSelection = async (files: FileList | null) => {
+    if (!files || files.length === 0) {
+      return;
+    }
+    await onUploadFiles(scopeInput, Array.from(files));
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const handleDrop = async (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+    await handleFileSelection(event.dataTransfer.files);
+  };
+
+  const handleDelete = async (scope: string) => {
+    const confirmed = window.confirm(
+      `确认清空知识库 Scope「${scope}」吗？此操作会删除该 Scope 下的全部文本切片。`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    await onDeleteScope(scope);
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background" data-testid="knowledge-view">
+      <div className="border-b border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <div className="text-2xl font-bold tracking-tight text-foreground">知识库工作台</div>
+              <div className="mt-1 text-sm text-muted-foreground">
+                为模板和会话绑定私有资料，把品牌语气、产品参数和行业手册沉淀成可检索的外挂知识。
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/80 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
+              当前仅支持 `.txt` / `.md` 文件，系统会自动切分为 500 字左右的知识块。
+            </div>
+          </div>
+
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,320px)_1fr]">
+            <label className="relative block">
+              <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                Scope 名称
+              </span>
+              <input
+                className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                onChange={(event) => setScopeInput(event.target.value)}
+                placeholder="例如：brand_guide_2026"
+                value={scopeInput}
+              />
+            </label>
+
+            <label
+              className={`flex min-h-[132px] cursor-pointer flex-col items-center justify-center rounded-[28px] border border-dashed px-6 py-6 text-center transition ${
+                isDragging
+                  ? "border-brand bg-brand-soft"
+                  : "border-border bg-card hover:border-brand/40 hover:bg-surface-tint"
+              } ${isMutating ? "pointer-events-none opacity-60" : ""}`}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                setIsDragging(false);
+              }}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => void handleDrop(event)}
+            >
+              <input
+                ref={fileInputRef}
+                accept=".txt,.md,.markdown,text/plain,text/markdown"
+                className="hidden"
+                multiple
+                onChange={(event) => void handleFileSelection(event.target.files)}
+                type="file"
+              />
+              <div className="mb-3 rounded-2xl bg-primary/10 p-3 text-primary">
+                <FileUp className="h-6 w-6" />
+              </div>
+              <div className="text-base font-semibold text-foreground">
+                拖拽文件到这里，或点击选择资料上传
+              </div>
+              <div className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+                如果不填写 Scope，系统会自动使用文件名生成一个新的 Scope；如果填写了 Scope，则会把文件切片追加到该知识库里。
+              </div>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-1 flex-col overflow-hidden px-4 py-4 lg:px-6">
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <label className="relative block max-w-xl flex-1">
+            <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <input
+              className="w-full rounded-2xl border border-border bg-input-background px-11 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+              onChange={(event) => setSearchValue(event.target.value)}
+              placeholder="搜索 Scope 或切片数量"
+              value={searchValue}
+            />
+          </label>
+
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Database className="h-4 w-4" />
+            <span>当前共 {scopes.length} 个用户私有 Scope</span>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {isLoading ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, index) => (
+                <div
+                  key={`knowledge-skeleton-${index}`}
+                  className="rounded-[28px] border border-border bg-card p-5"
+                >
+                  <div className="mb-4 h-5 w-1/2 animate-pulse rounded bg-surface-subtle" />
+                  <div className="mb-3 h-4 w-2/3 animate-pulse rounded bg-surface-subtle" />
+                  <div className="h-20 animate-pulse rounded-2xl bg-surface-subtle" />
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {!isLoading && filteredScopes.length === 0 ? (
+            <div className="flex h-full min-h-[320px] flex-col items-center justify-center rounded-[32px] border border-dashed border-border bg-card px-6 text-center">
+              <div className="mb-4 rounded-3xl bg-surface-tint p-4 text-brand">
+                <BookOpenText className="h-8 w-8" />
+              </div>
+              <div className="text-xl font-semibold text-foreground">知识库还没有内容</div>
+              <div className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+                上传品牌语气规范、产品参数、培训资料或研究笔记后，这里会按 Scope 展示切片数量，供模板和会话安全检索。
+              </div>
+            </div>
+          ) : null}
+
+          {!isLoading && filteredScopes.length > 0 ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {filteredScopes.map((scope) => {
+                const isWorking = mutatingScope === scope.scope;
+                return (
+                  <article
+                    key={scope.scope}
+                    className="rounded-[28px] border border-border bg-card p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                  >
+                    <div className="mb-4 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-lg font-semibold text-foreground">
+                          {scope.scope}
+                        </div>
+                        <div className="mt-1 text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                          私有知识 Scope
+                        </div>
+                      </div>
+
+                      <button
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-border text-muted-foreground transition hover:border-destructive/30 hover:bg-destructive/5 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={isMutating}
+                        onClick={() => void handleDelete(scope.scope)}
+                        type="button"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+
+                    <div className="rounded-[24px] bg-surface-tint p-4">
+                      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                        <FolderOpen className="h-4 w-4 text-brand" />
+                        <span>{scope.chunk_count} 个知识切片</span>
+                      </div>
+                      <div className="mt-2 text-sm text-muted-foreground">
+                        来源文件数：{scope.source_count}
+                      </div>
+                      <div className="mt-1 text-sm text-muted-foreground">
+                        最后更新：{formatUpdatedAt(scope.updated_at)}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{isWorking ? "正在处理…" : "可绑定到模板 knowledge_base_scope"}</span>
+                      <span className="rounded-full bg-primary/10 px-3 py-1 font-medium text-primary">
+                        tenant-safe
+                      </span>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}

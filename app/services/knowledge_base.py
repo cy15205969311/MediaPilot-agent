@@ -2,6 +2,9 @@ import json
 import logging
 import math
 import os
+import re
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 from threading import Lock
@@ -14,11 +17,58 @@ try:  # pragma: no cover - optional dependency
 except ImportError:  # pragma: no cover - optional dependency
     chromadb = None
 
+try:  # pragma: no cover - optional dependency
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:  # pragma: no cover - lightweight local fallback
+    class RecursiveCharacterTextSplitter:  # type: ignore[no-redef]
+        def __init__(
+            self,
+            *,
+            chunk_size: int = 500,
+            chunk_overlap: int = 50,
+            separators: list[str] | None = None,
+        ) -> None:
+            self.chunk_size = max(1, chunk_size)
+            self.chunk_overlap = max(0, min(chunk_overlap, self.chunk_size - 1))
+            self.separators = separators or ["\n\n", "\n", "。", "！", "？", ". ", " "]
+
+        def split_text(self, text: str) -> list[str]:
+            normalized = text.strip()
+            if not normalized:
+                return []
+            if len(normalized) <= self.chunk_size:
+                return [normalized]
+
+            chunks: list[str] = []
+            start = 0
+            total_length = len(normalized)
+            while start < total_length:
+                end = min(total_length, start + self.chunk_size)
+                window = normalized[start:end]
+                if end < total_length:
+                    split_at = -1
+                    for separator in self.separators:
+                        candidate = window.rfind(separator)
+                        if candidate > split_at:
+                            split_at = candidate + len(separator)
+                    if split_at > self.chunk_size // 3:
+                        end = start + split_at
+                        window = normalized[start:end]
+                chunks.append(window.strip())
+                if end >= total_length:
+                    break
+                start = max(start + 1, end - self.chunk_overlap)
+            return [chunk for chunk in chunks if chunk]
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_KNOWLEDGE_BASE_DIR = PROJECT_ROOT / ".omnimedia_knowledge_base"
 FALLBACK_STORE_FILENAME = "knowledge_store.json"
+GLOBAL_COLLECTION_NAME = "knowledge_documents"
+SYSTEM_KNOWLEDGE_USER_ID = "__system__"
 EMBEDDING_DIMENSIONS = 256
+DEFAULT_CHUNK_SIZE = 500
+DEFAULT_CHUNK_OVERLAP = 50
 
 MOCK_KNOWLEDGE_DOCUMENTS: dict[str, list[str]] = {
     "travel_local_guides": [
@@ -124,11 +174,59 @@ MOCK_KNOWLEDGE_DOCUMENTS: dict[str, list[str]] = {
 }
 
 
+@dataclass(frozen=True)
+class KnowledgeDocument:
+    document_id: str
+    user_id: str
+    scope: str
+    source: str
+    text: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class KnowledgeScopeSummary:
+    scope: str
+    chunk_count: int
+    source_count: int
+    updated_at: str | None
+
+
+def utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def normalize_knowledge_base_scope(value: str | None) -> str | None:
     if value is None:
         return None
-    normalized = value.strip().lower()
+    normalized = re.sub(r"[^a-z0-9_]+", "_", value.strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
     return normalized or None
+
+
+def normalize_knowledge_source(value: str | None) -> str:
+    normalized = (value or "uploaded_text").strip()
+    return normalized[:255] or "uploaded_text"
+
+
+def build_default_scope_from_filename(filename: str | None) -> str:
+    raw_name = Path(filename or "knowledge_scope").stem
+    normalized = normalize_knowledge_base_scope(raw_name)
+    return normalized or "knowledge_scope"
+
+
+def split_text_into_knowledge_chunks(
+    text: str,
+    *,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> list[str]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", "。", "！", "？", ". ", " "],
+    )
+    return [chunk.strip() for chunk in splitter.split_text(text) if chunk.strip()]
 
 
 def _tokenize(text: str) -> list[str]:
@@ -175,12 +273,36 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
 
 
 class _HashingEmbeddingFunction:
+    def __init__(self) -> None:
+        self._config = {"name": "omnimedia_hashing_embedding", "dimensions": EMBEDDING_DIMENSIONS}
+
     def __call__(self, input: Any) -> list[list[float]]:
         if isinstance(input, str):
             texts = [input]
         else:
             texts = [str(item) for item in input]
         return [_embed_text(text) for text in texts]
+
+    @staticmethod
+    def name() -> str:
+        return "omnimedia_hashing_embedding"
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> "_HashingEmbeddingFunction":
+        _ = config
+        return _HashingEmbeddingFunction()
+
+    def get_config(self) -> dict[str, Any]:
+        return dict(self._config)
+
+    def is_legacy(self) -> bool:
+        return False
+
+    def default_space(self) -> str:
+        return "cosine"
+
+    def supported_spaces(self) -> list[str]:
+        return ["cosine", "l2", "ip"]
 
 
 class KnowledgeBaseService:
@@ -213,73 +335,208 @@ class KnowledgeBaseService:
 
         self.seed_mock_knowledge()
 
-    def add_documents(self, scope: str, texts: list[str]) -> int:
+    def add_text_document(
+        self,
+        user_id: str,
+        scope: str,
+        text: str,
+        *,
+        source: str,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    ) -> int:
+        chunks = split_text_into_knowledge_chunks(
+            text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        return self.add_documents(user_id, scope, chunks, source=source)
+
+    def add_documents(
+        self,
+        user_id: str,
+        scope: str,
+        texts: list[str],
+        *,
+        source: str = "uploaded_text",
+    ) -> int:
+        normalized_user_id = (user_id or "").strip()
         normalized_scope = normalize_knowledge_base_scope(scope)
-        if normalized_scope is None:
+        normalized_source = normalize_knowledge_source(source)
+        if not normalized_user_id or normalized_scope is None:
             return 0
 
         cleaned_texts = [text.strip() for text in texts if text and text.strip()]
         if not cleaned_texts:
             return 0
 
-        deduped_pairs: list[tuple[str, str]] = []
-        seen_ids: set[str] = set()
+        deduped_documents: dict[str, KnowledgeDocument] = {}
+        created_at = utcnow_iso()
         for text in cleaned_texts:
-            document_id = self._build_document_id(normalized_scope, text)
-            if document_id in seen_ids:
-                continue
-            seen_ids.add(document_id)
-            deduped_pairs.append((document_id, text))
+            document_id = self._build_document_id(
+                normalized_user_id,
+                normalized_scope,
+                normalized_source,
+                text,
+            )
+            deduped_documents[document_id] = KnowledgeDocument(
+                document_id=document_id,
+                user_id=normalized_user_id,
+                scope=normalized_scope,
+                source=normalized_source,
+                text=text,
+                created_at=created_at,
+            )
 
-        if not deduped_pairs:
+        if not deduped_documents:
             return 0
 
-        self._upsert_local_store(
-            normalized_scope,
-            {document_id: text for document_id, text in deduped_pairs},
-        )
+        self._upsert_local_store(deduped_documents)
 
         if self._using_chroma:
             try:  # pragma: no cover - exercised only when chromadb is installed
-                collection = self._get_collection(normalized_scope)
+                collection = self._get_collection()
                 collection.upsert(
-                    ids=[document_id for document_id, _ in deduped_pairs],
-                    documents=[text for _, text in deduped_pairs],
+                    ids=list(deduped_documents.keys()),
+                    documents=[item.text for item in deduped_documents.values()],
                     metadatas=[
-                        {"scope": normalized_scope, "source": "local_seed_or_ingest"}
-                        for _ in deduped_pairs
+                        {
+                            "user_id": item.user_id,
+                            "scope": item.scope,
+                            "source": item.source,
+                            "created_at": item.created_at,
+                        }
+                        for item in deduped_documents.values()
                     ],
                 )
             except Exception as exc:  # pragma: no cover - defensive fallback
                 logger.warning(
-                    "Knowledge base Chroma upsert failed for scope=%s: %s",
+                    "Knowledge base Chroma upsert failed user_id=%s scope=%s source=%s: %s",
+                    normalized_user_id,
+                    normalized_scope,
+                    normalized_source,
+                    exc,
+                )
+
+        return len(deduped_documents)
+
+    def list_scopes(self, user_id: str) -> list[KnowledgeScopeSummary]:
+        normalized_user_id = (user_id or "").strip()
+        if not normalized_user_id:
+            return []
+
+        scope_buckets: dict[str, dict[str, Any]] = {}
+        for document in self._iter_documents():
+            if document.user_id != normalized_user_id:
+                continue
+            bucket = scope_buckets.setdefault(
+                document.scope,
+                {
+                    "chunk_count": 0,
+                    "sources": set(),
+                    "updated_at": document.created_at,
+                },
+            )
+            bucket["chunk_count"] += 1
+            bucket["sources"].add(document.source)
+            if document.created_at > bucket["updated_at"]:
+                bucket["updated_at"] = document.created_at
+
+        summaries = [
+            KnowledgeScopeSummary(
+                scope=scope,
+                chunk_count=int(bucket["chunk_count"]),
+                source_count=len(bucket["sources"]),
+                updated_at=str(bucket["updated_at"]) if bucket["updated_at"] else None,
+            )
+            for scope, bucket in scope_buckets.items()
+        ]
+        return sorted(
+            summaries,
+            key=lambda item: item.updated_at or "",
+            reverse=True,
+        )
+
+    def delete_scope(self, user_id: str, scope: str) -> int:
+        normalized_user_id = (user_id or "").strip()
+        normalized_scope = normalize_knowledge_base_scope(scope)
+        if not normalized_user_id or normalized_scope is None:
+            return 0
+
+        deleted_ids = self._delete_from_local_store(
+            user_id=normalized_user_id,
+            scope=normalized_scope,
+        )
+
+        if deleted_ids and self._using_chroma:
+            try:  # pragma: no cover - exercised only when chromadb is installed
+                collection = self._get_collection()
+                collection.delete(
+                    where={
+                        "$and": [
+                            {"user_id": normalized_user_id},
+                            {"scope": normalized_scope},
+                        ]
+                    },
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning(
+                    "Knowledge base Chroma delete failed user_id=%s scope=%s: %s",
+                    normalized_user_id,
                     normalized_scope,
                     exc,
                 )
 
-        return len(deduped_pairs)
+        return len(deleted_ids)
 
-    def retrieve_context(
+    def retrieve_chunks(
         self,
+        user_id: str,
         scope: str,
         query: str,
         top_k: int = 3,
-    ) -> str:
+    ) -> list[KnowledgeDocument]:
+        normalized_user_id = (user_id or "").strip()
         normalized_scope = normalize_knowledge_base_scope(scope)
         if normalized_scope is None:
-            return ""
+            return []
 
         self._ensure_scope_seeded(normalized_scope)
 
         documents = self._query_documents(
+            normalized_user_id,
             normalized_scope,
             query=query,
             top_k=max(1, top_k),
         )
+        if documents:
+            return documents
+
+        if not normalized_user_id:
+            return []
+
+        return self._query_documents(
+            SYSTEM_KNOWLEDGE_USER_ID,
+            normalized_scope,
+            query=query,
+            top_k=max(1, top_k),
+        )
+
+    def retrieve_context(
+        self,
+        user_id: str,
+        scope: str,
+        query: str,
+        top_k: int = 3,
+    ) -> str:
+        documents = self.retrieve_chunks(user_id, scope, query, top_k=top_k)
         if not documents:
             return ""
 
-        sections = [f"[{index}] {document}" for index, document in enumerate(documents, start=1)]
+        sections = [
+            f"[{index}] ({document.source}) {document.text}"
+            for index, document in enumerate(documents, start=1)
+        ]
         return "\n\n".join(sections)
 
     def seed_mock_knowledge(self) -> None:
@@ -295,16 +552,31 @@ class KnowledgeBaseService:
         if not scoped_texts:
             return
 
-        if self._count_documents(normalized_scope) > 0:
+        if self._count_documents(SYSTEM_KNOWLEDGE_USER_ID, normalized_scope) > 0:
             return
 
-        self.add_documents(normalized_scope, scoped_texts)
+        self.add_documents(
+            SYSTEM_KNOWLEDGE_USER_ID,
+            normalized_scope,
+            scoped_texts,
+            source="preset_seed",
+        )
 
-    def _count_documents(self, scope: str) -> int:
-        store = self._load_local_store()
-        return len(store.get(scope, {}))
+    def _count_documents(self, user_id: str, scope: str) -> int:
+        normalized_user_id = (user_id or "").strip()
+        normalized_scope = normalize_knowledge_base_scope(scope)
+        if not normalized_user_id or normalized_scope is None:
+            return 0
+        return sum(
+            1
+            for document in self._iter_documents()
+            if document.user_id == normalized_user_id and document.scope == normalized_scope
+        )
 
-    def _load_local_store(self) -> dict[str, dict[str, str]]:
+    def _iter_documents(self) -> list[KnowledgeDocument]:
+        return list(self._load_local_store().values())
+
+    def _load_local_store(self) -> dict[str, KnowledgeDocument]:
         with self._lock:
             if not self._fallback_store_path.exists():
                 return {}
@@ -313,59 +585,132 @@ class KnowledgeBaseService:
             except json.JSONDecodeError:
                 logger.warning("Knowledge base local store is corrupt. Rebuilding from scratch.")
                 return {}
+        return self._deserialize_local_store(payload)
+
+    def _deserialize_local_store(self, payload: object) -> dict[str, KnowledgeDocument]:
         if not isinstance(payload, dict):
             return {}
-        normalized_payload: dict[str, dict[str, str]] = {}
+
+        documents_payload = payload.get("documents")
+        if isinstance(documents_payload, dict):
+            normalized_documents: dict[str, KnowledgeDocument] = {}
+            for document_id, raw_document in documents_payload.items():
+                if not isinstance(document_id, str) or not isinstance(raw_document, dict):
+                    continue
+                user_id = str(raw_document.get("user_id", "")).strip()
+                scope = normalize_knowledge_base_scope(str(raw_document.get("scope", "")))
+                text = str(raw_document.get("text", "")).strip()
+                if not user_id or not scope or not text:
+                    continue
+                source = normalize_knowledge_source(str(raw_document.get("source", "uploaded_text")))
+                created_at = str(raw_document.get("created_at", "")).strip() or utcnow_iso()
+                normalized_documents[document_id] = KnowledgeDocument(
+                    document_id=document_id,
+                    user_id=user_id,
+                    scope=scope,
+                    source=source,
+                    text=text,
+                    created_at=created_at,
+                )
+            return normalized_documents
+
+        legacy_documents: dict[str, KnowledgeDocument] = {}
         for scope, items in payload.items():
-            if not isinstance(scope, str) or not isinstance(items, dict):
+            normalized_scope = normalize_knowledge_base_scope(scope if isinstance(scope, str) else None)
+            if normalized_scope is None or not isinstance(items, dict):
                 continue
-            normalized_payload[scope] = {
-                str(document_id): str(text)
-                for document_id, text in items.items()
-                if isinstance(text, str)
-            }
-        return normalized_payload
+            for document_id, text in items.items():
+                if not isinstance(document_id, str) or not isinstance(text, str):
+                    continue
+                legacy_documents[document_id] = KnowledgeDocument(
+                    document_id=document_id,
+                    user_id=SYSTEM_KNOWLEDGE_USER_ID,
+                    scope=normalized_scope,
+                    source="legacy_seed",
+                    text=text,
+                    created_at=utcnow_iso(),
+                )
+        return legacy_documents
 
-    def _upsert_local_store(self, scope: str, documents: dict[str, str]) -> None:
+    def _write_local_store(self, documents: dict[str, KnowledgeDocument]) -> None:
+        payload = {
+            "version": 2,
+            "documents": {
+                document_id: asdict(document)
+                for document_id, document in documents.items()
+            },
+        }
+        self._fallback_store_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _upsert_local_store(self, documents: dict[str, KnowledgeDocument]) -> None:
         with self._lock:
-            store = {}
-            if self._fallback_store_path.exists():
-                try:
-                    store = json.loads(self._fallback_store_path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    logger.warning("Knowledge base local store was corrupt and will be replaced.")
-                    store = {}
-
-            scoped_store = store.get(scope)
-            if not isinstance(scoped_store, dict):
-                scoped_store = {}
-            for document_id, text in documents.items():
-                scoped_store[document_id] = text
-            store[scope] = scoped_store
-            self._fallback_store_path.write_text(
-                json.dumps(store, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            existing_documents = self._deserialize_local_store(
+                json.loads(self._fallback_store_path.read_text(encoding="utf-8"))
+                if self._fallback_store_path.exists()
+                else {}
             )
+            existing_documents.update(documents)
+            self._write_local_store(existing_documents)
 
-    def _query_documents(self, scope: str, *, query: str, top_k: int) -> list[str]:
+    def _delete_from_local_store(self, *, user_id: str, scope: str) -> list[str]:
+        with self._lock:
+            existing_documents = self._deserialize_local_store(
+                json.loads(self._fallback_store_path.read_text(encoding="utf-8"))
+                if self._fallback_store_path.exists()
+                else {}
+            )
+            deleted_ids = [
+                document_id
+                for document_id, document in existing_documents.items()
+                if document.user_id == user_id and document.scope == scope
+            ]
+            if not deleted_ids:
+                return []
+            for document_id in deleted_ids:
+                existing_documents.pop(document_id, None)
+            self._write_local_store(existing_documents)
+            return deleted_ids
+
+    def _query_documents(
+        self,
+        user_id: str,
+        scope: str,
+        *,
+        query: str,
+        top_k: int,
+    ) -> list[KnowledgeDocument]:
+        normalized_user_id = (user_id or "").strip()
+        if not normalized_user_id:
+            return []
+
         if self._using_chroma:
-            documents = self._query_documents_from_chroma(scope, query=query, top_k=top_k)
+            documents = self._query_documents_from_chroma(
+                normalized_user_id,
+                scope,
+                query=query,
+                top_k=top_k,
+            )
             if documents:
                 return documents
 
-        store = self._load_local_store()
-        scoped_documents = list(store.get(scope, {}).values())
+        scoped_documents = [
+            document
+            for document in self._iter_documents()
+            if document.user_id == normalized_user_id and document.scope == scope
+        ]
         if not scoped_documents:
             return []
 
         query_vector = _embed_text(query)
-        scored_documents: list[tuple[float, str]] = []
         query_tokens = set(_tokenize(query))
-
+        scored_documents: list[tuple[float, KnowledgeDocument]] = []
         for document in scoped_documents:
-            document_vector = _embed_text(document)
+            document_vector = _embed_text(document.text)
             score = _cosine_similarity(query_vector, document_vector)
-            if query_tokens and any(token in document.lower() for token in query_tokens):
+            if query_tokens and any(token in document.text.lower() for token in query_tokens):
                 score += 0.15
             scored_documents.append((score, document))
 
@@ -374,45 +719,87 @@ class KnowledgeBaseService:
 
     def _query_documents_from_chroma(
         self,
+        user_id: str,
         scope: str,
         *,
         query: str,
         top_k: int,
-    ) -> list[str]:
+    ) -> list[KnowledgeDocument]:
         try:  # pragma: no cover - exercised only when chromadb is installed
-            collection = self._get_collection(scope)
+            collection = self._get_collection()
             results = collection.query(
                 query_texts=[query],
                 n_results=top_k,
-                include=["documents"],
+                where={
+                    "$and": [
+                        {"user_id": user_id},
+                        {"scope": scope},
+                    ]
+                },
+                include=["documents", "metadatas"],
             )
         except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Knowledge base Chroma query failed for scope=%s: %s", scope, exc)
+            logger.warning(
+                "Knowledge base Chroma query failed user_id=%s scope=%s: %s",
+                user_id,
+                scope,
+                exc,
+            )
             return []
 
-        documents = results.get("documents") or []
-        if not documents:
-            return []
-        first_group = documents[0] if isinstance(documents[0], list) else documents
-        return [str(item).strip() for item in first_group if str(item).strip()]
+        raw_ids = results.get("ids") or []
+        raw_documents = results.get("documents") or []
+        raw_metadatas = results.get("metadatas") or []
+        ids = raw_ids[0] if raw_ids and isinstance(raw_ids[0], list) else raw_ids
+        documents = (
+            raw_documents[0]
+            if raw_documents and isinstance(raw_documents[0], list)
+            else raw_documents
+        )
+        metadatas = (
+            raw_metadatas[0]
+            if raw_metadatas and isinstance(raw_metadatas[0], list)
+            else raw_metadatas
+        )
 
-    def _get_collection(self, scope: str):
+        hydrated_documents: list[KnowledgeDocument] = []
+        for index, raw_document in enumerate(documents):
+            metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
+            document_id = str(ids[index]) if index < len(ids) else self._build_document_id(
+                user_id,
+                scope,
+                normalize_knowledge_source(metadata.get("source") if isinstance(metadata, dict) else None),
+                str(raw_document),
+            )
+            text = str(raw_document).strip()
+            if not text:
+                continue
+            hydrated_documents.append(
+                KnowledgeDocument(
+                    document_id=document_id,
+                    user_id=str(metadata.get("user_id", user_id)),
+                    scope=normalize_knowledge_base_scope(str(metadata.get("scope", scope))) or scope,
+                    source=normalize_knowledge_source(
+                        str(metadata.get("source", "uploaded_text")),
+                    ),
+                    text=text,
+                    created_at=str(metadata.get("created_at", "")).strip() or utcnow_iso(),
+                )
+            )
+        return hydrated_documents
+
+    def _get_collection(self):
         if self._client is None:  # pragma: no cover - defensive guard
             raise RuntimeError("Chroma client is not available.")
         return self._client.get_or_create_collection(
-            name=self._scope_to_collection_name(scope),
+            name=GLOBAL_COLLECTION_NAME,
             embedding_function=self._embedding_function,
-            metadata={"scope": scope},
+            metadata={"kind": "multi_tenant_knowledge"},
         )
 
     @staticmethod
-    def _scope_to_collection_name(scope: str) -> str:
-        normalized_scope = normalize_knowledge_base_scope(scope) or "default_scope"
-        return normalized_scope.replace("/", "_").replace("-", "_")
-
-    @staticmethod
-    def _build_document_id(scope: str, text: str) -> str:
-        digest = sha1(f"{scope}:{text}".encode("utf-8")).hexdigest()
+    def _build_document_id(user_id: str, scope: str, source: str, text: str) -> str:
+        digest = sha1(f"{user_id}:{scope}:{source}:{text}".encode("utf-8")).hexdigest()
         return f"{scope}-{digest[:20]}"
 
 

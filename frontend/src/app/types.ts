@@ -9,6 +9,7 @@ export type UiTaskType =
 export type WorkspaceView =
   | "chat"
   | "drafts"
+  | "knowledge"
   | "topics"
   | "templates"
   | "dashboard";
@@ -131,6 +132,69 @@ export type DraftsDeleteApiResponse = {
   deleted_count: number;
   deleted_message_ids: string[];
   cleared_all: boolean;
+};
+
+export type TopicPlatform = "小红书" | "抖音" | "双平台";
+
+export type TopicStatus = "idea" | "drafting" | "published";
+
+export type TopicItem = {
+  id: string;
+  title: string;
+  inspiration: string;
+  platform: TopicPlatform;
+  status: TopicStatus;
+  thread_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TopicsApiResponse = {
+  items: TopicItem[];
+  total: number;
+};
+
+export type TopicCreatePayload = {
+  title: string;
+  inspiration?: string;
+  platform: TopicPlatform;
+};
+
+export type TopicUpdatePayload = {
+  title?: string;
+  inspiration?: string;
+  platform?: TopicPlatform;
+  status?: TopicStatus;
+  thread_id?: string | null;
+};
+
+export type TopicDeleteApiResponse = {
+  id: string;
+  deleted: boolean;
+};
+
+export type KnowledgeScopeItem = {
+  scope: string;
+  chunk_count: number;
+  source_count: number;
+  updated_at?: string | null;
+};
+
+export type KnowledgeScopesApiResponse = {
+  items: KnowledgeScopeItem[];
+  total: number;
+};
+
+export type KnowledgeUploadApiResponse = {
+  scope: string;
+  source: string;
+  chunk_count: number;
+};
+
+export type KnowledgeScopeDeleteApiResponse = {
+  scope: string;
+  deleted_count: number;
+  deleted: boolean;
 };
 
 export type TemplatePlatform = "小红书" | "抖音" | "双平台" | "闲鱼" | "技术博客";

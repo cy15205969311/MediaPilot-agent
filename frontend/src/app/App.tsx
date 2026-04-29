@@ -21,13 +21,18 @@ import {
   clearStoredUser,
   completePasswordReset,
   createChatStream,
+  deleteKnowledgeScope,
+  createTopic,
   createTemplate,
+  deleteTopic,
   deleteArtifact,
   deleteArtifacts,
   deleteTemplate,
   deleteTemplates,
   deleteThread,
   fetchArtifacts,
+  fetchKnowledgeScopes,
+  fetchTopics,
   fetchTemplateSkills,
   fetchTemplates,
   fetchSessions,
@@ -44,7 +49,9 @@ import {
   revokeSession,
   resetPassword,
   setStoredUser,
+  updateTopic,
   updateThread,
+  uploadKnowledgeDocument,
   updateUserProfile,
   uploadMedia,
 } from "./api";
@@ -56,6 +63,8 @@ import { RightPanel } from "./components/RightPanel";
 import { ThreadSettingsModal } from "./components/ThreadSettingsModal";
 import { UserProfileModal } from "./components/UserProfileModal";
 import { DraftsView } from "./components/views/DraftsView";
+import { KnowledgeView } from "./components/views/KnowledgeView";
+import { TopicsView } from "./components/views/TopicsView";
 import { TemplatesView } from "./components/views/TemplatesView";
 import { quickActions, taskOptions } from "./data";
 import type {
@@ -68,9 +77,15 @@ import type {
   ConversationMessage,
   DraftSummaryItem,
   HistoryMessageItem,
+  KnowledgeScopeItem,
   MediaChatMaterialPayload,
   MediaChatRequestPayload,
   ResetPasswordResponse,
+  TopicCreatePayload,
+  TopicItem,
+  TopicPlatform,
+  TopicStatus,
+  TopicUpdatePayload,
   TemplateCategory,
   TemplateCreatePayload,
   TemplatePlatform,
@@ -466,6 +481,16 @@ function mapWorkspacePlatformToTemplate(platform: UiPlatform): TemplatePlatform 
   return "小红书";
 }
 
+function mapTopicPlatformToWorkspace(platform: TopicPlatform): UiPlatform {
+  if (platform === "双平台") {
+    return "both";
+  }
+  if (platform === "抖音") {
+    return "douyin";
+  }
+  return "xiaohongshu";
+}
+
 function mapCategoryToKnowledgeBaseScope(category: TemplateCategory): string {
   if (category === "美食文旅") {
     return "travel_local_guides";
@@ -594,6 +619,35 @@ function buildTemplatePrefillFromArtifact(params: {
     category,
     knowledge_base_scope: mapCategoryToKnowledgeBaseScope(category),
     system_prompt: promptBody,
+  };
+}
+
+function buildTopicDraftPrompt(topic: TopicItem): string {
+  const inspiration = topic.inspiration.trim();
+  const platformHint =
+    topic.platform === "双平台" ? "双平台联动内容" : `${topic.platform} 内容`;
+
+  return [
+    `你是一位顶级内容运营与爆款文案策划顾问。`,
+    `请围绕选题「${topic.title}」生成一篇可直接进入撰写流程的 ${platformHint} 草稿。`,
+    inspiration
+      ? `请重点吸收以下灵感备注与素材线索：${inspiration}`
+      : "当前没有额外备注，请你主动补全目标受众、切入角度、结构节奏与转化动作。",
+    "输出时要兼顾标题钩子、正文结构、情绪价值、真实细节、平台表达习惯与结尾 CTA，避免空泛套话。",
+  ].join("\n");
+}
+
+function toTopicThreadItem(topic: TopicItem): ThreadItem {
+  return {
+    id: topic.thread_id || "thread-new",
+    title: topic.title || "Untitled thread",
+    time: formatRelativeTime(topic.updated_at) || "刚刚",
+    platform:
+      topic.platform === "双平台"
+        ? undefined
+        : topic.platform === "抖音"
+          ? "douyin"
+          : "xiaohongshu",
   };
 }
 
@@ -741,6 +795,8 @@ function App() {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [drafts, setDrafts] = useState<DraftSummaryItem[]>([]);
+  const [knowledgeScopes, setKnowledgeScopes] = useState<KnowledgeScopeItem[]>([]);
+  const [topics, setTopics] = useState<TopicItem[]>([]);
   const [templates, setTemplates] = useState<TemplateSummaryItem[]>([]);
   const [templateSkills, setTemplateSkills] = useState<TemplateSkillDiscoveryItem[]>([]);
   const [uploadedMaterials, setUploadedMaterials] = useState<UploadedMaterial[]>([]);
@@ -750,21 +806,30 @@ function App() {
   const [activeThreadId, setActiveThreadId] = useState("thread-new");
   const [activeSystemPrompt, setActiveSystemPrompt] = useState("");
   const [activeKnowledgeBaseScope, setActiveKnowledgeBaseScope] = useState("");
+  const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
   const [isLoadingThreadHistory, setIsLoadingThreadHistory] = useState(false);
   const [isLoadingDrafts, setIsLoadingDrafts] = useState(false);
+  const [isLoadingKnowledgeScopes, setIsLoadingKnowledgeScopes] = useState(false);
+  const [isLoadingTopics, setIsLoadingTopics] = useState(false);
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
   const [isLoadingTemplateSkills, setIsLoadingTemplateSkills] = useState(false);
   const [isMutatingDrafts, setIsMutatingDrafts] = useState(false);
+  const [isMutatingKnowledgeScopes, setIsMutatingKnowledgeScopes] = useState(false);
+  const [isMutatingTopics, setIsMutatingTopics] = useState(false);
   const [isMutatingTemplates, setIsMutatingTemplates] = useState(false);
   const [mutatingDraftMessageId, setMutatingDraftMessageId] = useState<string | null>(null);
+  const [mutatingKnowledgeScope, setMutatingKnowledgeScope] = useState<string | null>(null);
+  const [mutatingTopicId, setMutatingTopicId] = useState<string | null>(null);
   const [mutatingTemplateId, setMutatingTemplateId] = useState<string | null>(null);
   const [mutatingThreadId, setMutatingThreadId] = useState<string | null>(null);
   const [isNewThreadModalOpen, setIsNewThreadModalOpen] = useState(false);
   const [draftThreadTitle, setDraftThreadTitle] = useState("");
   const [draftSystemPrompt, setDraftSystemPrompt] = useState("");
   const [draftKnowledgeBaseScope, setDraftKnowledgeBaseScope] = useState("");
+  const [draftTargetThreadId, setDraftTargetThreadId] = useState<string | null>(null);
+  const [draftSourceTopicId, setDraftSourceTopicId] = useState<string | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateSummaryItem | null>(null);
   const [templateCreationRequest, setTemplateCreationRequest] =
     useState<TemplateCreationRequest | null>(null);
@@ -862,9 +927,13 @@ function App() {
       title: "我的草稿",
       description: "浏览各个会话里沉淀下来的结构化内容产物，并继续回到原始对话深挖。",
     },
+    knowledge: {
+      title: "知识库",
+      description: "按 Scope 管理私有品牌资料、参数手册与内部知识切片，为模板和会话提供可检索的外挂上下文。",
+    },
     topics: {
       title: "选题池",
-      description: "热点沉淀、选题归档和长期策划入口将在这里接入。",
+      description: "用轻量级看板管理灵感、撰写进度与已发布选题，并一键带回聊天区开写。",
     },
     templates: {
       title: "模板库",
@@ -917,15 +986,18 @@ function App() {
     nextTitle = "New thread",
     nextSystemPrompt = "",
     nextKnowledgeBaseScope = "",
+    nextThreadId = "thread-new",
+    nextTopicId: string | null = null,
   ) => {
     setMessages([]);
     setArtifact(null);
     replaceUploadedMaterials([]);
     setMessage("");
-    setActiveThreadId("thread-new");
+    setActiveThreadId(nextThreadId);
     setActiveThreadTitle(nextTitle);
     setActiveSystemPrompt(nextSystemPrompt);
     setActiveKnowledgeBaseScope(nextKnowledgeBaseScope);
+    setActiveTopicId(nextTopicId);
   };
 
   const handleUnauthorized = (
@@ -939,14 +1011,22 @@ function App() {
     setActiveView("chat");
     setAuthSessions([]);
     setDrafts([]);
+    setKnowledgeScopes([]);
+    setTopics([]);
     setTemplates([]);
     setTemplateSkills([]);
     setIsLoadingDrafts(false);
+    setIsLoadingKnowledgeScopes(false);
+    setIsLoadingTopics(false);
     setIsLoadingTemplates(false);
     setIsLoadingTemplateSkills(false);
     setIsMutatingDrafts(false);
+    setIsMutatingKnowledgeScopes(false);
+    setIsMutatingTopics(false);
     setIsMutatingTemplates(false);
     setMutatingDraftMessageId(null);
+    setMutatingKnowledgeScope(null);
+    setMutatingTopicId(null);
     setMutatingTemplateId(null);
     setThreads([]);
     setMessages([]);
@@ -961,6 +1041,9 @@ function App() {
     setAuthResetToken("");
     setSelectedTemplate(null);
     setTemplateCreationRequest(null);
+    setDraftTargetThreadId(null);
+    setDraftSourceTopicId(null);
+    setActiveTopicId(null);
     setIsProfileModalOpen(false);
     setIsThreadSettingsOpen(false);
     setRevokingSessionId(null);
@@ -1013,7 +1096,11 @@ function App() {
     );
   };
 
-  const loadThreadHistory = async (thread: ThreadItem) => {
+  const loadThreadHistory = async (
+    thread: ThreadItem,
+    topicId: string | null = null,
+    options?: { silentNotFound?: boolean },
+  ): Promise<"loaded" | "not_found" | "failed"> => {
     abortRef.current?.abort();
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
@@ -1022,6 +1109,7 @@ function App() {
     setActiveView("chat");
     setActiveThreadId(thread.id);
     setActiveThreadTitle(thread.title);
+    setActiveTopicId(topicId);
     setStatusText("正在加载历史会话");
     setIsLoadingThreadHistory(true);
     setRightPanelOpen(true);
@@ -1038,10 +1126,19 @@ function App() {
       setActiveSystemPrompt(payload.system_prompt || "");
       setActiveKnowledgeBaseScope(payload.knowledge_base_scope || "");
       setStatusText("历史会话已载入");
+      return "loaded";
     } catch (error) {
       if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
-        return;
+        return "failed";
+      }
+
+      if (
+        options?.silentNotFound &&
+        error instanceof APIError &&
+        error.status === 404
+      ) {
+        return "not_found";
       }
 
       const errorMessage =
@@ -1058,12 +1155,17 @@ function App() {
         title: "历史加载失败",
         content: errorMessage,
       });
+      return "failed";
     } finally {
       setIsLoadingThreadHistory(false);
     }
   };
 
-  const loadThreads = async (preferredThreadId?: string, shouldLoadHistory = false) => {
+  const loadThreads = async (
+    preferredThreadId?: string,
+    shouldLoadHistory = false,
+    preferredTopicId: string | null = null,
+  ) => {
     setIsLoadingThreads(true);
 
     try {
@@ -1089,7 +1191,7 @@ function App() {
         nextThreads[0];
 
       if (targetThread) {
-        await loadThreadHistory(targetThread);
+        await loadThreadHistory(targetThread, preferredTopicId);
       }
     } catch (error) {
       if (isUnauthorizedError(error)) {
@@ -1145,6 +1247,72 @@ function App() {
       });
     } finally {
       setIsLoadingDrafts(false);
+    }
+  };
+
+  const loadKnowledgeScopes = async () => {
+    setIsLoadingKnowledgeScopes(true);
+
+    try {
+      const payload = await fetchKnowledgeScopes();
+      setKnowledgeScopes(payload.items);
+      setStatusText(
+        payload.total > 0 ? `已载入 ${payload.total} 个知识库 Scope` : "知识库还是空的",
+      );
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载知识库失败，请稍后重试。";
+
+      setStatusText("知识库加载失败");
+      appendSystemMessage({
+        id: createId("knowledge-list-error"),
+        role: "error",
+        title: "知识库加载失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsLoadingKnowledgeScopes(false);
+    }
+  };
+
+  const loadTopics = async (status?: TopicStatus) => {
+    setIsLoadingTopics(true);
+
+    try {
+      const payload = await fetchTopics(status);
+      setTopics(payload.items);
+      setStatusText(payload.total > 0 ? `已载入 ${payload.total} 个选题` : "选题池还是空的");
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载选题池失败，请稍后重试。";
+
+      setStatusText("选题池加载失败");
+      appendSystemMessage({
+        id: createId("topic-list-error"),
+        role: "error",
+        title: "选题池加载失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsLoadingTopics(false);
     }
   };
 
@@ -1229,6 +1397,238 @@ function App() {
       });
     } finally {
       setIsLoadingTemplateSkills(false);
+    }
+  };
+
+  const handleUploadKnowledgeFiles = async (
+    scope: string,
+    files: File[],
+  ): Promise<void> => {
+    if (files.length === 0) {
+      return;
+    }
+
+    const normalizedScope = scope.trim();
+    setIsMutatingKnowledgeScopes(true);
+    setMutatingKnowledgeScope(normalizedScope || "knowledge-upload");
+
+    try {
+      let totalChunks = 0;
+      let lastScope = normalizedScope;
+      for (const file of files) {
+        const response = await uploadKnowledgeDocument(file, normalizedScope || undefined);
+        totalChunks += response.chunk_count;
+        lastScope = response.scope;
+      }
+      await loadKnowledgeScopes();
+      setStatusText(
+        `知识库已更新：${lastScope || "自动 Scope"} 累计写入 ${totalChunks} 个知识切片`,
+      );
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "上传知识文件失败，请稍后重试。";
+
+      setStatusText("知识文件上传失败");
+      appendSystemMessage({
+        id: createId("knowledge-upload-error"),
+        role: "error",
+        title: "知识文件上传失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsMutatingKnowledgeScopes(false);
+      setMutatingKnowledgeScope(null);
+    }
+  };
+
+  const handleDeleteKnowledgeScope = async (scope: string): Promise<boolean> => {
+    setIsMutatingKnowledgeScopes(true);
+    setMutatingKnowledgeScope(scope);
+
+    try {
+      const response = await deleteKnowledgeScope(scope);
+      setKnowledgeScopes((current) => current.filter((item) => item.scope !== response.scope));
+      setStatusText(
+        response.deleted
+          ? `已清空知识库 Scope：${response.scope}`
+          : `Scope ${response.scope} 当前没有可删除的知识切片`,
+      );
+      return response.deleted;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return false;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "删除知识库 Scope 失败，请稍后重试。";
+
+      setStatusText("删除知识库 Scope 失败");
+      appendSystemMessage({
+        id: createId("knowledge-delete-error"),
+        role: "error",
+        title: "删除知识库 Scope 失败",
+        content: errorMessage,
+      });
+      return false;
+    } finally {
+      setIsMutatingKnowledgeScopes(false);
+      setMutatingKnowledgeScope(null);
+    }
+  };
+
+  const upsertTopicInState = (nextTopic: TopicItem) => {
+    setTopics((current) => {
+      const existingIndex = current.findIndex((topic) => topic.id === nextTopic.id);
+      if (existingIndex === -1) {
+        return [nextTopic, ...current].sort((left, right) =>
+          right.updated_at.localeCompare(left.updated_at),
+        );
+      }
+
+      const cloned = [...current];
+      cloned[existingIndex] = nextTopic;
+      return cloned.sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+    });
+  };
+
+  const removeTopicFromState = (topicId: string) => {
+    setTopics((current) => current.filter((topic) => topic.id !== topicId));
+  };
+
+  const handleCreateTopic = async (
+    payload: TopicCreatePayload,
+  ): Promise<TopicItem | null> => {
+    setIsMutatingTopics(true);
+    setMutatingTopicId("topic-create");
+
+    try {
+      const createdTopic = await createTopic(payload);
+      upsertTopicInState(createdTopic);
+      setStatusText(`已记录新灵感：${createdTopic.title}`);
+      return createdTopic;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return null;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "创建选题失败，请稍后重试。";
+
+      setStatusText("选题创建失败");
+      appendSystemMessage({
+        id: createId("topic-create-error"),
+        role: "error",
+        title: "选题创建失败",
+        content: errorMessage,
+      });
+      return null;
+    } finally {
+      setIsMutatingTopics(false);
+      setMutatingTopicId(null);
+    }
+  };
+
+  const handleUpdateTopic = async (
+    topic: TopicItem,
+    payload: TopicUpdatePayload,
+  ): Promise<TopicItem | null> => {
+    setIsMutatingTopics(true);
+    setMutatingTopicId(topic.id);
+
+    try {
+      const updatedTopic = await updateTopic(topic.id, payload);
+      upsertTopicInState(updatedTopic);
+      setStatusText(`选题已更新：${updatedTopic.title}`);
+      return updatedTopic;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return null;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "更新选题失败，请稍后重试。";
+
+      setStatusText("选题更新失败");
+      appendSystemMessage({
+        id: createId("topic-update-error"),
+        role: "error",
+        title: "选题更新失败",
+        content: errorMessage,
+      });
+      return null;
+    } finally {
+      setIsMutatingTopics(false);
+      setMutatingTopicId(null);
+    }
+  };
+
+  const handleDeleteTopic = async (topic: TopicItem): Promise<boolean> => {
+    setIsMutatingTopics(true);
+    setMutatingTopicId(topic.id);
+
+    try {
+      const response = await deleteTopic(topic.id);
+      if (response.deleted) {
+        removeTopicFromState(topic.id);
+        setStatusText(`已删除选题：${topic.title}`);
+      }
+      return response.deleted;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return false;
+      }
+
+      if (
+        options?.silentNotFound &&
+        error instanceof APIError &&
+        error.status === 404
+      ) {
+        return false;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "删除选题失败，请稍后重试。";
+
+      setStatusText("选题删除失败");
+      appendSystemMessage({
+        id: createId("topic-delete-error"),
+        role: "error",
+        title: "选题删除失败",
+        content: errorMessage,
+      });
+      return false;
+    } finally {
+      setIsMutatingTopics(false);
+      setMutatingTopicId(null);
     }
   };
 
@@ -1381,6 +1781,16 @@ function App() {
     setRightPanelOpen(false);
     if (view === "drafts") {
       setStatusText("正在打开草稿箱");
+      return;
+    }
+
+    if (view === "knowledge") {
+      setStatusText("正在打开知识库");
+      return;
+    }
+
+    if (view === "topics") {
+      setStatusText("正在打开选题池");
       return;
     }
 
@@ -1547,6 +1957,22 @@ function App() {
     }
 
     void loadDrafts();
+  }, [activeView, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || activeView !== "knowledge") {
+      return;
+    }
+
+    void loadKnowledgeScopes();
+  }, [activeView, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || activeView !== "topics") {
+      return;
+    }
+
+    void loadTopics();
   }, [activeView, isAuthenticated]);
 
   useEffect(() => {
@@ -1730,6 +2156,8 @@ function App() {
     setDraftThreadTitle("");
     setDraftSystemPrompt("");
     setDraftKnowledgeBaseScope("");
+    setDraftTargetThreadId(null);
+    setDraftSourceTopicId(null);
     setIsNewThreadModalOpen(true);
   };
 
@@ -1738,13 +2166,45 @@ function App() {
     setDraftThreadTitle(template.title);
     setDraftSystemPrompt(template.system_prompt);
     setDraftKnowledgeBaseScope(template.knowledge_base_scope ?? "");
+    setDraftTargetThreadId(null);
+    setDraftSourceTopicId(null);
     setIsNewThreadModalOpen(true);
+  };
+
+  const openTopicNewThreadModal = (topic: TopicItem, threadId: string) => {
+    setSelectedTemplate(null);
+    setTemplateCreationRequest(null);
+    setDraftThreadTitle(topic.title);
+    setDraftSystemPrompt(buildTopicDraftPrompt(topic));
+    setDraftKnowledgeBaseScope("");
+    setDraftTargetThreadId(threadId);
+    setDraftSourceTopicId(topic.id);
+    setIsNewThreadModalOpen(true);
+  };
+
+  const activateTopicDraftWorkspace = (topic: TopicItem, threadId: string) => {
+    setActiveView("chat");
+    setLeftSidebarOpen(false);
+    setRightPanelOpen(true);
+    setTaskType("content_generation");
+    setPlatform(mapTopicPlatformToWorkspace(topic.platform));
+    resetWorkspace(topic.title, buildTopicDraftPrompt(topic), "", threadId, topic.id);
+    upsertThreadInList({
+      id: threadId,
+      title: topic.title,
+      time: "撰写中",
+      ...(topic.platform === "双平台"
+        ? {}
+        : { platform: mapTopicPlatformToWorkspace(topic.platform) as "xiaohongshu" | "douyin" }),
+    });
   };
 
   const closeNewThreadModal = () => {
     setIsNewThreadModalOpen(false);
     setSelectedTemplate(null);
     setDraftKnowledgeBaseScope("");
+    setDraftTargetThreadId(null);
+    setDraftSourceTopicId(null);
   };
 
   const handleUseTemplate = (template: TemplateSummaryItem) => {
@@ -1760,6 +2220,50 @@ function App() {
     }
 
     openTemplateNewThreadModal(template);
+  };
+
+  const handleDraftTopic = async (topic: TopicItem): Promise<void> => {
+    setTemplateCreationRequest(null);
+    setSelectedTemplate(null);
+    setTaskType("content_generation");
+    setPlatform(mapTopicPlatformToWorkspace(topic.platform));
+    const boundThreadId = topic.thread_id?.trim() || createId("thread");
+
+    if (topic.thread_id?.trim()) {
+      const loadResult = await loadThreadHistory(
+        toTopicThreadItem(topic),
+        topic.id,
+        { silentNotFound: true },
+      );
+      if (topic.status !== "drafting") {
+        void handleUpdateTopic(topic, { status: "drafting" });
+      }
+      if (loadResult === "loaded") {
+        setStatusText(`已回到原会话继续撰写：${topic.title}`);
+        return;
+      }
+      if (loadResult === "failed") {
+        return;
+      }
+
+      activateTopicDraftWorkspace(topic, boundThreadId);
+      setStatusText(`原会话不存在，已恢复该选题的草稿工作区：${topic.title}`);
+      return;
+    }
+
+    const updatedTopic = await handleUpdateTopic(topic, {
+      status: "drafting",
+      thread_id: boundThreadId,
+    });
+    if (!updatedTopic) {
+      return;
+    }
+
+    setActiveView("chat");
+    setLeftSidebarOpen(false);
+    setRightPanelOpen(true);
+    openTopicNewThreadModal(updatedTopic, boundThreadId);
+    setStatusText(`已为选题绑定会话并预填草稿指令：${updatedTopic.title}`);
   };
 
   const artifactActions: ArtifactAction[] = useMemo(() => {
@@ -1814,6 +2318,7 @@ function App() {
     const normalizedTitle = draftThreadTitle.trim() || "New thread";
     const normalizedSystemPrompt = draftSystemPrompt.trim();
     const normalizedKnowledgeBaseScope = draftKnowledgeBaseScope.trim();
+    const normalizedThreadId = draftTargetThreadId?.trim() || "thread-new";
 
     abortRef.current?.abort();
     setIsStreaming(false);
@@ -1824,11 +2329,13 @@ function App() {
       normalizedTitle,
       normalizedSystemPrompt,
       normalizedKnowledgeBaseScope,
+      normalizedThreadId,
+      draftSourceTopicId,
     );
     upsertThreadInList({
-      id: "thread-new",
+      id: normalizedThreadId,
       title: normalizedTitle,
-      time: "草稿",
+      time: normalizedThreadId === "thread-new" ? "草稿" : "撰写中",
     });
     setStatusText("准备新的内容任务");
     setRightPanelOpen(true);
@@ -2088,7 +2595,7 @@ function App() {
 
     try {
       await createChatStream(requestPayload, handleStreamEvent, controller.signal);
-      await loadThreads(nextThreadId, true);
+      await loadThreads(nextThreadId, true, activeTopicId);
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         setStatusText("上一项任务已终止");
@@ -2295,14 +2802,22 @@ function App() {
       setActiveView("chat");
       setAuthSessions([]);
       setDrafts([]);
+      setKnowledgeScopes([]);
+      setTopics([]);
       setTemplates([]);
       setTemplateSkills([]);
       setIsLoadingDrafts(false);
+      setIsLoadingKnowledgeScopes(false);
+      setIsLoadingTopics(false);
       setIsLoadingTemplates(false);
       setIsLoadingTemplateSkills(false);
       setIsMutatingDrafts(false);
+      setIsMutatingKnowledgeScopes(false);
+      setIsMutatingTopics(false);
       setIsMutatingTemplates(false);
       setMutatingDraftMessageId(null);
+      setMutatingKnowledgeScope(null);
+      setMutatingTopicId(null);
       setMutatingTemplateId(null);
       setAuthMode("login");
       setAuthPassword("");
@@ -2468,9 +2983,11 @@ function App() {
             activeView={activeView}
             currentUser={currentUser}
             draftCount={drafts.length > 0 ? drafts.length : undefined}
+            knowledgeCount={knowledgeScopes.length > 0 ? knowledgeScopes.length : undefined}
             isDesktopCollapsed={isLeftSidebarCollapsed}
             isLoading={isLoadingThreads}
             mutatingThreadId={mutatingThreadId}
+            topicCount={topics.length > 0 ? topics.length : undefined}
             templateCount={templates.length > 0 ? templates.length : undefined}
             onCreateThread={openNewThreadModal}
             onDeleteThread={(thread) => void handleDeleteThread(thread)}
@@ -2656,6 +3173,26 @@ function App() {
                 onDeleteDraft={(draft) => void handleDeleteDraft(draft)}
                 onDeleteDrafts={(messageIds) => void handleDeleteDrafts(messageIds)}
                 onOpenThread={(draft) => void handleOpenDraftThread(draft)}
+              />
+            ) : activeView === "knowledge" ? (
+              <KnowledgeView
+                isLoading={isLoadingKnowledgeScopes}
+                isMutating={isMutatingKnowledgeScopes}
+                mutatingScope={mutatingKnowledgeScope}
+                onDeleteScope={(scope) => handleDeleteKnowledgeScope(scope)}
+                onUploadFiles={(scope, files) => handleUploadKnowledgeFiles(scope, files)}
+                scopes={knowledgeScopes}
+              />
+            ) : activeView === "topics" ? (
+              <TopicsView
+                isLoading={isLoadingTopics}
+                isMutating={isMutatingTopics}
+                mutatingTopicId={mutatingTopicId}
+                onCreateTopic={(payload) => handleCreateTopic(payload)}
+                onDeleteTopic={(topic) => handleDeleteTopic(topic)}
+                onDraftTopic={(topic) => handleDraftTopic(topic)}
+                onUpdateTopic={(topic, payload) => handleUpdateTopic(topic, payload)}
+                topics={topics}
               />
             ) : activeView === "templates" ? (
               <TemplatesView

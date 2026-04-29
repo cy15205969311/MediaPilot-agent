@@ -9,6 +9,7 @@ import {
   createMockHistoryMessage,
   createMockSession,
   createMockTemplate,
+  createMockTopic,
   createMockThreadMessages,
   createMockThreadSummary,
   expectAuthenticated,
@@ -307,6 +308,111 @@ test("shows the local-only template workspace without skills controls", async ({
 
   await page.getByTestId("template-tab-情感/心理").click();
   await expect(page.getByTestId("template-card-template-preset-emotion-peer-anxiety")).toBeVisible();
+});
+
+test("opens the topic pool and cascades a topic into the new-thread drafting flow", async ({
+  page,
+}) => {
+  await openWorkspace(page, {
+    topics: [
+      createMockTopic({
+        id: "topic-idea-001",
+        title: "法拍房新手第一次看房最容易踩的 5 个坑",
+        inspiration: "强调第一次看房 checklist、司法流程误区和普通人最怕的坑。",
+        platform: "双平台",
+        status: "idea",
+      }),
+      createMockTopic({
+        id: "topic-published-001",
+        title: "已经发过的 citywalk 复盘",
+        inspiration: "用于验证已发布列。",
+        platform: "小红书",
+        status: "published",
+      }),
+    ],
+  });
+
+  await page.getByTestId("sidebar-shortcut-topics").click();
+  await expect(page.getByTestId("topic-column-idea")).toBeVisible();
+  await expect(page.getByTestId("topic-column-published")).toBeVisible();
+  await expect(page.getByTestId("topic-card-topic-idea-001")).toContainText("法拍房新手第一次看房");
+
+  await page.getByTestId("topic-draft-topic-idea-001").click();
+
+  await expect(page.getByTestId("new-thread-modal")).toBeVisible();
+  await expect(page.getByTestId("new-thread-title-input")).toHaveValue(
+    "法拍房新手第一次看房最容易踩的 5 个坑",
+  );
+  await expect(page.getByTestId("new-thread-system-prompt-input")).toContainText("法拍房新手第一次看房最容易踩的 5 个坑");
+  await expect(page.getByTestId("new-thread-system-prompt-input")).toContainText("司法流程误区");
+
+  await page.getByLabel("关闭新建会话弹窗").click();
+  await page.getByTestId("sidebar-shortcut-topics").click();
+  await expect(page.getByTestId("topic-column-drafting")).toBeVisible();
+  await expect(page.getByTestId("topic-column-drafting")).toContainText(
+    "法拍房新手第一次看房最容易踩的 5 个坑",
+  );
+  await expect(page.getByTestId("topic-draft-topic-idea-001")).toContainText("继续撰写");
+});
+
+test("resumes drafting from the bound topic thread instead of opening a new modal", async ({
+  page,
+}) => {
+  const threadId = "thread-topic-resume-001";
+
+  await openWorkspace(page, {
+    topics: [
+      createMockTopic({
+        id: "topic-resume-001",
+        title: "继续撰写的法拍房选题",
+        inspiration: "这条选题已经和真实会话绑定。",
+        platform: "小红书",
+        status: "drafting",
+        thread_id: threadId,
+      }),
+    ],
+    threads: [
+      createMockThreadSummary({
+        id: threadId,
+        title: "继续撰写的法拍房选题",
+        latest_message_excerpt: "上一轮草稿已经生成。",
+      }),
+    ],
+    threadMessagesById: {
+      [threadId]: createMockThreadMessages({
+        thread_id: threadId,
+        title: "继续撰写的法拍房选题",
+        system_prompt: "你是一位法拍房内容策划顾问。",
+        messages: [
+          createMockHistoryMessage({
+            id: "topic-resume-user-1",
+            thread_id: threadId,
+            role: "user",
+            content: "帮我继续完善这篇法拍房避坑内容。",
+          }),
+          createMockHistoryMessage({
+            id: "topic-resume-assistant-1",
+            thread_id: threadId,
+            role: "assistant",
+            content: "这里是上一次已经生成的草稿内容。",
+          }),
+        ],
+      }),
+    },
+  });
+
+  await page.getByTestId("sidebar-shortcut-topics").click();
+  await expect(page.getByTestId("topic-draft-topic-resume-001")).toContainText("继续撰写");
+  await page.getByTestId("topic-draft-topic-resume-001").click();
+
+  await expect(page.getByTestId("new-thread-modal")).toHaveCount(0);
+  await expect(page.getByTestId("workspace-chat-view")).toBeVisible();
+  await expect(
+    page.getByTestId("chat-message-user").filter({ hasText: "帮我继续完善这篇法拍房避坑内容。" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("workspace-persona-badge")).toContainText(
+    "法拍房内容策划顾问",
+  );
 });
 
 test("opens a saved draft preview and jumps back into its conversation", async ({

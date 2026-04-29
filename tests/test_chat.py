@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import app.services.agent as agent_module
+import app.services.knowledge_base as knowledge_base_module
 import app.services.providers as providers_module
 from app.db.database import Base, get_db
 from app.main import app
@@ -218,8 +219,17 @@ def client(tmp_path: Path, no_sleep: None):
     finally:
         agent_module.media_agent_workflow.provider = original_provider
         app.dependency_overrides.clear()
-        Base.metadata.drop_all(bind=engine)
-        engine.dispose()
+
+
+@pytest.fixture()
+def isolated_knowledge_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    knowledge_dir = tmp_path / "knowledge-base"
+    monkeypatch.setenv("OMNIMEDIA_KNOWLEDGE_BASE_DIR", str(knowledge_dir))
+    knowledge_base_module._knowledge_base_service = None
+    try:
+        yield knowledge_dir
+    finally:
+        knowledge_base_module._knowledge_base_service = None
 
 
 def test_auth_register_and_login(client: TestClient):
@@ -1413,6 +1423,240 @@ def test_template_delete_rejects_preset_templates(client: TestClient):
     )
     assert batch_delete.status_code == 403
 
+
+def test_topic_create_and_list_endpoint_supports_status_filtering(client: TestClient):
+    headers = register_user(client, username="alice-topics")
+
+    first_create = client.post(
+        "/api/v1/media/topics",
+        headers=headers,
+        json={
+            "title": "福州 citywalk 夜游路线",
+            "inspiration": "结合本地人视角和地铁可达路线。",
+            "platform": "小红书",
+        },
+    )
+    assert first_create.status_code == 201
+    first_topic = first_create.json()
+    assert first_topic["status"] == "idea"
+    assert first_topic["platform"] == "小红书"
+    assert first_topic["thread_id"] is None
+
+    second_create = client.post(
+        "/api/v1/media/topics",
+        headers=headers,
+        json={
+            "title": "法拍房避坑指南",
+            "inspiration": "把第一次看房流程和风险清单拆开讲。",
+            "platform": "双平台",
+        },
+    )
+    assert second_create.status_code == 201
+    second_topic = second_create.json()
+
+    patch_response = client.patch(
+        f"/api/v1/media/topics/{second_topic['id']}",
+        headers=headers,
+        json={"status": "drafting", "thread_id": "thread-topic-drafting-001"},
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.json()["status"] == "drafting"
+    assert patch_response.json()["thread_id"] == "thread-topic-drafting-001"
+
+    list_response = client.get("/api/v1/media/topics", headers=headers)
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert payload["total"] == 2
+    assert payload["items"][0]["id"] == second_topic["id"]
+    assert payload["items"][1]["id"] == first_topic["id"]
+
+    filtered_response = client.get(
+        "/api/v1/media/topics?status=drafting",
+        headers=headers,
+    )
+    assert filtered_response.status_code == 200
+    filtered_payload = filtered_response.json()
+    assert filtered_payload["total"] == 1
+    assert filtered_payload["items"][0]["id"] == second_topic["id"]
+    assert filtered_payload["items"][0]["thread_id"] == "thread-topic-drafting-001"
+
+
+def test_topic_patch_endpoint_updates_owned_topic_fields(client: TestClient):
+    alice_headers = register_user(client, username="alice-topic-update")
+    bob_headers = register_user(client, username="bob-topic-update")
+
+    create_response = client.post(
+        "/api/v1/media/topics",
+        headers=alice_headers,
+        json={
+            "title": "旧标题",
+            "inspiration": "旧备注",
+            "platform": "抖音",
+        },
+    )
+    assert create_response.status_code == 201
+    topic_id = create_response.json()["id"]
+
+    update_response = client.patch(
+        f"/api/v1/media/topics/{topic_id}",
+        headers=alice_headers,
+        json={
+            "title": "更新后的选题标题",
+            "inspiration": "补充了更明确的角度和受众。",
+            "platform": "小红书",
+            "status": "published",
+            "thread_id": "thread-topic-published-001",
+        },
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["title"] == "更新后的选题标题"
+    assert updated["inspiration"] == "补充了更明确的角度和受众。"
+    assert updated["platform"] == "小红书"
+    assert updated["status"] == "published"
+    assert updated["thread_id"] == "thread-topic-published-001"
+
+    forbidden_response = client.patch(
+        f"/api/v1/media/topics/{topic_id}",
+        headers=bob_headers,
+        json={"status": "drafting"},
+    )
+    assert forbidden_response.status_code == 404
+
+
+def test_topic_delete_endpoint_removes_only_owned_topic(client: TestClient):
+    alice_headers = register_user(client, username="alice-topic-delete")
+    bob_headers = register_user(client, username="bob-topic-delete")
+
+    create_response = client.post(
+        "/api/v1/media/topics",
+        headers=alice_headers,
+        json={
+            "title": "待删除选题",
+            "inspiration": "这条灵感已经废弃。",
+            "platform": "小红书",
+        },
+    )
+    assert create_response.status_code == 201
+    topic_id = create_response.json()["id"]
+
+    bob_delete = client.delete(
+        f"/api/v1/media/topics/{topic_id}",
+        headers=bob_headers,
+    )
+    assert bob_delete.status_code == 404
+
+    delete_response = client.delete(
+        f"/api/v1/media/topics/{topic_id}",
+        headers=alice_headers,
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"id": topic_id, "deleted": True}
+
+
+def test_knowledge_scope_upload_list_delete_and_retrieval_are_user_scoped(
+    client: TestClient,
+    isolated_knowledge_base: Path,
+):
+    _ = isolated_knowledge_base
+    alice_auth = register_auth_response(client, username="alice-knowledge")
+    bob_auth = register_auth_response(client, username="bob-knowledge")
+    alice_headers = {"Authorization": f"Bearer {alice_auth['access_token']}"}
+    bob_headers = {"Authorization": f"Bearer {bob_auth['access_token']}"}
+    alice_user_id = str(alice_auth["user"]["id"])
+    bob_user_id = str(bob_auth["user"]["id"])
+
+    alice_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=alice_headers,
+        data={"scope": "brand_guide_2026"},
+        files={
+            "file": (
+                "brand-guide.md",
+                "# Brand tone\nWe emphasize a natural, relaxed, premium voice with calm wording.",
+                "text/markdown",
+            )
+        },
+    )
+    assert alice_upload.status_code == 201
+    assert alice_upload.json()["scope"] == "brand_guide_2026"
+    assert alice_upload.json()["chunk_count"] >= 1
+
+    bob_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=bob_headers,
+        data={"scope": "brand_guide_2026"},
+        files={
+            "file": (
+                "brand-guide.md",
+                "# Sales tone\nWe use urgency, quick decisions, and strong conversion pressure.",
+                "text/markdown",
+            )
+        },
+    )
+    assert bob_upload.status_code == 201
+    assert bob_upload.json()["scope"] == "brand_guide_2026"
+
+    alice_scopes = client.get("/api/v1/media/knowledge/scopes", headers=alice_headers)
+    assert alice_scopes.status_code == 200
+    alice_payload = alice_scopes.json()
+    assert alice_payload["total"] == 1
+    assert alice_payload["items"][0]["scope"] == "brand_guide_2026"
+    assert alice_payload["items"][0]["chunk_count"] >= 1
+    assert alice_payload["items"][0]["source_count"] == 1
+
+    bob_scopes = client.get("/api/v1/media/knowledge/scopes", headers=bob_headers)
+    assert bob_scopes.status_code == 200
+    bob_payload = bob_scopes.json()
+    assert bob_payload["total"] == 1
+    assert bob_payload["items"][0]["scope"] == "brand_guide_2026"
+
+    service = knowledge_base_module.get_knowledge_base_service()
+    alice_context = service.retrieve_context(
+        alice_user_id,
+        "brand_guide_2026",
+        "natural relaxed premium brand voice",
+    )
+    bob_context = service.retrieve_context(
+        bob_user_id,
+        "brand_guide_2026",
+        "urgent high pressure conversion tone",
+    )
+
+    assert "natural, relaxed, premium voice" in alice_context
+    assert "strong conversion pressure" not in alice_context
+    assert "strong conversion pressure" in bob_context
+    assert "natural, relaxed, premium voice" not in bob_context
+
+    alice_delete = client.delete(
+        "/api/v1/media/knowledge/scopes/brand_guide_2026",
+        headers=alice_headers,
+    )
+    assert alice_delete.status_code == 200
+    assert alice_delete.json()["deleted"] is True
+    assert alice_delete.json()["deleted_count"] >= 1
+
+    alice_after_delete = client.get("/api/v1/media/knowledge/scopes", headers=alice_headers)
+    assert alice_after_delete.status_code == 200
+    assert alice_after_delete.json()["total"] == 0
+
+    bob_after_delete = client.get("/api/v1/media/knowledge/scopes", headers=bob_headers)
+    assert bob_after_delete.status_code == 200
+    assert bob_after_delete.json()["total"] == 1
+
+
+def test_system_seeded_knowledge_still_available_after_tenant_filtering(
+    isolated_knowledge_base: Path,
+):
+    _ = isolated_knowledge_base
+    service = knowledge_base_module.get_knowledge_base_service()
+    context = service.retrieve_context(
+        "user-rag-check",
+        "travel_local_guides",
+        "premium district budget contrast",
+    )
+
+    assert "price and regional contrast" in context
 
 def test_artifact_delete_endpoint_removes_only_owned_draft(client: TestClient):
     alice_headers = register_user(client, username="alice-delete-single")

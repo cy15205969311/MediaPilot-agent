@@ -585,10 +585,41 @@ class LangGraphProvider(BaseLLMProvider):
                 message=f"scope={knowledge_base_scope}",
             )
             try:
-                knowledge_base_context = get_knowledge_base_service().retrieve_context(
-                    knowledge_base_scope,
-                    request.message,
-                ).strip()
+                knowledge_service = get_knowledge_base_service()
+                retrieved_chunk_count = 0
+                if hasattr(knowledge_service, "retrieve_chunks"):
+                    knowledge_documents = knowledge_service.retrieve_chunks(
+                        state.get("user_id") or "",
+                        knowledge_base_scope,
+                        request.message,
+                    )
+                    retrieved_chunk_count = len(knowledge_documents)
+                    knowledge_base_context = "\n\n".join(
+                        f"[{index}] ({document.source}) {document.text}"
+                        for index, document in enumerate(knowledge_documents, start=1)
+                    ).strip()
+                else:  # pragma: no cover - backward compatibility path
+                    retrieve_context = knowledge_service.retrieve_context
+                    if len(inspect.signature(retrieve_context).parameters) >= 4:
+                        knowledge_base_context = str(
+                            retrieve_context(
+                                state.get("user_id") or "",
+                                knowledge_base_scope,
+                                request.message,
+                            )
+                            or ""
+                        ).strip()
+                    else:
+                        knowledge_base_context = str(
+                            retrieve_context(
+                                knowledge_base_scope,
+                                request.message,
+                            )
+                            or ""
+                        ).strip()
+                    retrieved_chunk_count = len(
+                        [section for section in knowledge_base_context.split("\n\n") if section.strip()]
+                    )
             except Exception as exc:  # pragma: no cover - defensive fallback
                 logger.warning(
                     "knowledge base retrieval failed thread_id=%s scope=%s error=%s",
@@ -604,6 +635,12 @@ class LangGraphProvider(BaseLLMProvider):
                 )
                 knowledge_base_context = ""
             else:
+                logger.info(
+                    "RAG Activated for user %s, scope %s, retrieved %s chunks",
+                    state.get("user_id") or "",
+                    knowledge_base_scope,
+                    retrieved_chunk_count,
+                )
                 _emit_tool_call(
                     writer,
                     name="retrieve_knowledge_base",

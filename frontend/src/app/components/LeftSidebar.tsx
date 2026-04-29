@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  BookOpenText,
   ChevronLeft,
   Clock,
   FileText,
@@ -30,6 +31,8 @@ type LeftSidebarProps = {
   mutatingThreadId: string | null;
   currentUser: AuthenticatedUser;
   draftCount?: number;
+  knowledgeCount?: number;
+  topicCount?: number;
   templateCount?: number;
   onCreateThread: () => void;
   onDeleteThread: (thread: ThreadItem) => void;
@@ -49,6 +52,7 @@ const shortcuts: Array<{
   icon: typeof Target;
 }> = [
   { id: "topics", label: "选题池", count: 12, icon: Target },
+  { id: "knowledge", label: "知识库", icon: BookOpenText },
   { id: "templates", label: "模板中心", icon: FileText },
   { id: "dashboard", label: "数据看板", icon: BarChart3 },
   { id: "drafts", label: "我的草稿", icon: Clock },
@@ -57,10 +61,20 @@ const shortcuts: Array<{
 function getShortcutCount(
   shortcutId: Exclude<WorkspaceView, "chat">,
   draftCount?: number,
+  knowledgeCount?: number,
+  topicCount?: number,
   templateCount?: number,
 ): number | undefined {
   if (shortcutId === "drafts") {
     return draftCount;
+  }
+
+  if (shortcutId === "knowledge") {
+    return knowledgeCount;
+  }
+
+  if (shortcutId === "topics") {
+    return topicCount;
   }
 
   if (shortcutId === "templates") {
@@ -80,6 +94,8 @@ export function LeftSidebar({
   mutatingThreadId,
   currentUser,
   draftCount,
+  knowledgeCount,
+  topicCount,
   templateCount,
   onCreateThread,
   onDeleteThread,
@@ -106,9 +122,7 @@ export function LeftSidebar({
         }`}
       >
         <div className="flex items-center justify-between border-b border-border px-5 py-5">
-          <div className="text-2xl font-bold tracking-tight text-foreground">
-            工作区
-          </div>
+          <div className="text-2xl font-bold tracking-tight text-foreground">工作区</div>
           <div className="flex items-center gap-2">
             <button
               aria-expanded={!isDesktopCollapsed}
@@ -276,7 +290,13 @@ export function LeftSidebar({
             <h3 className="mb-3 text-sm font-semibold text-foreground">业务模块</h3>
             <div className="space-y-2">
               {shortcuts.map((item) => {
-                const count = getShortcutCount(item.id, draftCount, templateCount);
+                const count = getShortcutCount(
+                  item.id,
+                  draftCount,
+                  knowledgeCount,
+                  topicCount,
+                  templateCount,
+                );
                 const isActive = activeView === item.id;
 
                 return (

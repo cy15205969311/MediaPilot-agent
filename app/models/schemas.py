@@ -62,6 +62,18 @@ class TemplateCategory(str, Enum):
     EMOTION = "情感/心理"
 
 
+class TopicPlatform(str, Enum):
+    XIAOHONGSHU = "小红书"
+    DOUYIN = "抖音"
+    BOTH = "双平台"
+
+
+class TopicStatus(str, Enum):
+    IDEA = "idea"
+    DRAFTING = "drafting"
+    PUBLISHED = "published"
+
+
 class TaskType(str, Enum):
     TOPIC_PLANNING = "topic_planning"
     CONTENT_GENERATION = "content_generation"
@@ -524,6 +536,85 @@ class TemplateDeleteResponse(SchemaModel):
         default_factory=list,
         description="Deleted template IDs.",
     )
+
+
+class TopicListItem(SchemaModel):
+    id: str = Field(..., description="Topic identifier.")
+    title: str = Field(..., description="Core topic title.")
+    inspiration: str = Field(default="", description="Supplementary inspiration or notes.")
+    platform: TopicPlatform = Field(..., description="Target content platform.")
+    status: TopicStatus = Field(..., description="Current lifecycle status.")
+    thread_id: str | None = Field(
+        default=None,
+        description="Optional bound thread identifier used to resume drafting.",
+    )
+    created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+    updated_at: UTCDateTime = Field(..., description="Last updated time in UTC.")
+
+
+class TopicListResponse(SchemaModel):
+    items: list[TopicListItem] = Field(
+        default_factory=list,
+        description="Topic records for the current user.",
+    )
+    total: int = Field(..., description="Returned topic count.")
+
+
+class TopicCreateRequest(SchemaModel):
+    title: str = Field(..., min_length=1, max_length=255, description="Topic title.")
+    inspiration: str = Field(
+        default="",
+        max_length=4000,
+        description="Optional inspiration note or source.",
+    )
+    platform: TopicPlatform = Field(..., description="Target platform for the topic.")
+
+
+class TopicUpdateRequest(SchemaModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    inspiration: str | None = Field(default=None, max_length=4000)
+    platform: TopicPlatform | None = Field(default=None)
+    status: TopicStatus | None = Field(default=None)
+    thread_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional bound thread identifier for resume drafting flows.",
+    )
+
+
+class TopicDeleteResponse(SchemaModel):
+    id: str = Field(..., description="Deleted topic identifier.")
+    deleted: bool = Field(default=True, description="Deletion result.")
+
+
+class KnowledgeScopeListItem(SchemaModel):
+    scope: str = Field(..., description="Normalized knowledge-base scope key.")
+    chunk_count: int = Field(..., description="Stored text chunk count for this scope.")
+    source_count: int = Field(..., description="Distinct uploaded source count for this scope.")
+    updated_at: UTCDateTime | None = Field(
+        default=None,
+        description="Latest write time across the scope in UTC.",
+    )
+
+
+class KnowledgeScopeListResponse(SchemaModel):
+    items: list[KnowledgeScopeListItem] = Field(
+        default_factory=list,
+        description="Knowledge scopes owned by the current user.",
+    )
+    total: int = Field(..., description="Returned scope count.")
+
+
+class KnowledgeUploadResponse(SchemaModel):
+    scope: str = Field(..., description="Normalized scope key that received the upload.")
+    source: str = Field(..., description="Original source filename used for the upload.")
+    chunk_count: int = Field(..., description="Number of text chunks ingested from the upload.")
+
+
+class KnowledgeScopeDeleteResponse(SchemaModel):
+    scope: str = Field(..., description="Deleted scope key.")
+    deleted_count: int = Field(..., description="Number of removed chunks.")
+    deleted: bool = Field(default=True, description="Whether any knowledge chunks were deleted.")
 
 
 class TemplateSkillDiscoveryItem(SchemaModel):

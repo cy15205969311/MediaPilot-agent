@@ -202,10 +202,10 @@ pip install -r requirements.txt
 ```bash
 python -m pytest -q
 ```
-Current backend regression baseline: `86 passed`.
+Current backend regression baseline: `97 passed`.
 
 默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
-当前后端回归基线为 `86 passed`。
+当前后端回归基线为 `97 passed`。
 
 执行前端构建：
 
@@ -263,3 +263,22 @@ npx playwright test --ui
 - 使用模板开启新会话时，`knowledge_base_scope` 会随线程一起持久化，并在 LangGraph 最终生成前自动检索对应知识上下文
 - 聊天区最新产物支持“存为模板”，会把当前 `system_prompt`、产物标题和摘要直接预填到模板创建弹窗
 - 后端仍保留 `GET /api/v1/media/skills/search` 作为后续扩展能力，但当前默认交互以高质量本地模板库为主
+
+## 11. 选题池
+
+- 选题数据来自后端 `GET /api/v1/media/topics`
+- 选题池已支持完整 CRUD：新建灵感、编辑内容、状态流转和删除废弃选题
+- 页面采用三列轻量级看板：`灵感备选 -> 撰写中 -> 已发布`
+- 每张选题卡片都可以通过左右流转按钮推进状态，也可以在 `idea` / `drafting` 阶段点击“一键生成草稿”
+- 首次点击“一键生成草稿”时，系统会为该选题绑定一个专属 `thread_id`；后续主按钮会变成“继续撰写”，直接回到原会话上下文
+- “一键生成草稿”会自动切回聊天区、弹出新建会话窗口，并把选题标题和专属系统 Prompt 预填到表单中
+- 当选题被带入聊天工作流时，后台会同步把状态推进到 `drafting`，形成从灵感记录到内容生成的闭环
+
+## 12. 知识库
+
+- 左侧边栏现已提供独立的“知识库”工作台，可查看当前用户名下的所有 Scope
+- 后端新增 `GET /api/v1/media/knowledge/scopes`、`POST /api/v1/media/knowledge/upload`、`DELETE /api/v1/media/knowledge/scopes/{scope}` 三个鉴权接口
+- 当前上传入口支持 `.txt`、`.md`、`.markdown`，并会自动处理 `utf-8-sig`、`utf-8`、`gb18030` 编码
+- 文本会在入库前自动切块，然后按 `user_id + scope + source` 维度持久化，避免不同用户之间的知识串库
+- `knowledge_base_scope` 仍然可以从模板一路透传到线程；当线程命中对应 Scope 时，LangGraph 会在最终生成前自动检索并注入相关上下文
+- 当前实现优先使用 Chroma 持久化向量集合，同时保留本地 JSON fallback，便于本地开发和低依赖环境运行

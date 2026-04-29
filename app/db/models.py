@@ -90,6 +90,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    topics: Mapped[list["TopicRecord"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     refresh_sessions: Mapped[list["RefreshSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -261,6 +265,43 @@ class Template(Base):
     )
 
     user: Mapped[User | None] = relationship(back_populates="templates")
+
+
+class TopicRecord(Base):
+    __tablename__ = "topic_records"
+
+    id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: f"topic-{uuid4().hex}",
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    inspiration: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="idea", nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(
+        String(64),
+        index=True,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utcnow,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    user: Mapped[User] = relationship(back_populates="topics")
 
 
 class UploadRecord(Base):

@@ -11,6 +11,9 @@ import type {
   DraftsDeleteApiResponse,
   DraftsDeletePayload,
   DraftsApiResponse,
+  KnowledgeScopeDeleteApiResponse,
+  KnowledgeScopesApiResponse,
+  KnowledgeUploadApiResponse,
   LogoutResponse,
   MediaChatRequestPayload,
   PasswordResetConfirmPayload,
@@ -21,6 +24,12 @@ import type {
   ResetPasswordPayload,
   ResetPasswordResponse,
   SessionRevokeResponse,
+  TopicCreatePayload,
+  TopicDeleteApiResponse,
+  TopicItem,
+  TopicStatus,
+  TopicsApiResponse,
+  TopicUpdatePayload,
   TemplateSummaryItem,
   TemplatesApiResponse,
   ThreadDeleteApiResponse,
@@ -662,6 +671,118 @@ export async function fetchArtifacts(): Promise<DraftsApiResponse> {
   );
 
   return (await response.json()) as DraftsApiResponse;
+}
+
+export async function fetchTopics(status?: TopicStatus): Promise<TopicsApiResponse> {
+  const searchParams = new URLSearchParams();
+  if (status) {
+    searchParams.set("status", status);
+  }
+
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/topics${searchParams.size > 0 ? `?${searchParams.toString()}` : ""}`,
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TopicsApiResponse;
+}
+
+export async function createTopic(payload: TopicCreatePayload): Promise<TopicItem> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/topics",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TopicItem;
+}
+
+export async function updateTopic(
+  topicId: string,
+  payload: TopicUpdatePayload,
+): Promise<TopicItem> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/topics/${topicId}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TopicItem;
+}
+
+export async function deleteTopic(topicId: string): Promise<TopicDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/topics/${topicId}`,
+    {
+      method: "DELETE",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as TopicDeleteApiResponse;
+}
+
+export async function fetchKnowledgeScopes(): Promise<KnowledgeScopesApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/knowledge/scopes",
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as KnowledgeScopesApiResponse;
+}
+
+export async function uploadKnowledgeDocument(
+  file: File,
+  scope?: string,
+): Promise<KnowledgeUploadApiResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (scope?.trim()) {
+    formData.append("scope", scope.trim());
+  }
+
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/knowledge/upload",
+    {
+      method: "POST",
+      body: formData,
+    },
+    { timeoutMs: 30000 },
+  );
+
+  return (await response.json()) as KnowledgeUploadApiResponse;
+}
+
+export async function deleteKnowledgeScope(
+  scope: string,
+): Promise<KnowledgeScopeDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/knowledge/scopes/${encodeURIComponent(scope)}`,
+    {
+      method: "DELETE",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as KnowledgeScopeDeleteApiResponse;
 }
 
 export async function fetchTemplates(): Promise<TemplatesApiResponse> {

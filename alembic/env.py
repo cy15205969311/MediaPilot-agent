@@ -151,6 +151,9 @@ def run_migrations_online() -> None:
         with context.begin_transaction():
             context.run_migrations()
 
+        if connection.in_transaction():
+            connection.commit()
+
 
 if context.is_offline_mode():
     run_migrations_offline()
