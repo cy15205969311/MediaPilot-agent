@@ -231,6 +231,29 @@ export type KnowledgeSourcePreviewApiResponse = {
   chunk_count: number;
 };
 
+export type DashboardActivityItem = {
+  date: string;
+  count: number;
+};
+
+export type DashboardSummary = {
+  productivity: {
+    total_drafts: number;
+    drafts_this_week: number;
+    total_words_generated: number;
+    estimated_tokens: number;
+    estimated_saved_minutes: number;
+  };
+  assets: {
+    total_topics: number;
+    active_topics: number;
+    total_knowledge_scopes: number;
+    total_knowledge_chunks: number;
+  };
+  topic_status: Record<TopicStatus, number>;
+  activity_heatmap: DashboardActivityItem[];
+};
+
 export type TemplatePlatform = "小红书" | "抖音" | "双平台" | "闲鱼" | "技术博客";
 
 export type TemplateCategory =

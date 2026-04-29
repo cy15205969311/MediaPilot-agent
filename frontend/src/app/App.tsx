@@ -32,6 +32,7 @@ import {
   deleteTemplates,
   deleteThread,
   fetchArtifacts,
+  fetchDashboardSummary,
   fetchKnowledgeScopeSources,
   fetchKnowledgeScopes,
   fetchTopics,
@@ -66,6 +67,7 @@ import { LeftSidebar } from "./components/LeftSidebar";
 import { RightPanel } from "./components/RightPanel";
 import { ThreadSettingsModal } from "./components/ThreadSettingsModal";
 import { UserProfileModal } from "./components/UserProfileModal";
+import { DashboardView } from "./components/views/DashboardView";
 import { DraftsView } from "./components/views/DraftsView";
 import { KnowledgeView } from "./components/views/KnowledgeView";
 import { TopicsView } from "./components/views/TopicsView";
@@ -79,6 +81,7 @@ import type {
   ChatStreamEvent,
   ComposerSubmitPayload,
   ConversationMessage,
+  DashboardSummary,
   DraftSummaryItem,
   HistoryMessageItem,
   KnowledgeScopeItem,
@@ -801,6 +804,7 @@ function App() {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [drafts, setDrafts] = useState<DraftSummaryItem[]>([]);
+  const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary | null>(null);
   const [knowledgeScopes, setKnowledgeScopes] = useState<KnowledgeScopeItem[]>([]);
   const [topics, setTopics] = useState<TopicItem[]>([]);
   const [templates, setTemplates] = useState<TemplateSummaryItem[]>([]);
@@ -817,6 +821,7 @@ function App() {
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
   const [isLoadingThreadHistory, setIsLoadingThreadHistory] = useState(false);
   const [isLoadingDrafts, setIsLoadingDrafts] = useState(false);
+  const [isLoadingDashboard, setIsLoadingDashboard] = useState(false);
   const [isLoadingKnowledgeScopes, setIsLoadingKnowledgeScopes] = useState(false);
   const [isLoadingTopics, setIsLoadingTopics] = useState(false);
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
@@ -1253,6 +1258,38 @@ function App() {
       });
     } finally {
       setIsLoadingDrafts(false);
+    }
+  };
+
+  const loadDashboardSummary = async () => {
+    setIsLoadingDashboard(true);
+
+    try {
+      const payload = await fetchDashboardSummary();
+      setDashboardSummary(payload);
+      setStatusText("数据看板已更新");
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载数据看板失败，请稍后重试。";
+
+      setStatusText("数据看板加载失败");
+      appendSystemMessage({
+        id: createId("dashboard-summary-error"),
+        role: "error",
+        title: "数据看板加载失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsLoadingDashboard(false);
     }
   };
 
@@ -1961,6 +1998,11 @@ function App() {
       return;
     }
 
+    if (view === "dashboard") {
+      setStatusText("正在打开数据看板");
+      return;
+    }
+
     setStatusText("该模块即将开放");
   };
 
@@ -2119,6 +2161,14 @@ function App() {
     }
 
     void loadDrafts();
+  }, [activeView, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || activeView !== "dashboard") {
+      return;
+    }
+
+    void loadDashboardSummary();
   }, [activeView, isAuthenticated]);
 
   useEffect(() => {
@@ -3338,6 +3388,11 @@ function App() {
                 onDeleteDraft={(draft) => void handleDeleteDraft(draft)}
                 onDeleteDrafts={(messageIds) => void handleDeleteDrafts(messageIds)}
                 onOpenThread={(draft) => void handleOpenDraftThread(draft)}
+              />
+            ) : activeView === "dashboard" ? (
+              <DashboardView
+                isLoading={isLoadingDashboard}
+                summary={dashboardSummary}
               />
             ) : activeView === "knowledge" ? (
               <KnowledgeView

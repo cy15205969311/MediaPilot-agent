@@ -3,6 +3,7 @@ import type {
   AuthenticatedUser,
   AuthResponse,
   ChatStreamEvent,
+  DashboardSummary,
   TemplateCreatePayload,
   TemplateDeleteApiResponse,
   TemplateDeletePayload,
@@ -676,6 +677,18 @@ export async function fetchArtifacts(): Promise<DraftsApiResponse> {
   );
 
   return (await response.json()) as DraftsApiResponse;
+}
+
+export async function fetchDashboardSummary(): Promise<DashboardSummary> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/dashboard/summary",
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as DashboardSummary;
 }
 
 export async function fetchTopics(status?: TopicStatus): Promise<TopicsApiResponse> {

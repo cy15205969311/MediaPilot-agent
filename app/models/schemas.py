@@ -660,6 +660,42 @@ class KnowledgeSourcePreviewResponse(SchemaModel):
     chunk_count: int = Field(..., description="Number of chunks included in the preview.")
 
 
+class DashboardProductivitySummary(SchemaModel):
+    total_drafts: int = Field(..., description="Total artifact drafts owned by the user.")
+    drafts_this_week: int = Field(..., description="Artifact drafts created in the last 7 days.")
+    total_words_generated: int = Field(..., description="Estimated generated text character count.")
+    estimated_tokens: int = Field(..., description="Estimated token usage based on generated text.")
+    estimated_saved_minutes: int = Field(..., description="Estimated manual creation time saved.")
+
+
+class DashboardAssetsSummary(SchemaModel):
+    total_topics: int = Field(..., description="Total owned topic records.")
+    active_topics: int = Field(..., description="Owned topics not yet published.")
+    total_knowledge_scopes: int = Field(..., description="Owned knowledge scope count.")
+    total_knowledge_chunks: int = Field(..., description="Owned knowledge chunk count.")
+
+
+class DashboardTopicStatusSummary(SchemaModel):
+    idea: int = Field(default=0, description="Topic records in idea status.")
+    drafting: int = Field(default=0, description="Topic records in drafting status.")
+    published: int = Field(default=0, description="Topic records in published status.")
+
+
+class DashboardActivityItem(SchemaModel):
+    date: str = Field(..., description="UTC date in YYYY-MM-DD format.")
+    count: int = Field(..., description="Artifact draft count for this day.")
+
+
+class DashboardSummaryResponse(SchemaModel):
+    productivity: DashboardProductivitySummary = Field(..., description="Generation metrics.")
+    assets: DashboardAssetsSummary = Field(..., description="Owned asset metrics.")
+    topic_status: DashboardTopicStatusSummary = Field(..., description="Topic lifecycle buckets.")
+    activity_heatmap: list[DashboardActivityItem] = Field(
+        default_factory=list,
+        description="Daily artifact draft counts for the recent window.",
+    )
+
+
 class TemplateSkillDiscoveryItem(SchemaModel):
     id: str = Field(..., description="Discovered skill/template idea identifier.")
     title: str = Field(..., description="Discovered prompt card title.")

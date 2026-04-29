@@ -1880,6 +1880,108 @@ def test_knowledge_scope_source_management_and_rename_are_user_scoped(
     )
     assert "calm, premium, reassuring tone" not in deleted_context
 
+
+def test_dashboard_summary_aggregates_owned_productivity_assets_and_activity(
+    client: TestClient,
+    isolated_knowledge_base: Path,
+):
+    _ = isolated_knowledge_base
+    alice_auth = register_auth_response(client, username="alice-dashboard")
+    bob_headers = register_user(client, username="bob-dashboard")
+    alice_headers = {"Authorization": f"Bearer {alice_auth['access_token']}"}
+
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-dashboard-a",
+        message="Create Alice dashboard draft A.",
+        thread_title="Alice dashboard draft A",
+    )
+    create_artifact_draft(
+        client,
+        headers=alice_headers,
+        thread_id="thread-dashboard-b",
+        task_type="topic_planning",
+        message="Create Alice dashboard topic list.",
+        thread_title="Alice dashboard draft B",
+    )
+    create_artifact_draft(
+        client,
+        headers=bob_headers,
+        thread_id="thread-dashboard-bob",
+        message="Create Bob dashboard draft.",
+        thread_title="Bob dashboard draft",
+    )
+
+    idea_response = client.post(
+        "/api/v1/media/topics",
+        headers=alice_headers,
+        json={"title": "看板灵感", "inspiration": "用于统计", "platform": "小红书"},
+    )
+    assert idea_response.status_code == 201
+    drafting_response = client.post(
+        "/api/v1/media/topics",
+        headers=alice_headers,
+        json={"title": "看板撰写", "inspiration": "用于统计", "platform": "抖音"},
+    )
+    assert drafting_response.status_code == 201
+    patch_response = client.patch(
+        f"/api/v1/media/topics/{drafting_response.json()['id']}",
+        headers=alice_headers,
+        json={"status": "drafting"},
+    )
+    assert patch_response.status_code == 200
+
+    bob_topic_response = client.post(
+        "/api/v1/media/topics",
+        headers=bob_headers,
+        json={"title": "Bob 看板", "inspiration": "隔离校验", "platform": "双平台"},
+    )
+    assert bob_topic_response.status_code == 201
+
+    upload_response = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=alice_headers,
+        data={"scope": "dashboard_scope"},
+        files={
+            "file": (
+                "dashboard.md",
+                "# Dashboard knowledge\n用于验证知识库资产统计。",
+                "text/markdown",
+            )
+        },
+    )
+    assert upload_response.status_code == 201
+
+    summary_response = client.get(
+        "/api/v1/media/dashboard/summary",
+        headers=alice_headers,
+    )
+    assert summary_response.status_code == 200
+    payload = summary_response.json()
+    assert payload["productivity"]["total_drafts"] == 2
+    assert payload["productivity"]["drafts_this_week"] == 2
+    assert payload["productivity"]["total_words_generated"] > 0
+    assert payload["productivity"]["estimated_tokens"] >= payload["productivity"]["total_words_generated"]
+    assert payload["assets"] == {
+        "total_topics": 2,
+        "active_topics": 2,
+        "total_knowledge_scopes": 1,
+        "total_knowledge_chunks": 1,
+    }
+    assert payload["topic_status"] == {"idea": 1, "drafting": 1, "published": 0}
+    assert len(payload["activity_heatmap"]) == 14
+    assert sum(item["count"] for item in payload["activity_heatmap"]) == 2
+
+    bob_summary_response = client.get(
+        "/api/v1/media/dashboard/summary",
+        headers=bob_headers,
+    )
+    assert bob_summary_response.status_code == 200
+    assert bob_summary_response.json()["productivity"]["total_drafts"] == 1
+    assert bob_summary_response.json()["assets"]["total_topics"] == 1
+
+
 def test_artifact_delete_endpoint_removes_only_owned_draft(client: TestClient):
     alice_headers = register_user(client, username="alice-delete-single")
     bob_headers = register_user(client, username="bob-delete-single")

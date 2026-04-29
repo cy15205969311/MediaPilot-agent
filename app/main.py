@@ -14,6 +14,7 @@ load_environment()
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.chat import router as media_chat_router
+from app.api.v1.dashboard import router as media_dashboard_router
 from app.api.v1.history import router as media_history_router
 from app.api.v1.knowledge import router as media_knowledge_router
 from app.api.v1.oss import UPLOADS_DIR, router as media_upload_router
@@ -160,6 +161,7 @@ async def root() -> dict[str, str]:
 
 app.include_router(auth_router)
 app.include_router(media_chat_router)
+app.include_router(media_dashboard_router)
 app.include_router(media_history_router)
 app.include_router(media_knowledge_router)
 app.include_router(media_upload_router)
