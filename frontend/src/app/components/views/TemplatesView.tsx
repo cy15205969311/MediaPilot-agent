@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import {
   BadgePlus,
@@ -15,7 +15,9 @@ import {
   X,
 } from "lucide-react";
 
+import { fetchKnowledgeScopes } from "../../api";
 import type {
+  KnowledgeScopeItem,
   TemplateCategory,
   TemplateCreatePayload,
   TemplatePlatform,
@@ -236,6 +238,12 @@ export function TemplatesView(props: TemplatesViewProps) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [formState, setFormState] = useState<TemplateFormState>(initialFormState);
+  const [availableScopes, setAvailableScopes] = useState<KnowledgeScopeItem[]>([]);
+  const [isFetchingScopes, setIsFetchingScopes] = useState(false);
+  const [scopeFetchError, setScopeFetchError] = useState("");
+  const [scopeSearchQuery, setScopeSearchQuery] = useState("");
+  const [isScopeDropdownOpen, setIsScopeDropdownOpen] = useState(false);
+  const scopeComboboxRef = useRef<HTMLDivElement | null>(null);
 
   const isCreating = isMutating && mutatingTemplateId === "template-create";
 
@@ -252,9 +260,63 @@ export function TemplatesView(props: TemplatesViewProps) {
     }
 
     setFormState(toFormState(creationRequest.payload));
+    setScopeSearchQuery(creationRequest.payload.knowledge_base_scope ?? "");
     setIsCreateModalOpen(true);
     onCreationRequestHandled();
   }, [creationRequest, onCreationRequestHandled]);
+
+  useEffect(() => {
+    if (!isCreateModalOpen) {
+      setIsScopeDropdownOpen(false);
+      return;
+    }
+
+    let isActive = true;
+    setIsFetchingScopes(true);
+    setScopeFetchError("");
+
+    void fetchKnowledgeScopes()
+      .then((payload) => {
+        if (!isActive) {
+          return;
+        }
+        setAvailableScopes(payload.items);
+      })
+      .catch(() => {
+        if (!isActive) {
+          return;
+        }
+        setAvailableScopes([]);
+        setScopeFetchError("知识库列表加载失败，请稍后重试。");
+      })
+      .finally(() => {
+        if (!isActive) {
+          return;
+        }
+        setIsFetchingScopes(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [isCreateModalOpen]);
+
+  useEffect(() => {
+    if (!isScopeDropdownOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!scopeComboboxRef.current?.contains(event.target as Node)) {
+        setIsScopeDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [isScopeDropdownOpen]);
 
   const filteredTemplates = useMemo(() => {
     const normalizedSearch = normalizeSearchValue(searchValue);
@@ -277,6 +339,20 @@ export function TemplatesView(props: TemplatesViewProps) {
   );
   const customCount = templates.length - presetCount;
   const isBulkDeleting = isMutating && mutatingTemplateId === "template-bulk";
+  const filteredScopes = useMemo(() => {
+    const normalizedQuery = normalizeSearchValue(scopeSearchQuery);
+    if (!normalizedQuery) {
+      return availableScopes;
+    }
+    return availableScopes.filter((scope) =>
+      scope.scope.toLowerCase().includes(normalizedQuery),
+    );
+  }, [availableScopes, scopeSearchQuery]);
+  const selectedScopeSummary = useMemo(
+    () =>
+      availableScopes.find((scope) => scope.scope === formState.knowledge_base_scope) ?? null,
+    [availableScopes, formState.knowledge_base_scope],
+  );
   const emptyStateTitle =
     viewMode === "preset"
       ? "当前筛选条件下还没有官方预置模板"
@@ -292,6 +368,9 @@ export function TemplatesView(props: TemplatesViewProps) {
 
   const openCreateModal = (payload?: Partial<TemplateCreatePayload>) => {
     setFormState(toFormState(payload));
+    setScopeSearchQuery(payload?.knowledge_base_scope ?? "");
+    setScopeFetchError("");
+    setIsScopeDropdownOpen(false);
     setIsCreateModalOpen(true);
   };
 
@@ -301,6 +380,9 @@ export function TemplatesView(props: TemplatesViewProps) {
     }
     setIsCreateModalOpen(false);
     setFormState(initialFormState);
+    setScopeSearchQuery("");
+    setScopeFetchError("");
+    setIsScopeDropdownOpen(false);
   };
 
   const toggleSelected = (templateId: string) => {
@@ -369,6 +451,40 @@ export function TemplatesView(props: TemplatesViewProps) {
     if (deleted) {
       setSelectedIds([]);
     }
+  };
+
+  const handleScopeSearchChange = (value: string) => {
+    const nextQuery = value;
+    const normalizedQuery = normalizeSearchValue(nextQuery);
+    const exactMatch =
+      availableScopes.find((scope) => scope.scope.toLowerCase() === normalizedQuery) ?? null;
+
+    setScopeSearchQuery(nextQuery);
+    setIsScopeDropdownOpen(true);
+    setFormState((current) => ({
+      ...current,
+      knowledge_base_scope: exactMatch?.scope ?? "",
+    }));
+  };
+
+  const handleSelectScope = (scope: KnowledgeScopeItem) => {
+    setFormState((current) => ({
+      ...current,
+      knowledge_base_scope: scope.scope,
+    }));
+    setScopeSearchQuery(scope.scope);
+    setScopeFetchError("");
+    setIsScopeDropdownOpen(false);
+  };
+
+  const handleClearScope = () => {
+    setFormState((current) => ({
+      ...current,
+      knowledge_base_scope: "",
+    }));
+    setScopeSearchQuery("");
+    setScopeFetchError("");
+    setIsScopeDropdownOpen(false);
   };
 
   return (
@@ -776,18 +892,80 @@ export function TemplatesView(props: TemplatesViewProps) {
                 <div className="mb-2 text-sm font-medium text-card-foreground">
                   关联知识库
                 </div>
-                <input
-                  className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
-                  data-testid="template-create-knowledge-base"
-                  onChange={(event) =>
-                    setFormState((current) => ({
-                      ...current,
-                      knowledge_base_scope: event.target.value,
-                    }))
-                  }
-                  placeholder="例如：housing_home_revival / car_lifestyle_commuter / emotional_wellbeing_notes"
-                  value={formState.knowledge_base_scope}
-                />
+                <div className="relative" ref={scopeComboboxRef}>
+                  <input
+                    className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 pr-12 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                    data-testid="template-create-knowledge-base"
+                    onChange={(event) => handleScopeSearchChange(event.target.value)}
+                    onFocus={() => setIsScopeDropdownOpen(true)}
+                    placeholder="搜索并选择已有知识库，例如：brand_guide_2026"
+                    value={scopeSearchQuery}
+                  />
+
+                  {scopeSearchQuery ? (
+                    <button
+                      aria-label="清空关联知识库"
+                      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                      onClick={handleClearScope}
+                      type="button"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  ) : null}
+
+                  {isScopeDropdownOpen ? (
+                    <div className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-2xl border border-border bg-background p-2 shadow-lg">
+                      {isFetchingScopes ? (
+                        <div className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground">
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                          正在加载知识库...
+                        </div>
+                      ) : scopeFetchError ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          {scopeFetchError}
+                        </div>
+                      ) : filteredScopes.length === 0 ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          未找到匹配的知识库
+                        </div>
+                      ) : (
+                        filteredScopes.map((scope) => {
+                          const isSelected = scope.scope === formState.knowledge_base_scope;
+                          return (
+                            <button
+                              key={scope.scope}
+                              className={`flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm transition ${
+                                isSelected
+                                  ? "bg-primary text-primary-foreground"
+                                  : "hover:bg-muted"
+                              }`}
+                              data-testid={`template-scope-option-${scope.scope}`}
+                              onClick={() => handleSelectScope(scope)}
+                              onMouseDown={(event) => event.preventDefault()}
+                              type="button"
+                            >
+                              <span className="truncate font-medium">{scope.scope}</span>
+                              <span
+                                className={`ml-3 shrink-0 text-xs ${
+                                  isSelected
+                                    ? "text-primary-foreground/80"
+                                    : "text-muted-foreground"
+                                }`}
+                              >
+                                {scope.chunk_count} 知识块
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {selectedScopeSummary
+                    ? `已绑定：${selectedScopeSummary.scope}（${selectedScopeSummary.chunk_count} 知识块）`
+                    : "可搜索并绑定已有知识库 Scope，避免手动输入出错。"}
+                </div>
               </label>
 
               <label className="block">
