@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.15`
+- Current version: `v1.13.16`
 - Updated on: `2026-04-28`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, 20+ industry presets, knowledge-base-scoped templates, conversation-to-template capture, skills discovery search, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -668,8 +668,12 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 | `id` | `str` | built-in template identifier |
 | `title` | `str` | template card title |
 | `description` | `str` | short usage summary shown in the template center |
-| `platform` | `"Xiaohongshu" \| "Xianyu" \| "TechBlog"` | publishing context label used for filtering and badges |
+| `platform` | `"小红书" \| "抖音" \| "闲鱼" \| "技术博客"` | publishing context label used for filtering and badges |
+| `category` | `"美妆护肤" \| "美食文旅" \| "职场金融" \| "数码科技" \| "电商/闲鱼" \| "教育/干货"` | industry grouping used by the template center |
+| `knowledge_base_scope` | `str \| null` | optional downstream RAG / knowledge-base scope |
 | `system_prompt` | `str` | prompt body copied into the new-thread modal |
+| `is_preset` | `bool` | whether the template is an official preset |
+| `created_at` | `str` | UTC timestamp |
 
 #### `TemplateListResponse`
 
@@ -677,6 +681,17 @@ Frontend mirror types are defined in [frontend/src/app/types.ts](/E:/omnimedia-a
 | --- | --- | --- |
 | `items` | `list[TemplateListItem]` | available built-in templates |
 | `total` | `int` | returned template count |
+
+#### `TemplateSkillSearchResponse`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `query` | `str` | normalized discovery query sent to the Skills backend |
+| `category` | `str \| null` | optional category filter |
+| `items` | `list[TemplateSkillDiscoveryItem]` | discovered reusable prompt cards |
+| `total` | `int` | returned discovery count |
+| `data_mode` | `"mock" \| "mock_fallback" \| "live_tavily"` | whether Skills discovery used mock fallback or live Tavily search |
+| `fallback_reason` | `str \| null` | optional note when live discovery falls back |
 
 ### 9.6 Artifact Contracts
 
@@ -1274,7 +1289,21 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.15
+### 16.1 Completed in v1.13.16
+
+This version adds or solidifies:
+
+1. `Template` now persists `knowledge_base_scope`, backed by Alembic migration `20260428_02_template_growth_ecosystem.py`, so template records can declare a downstream RAG/knowledge linkage without coupling template creation to runtime retrieval.
+2. `app/services/template_library.py` now seeds and runtime-syncs more than 20 preset templates across 文旅、美妆、职场、数码、闲鱼、教育等主流行业, while preserving deterministic preset ordering and idempotent upgrades for existing deployments.
+3. `GET /api/v1/media/skills/search` now exposes an authenticated Skills discovery surface powered by Tavily live search when configured, with safe mock or mock-fallback cards when no upstream search is available.
+4. `frontend/src/app/components/views/TemplatesView.tsx` now upgrades into a four-lane template ecosystem workspace with 推荐 / 行业 / 我的 / Skills filters, knowledge-base fields, searchable discovery cards, and import-to-template modal reuse.
+5. `frontend/src/app/App.tsx` and `frontend/src/app/components/ChatFeed.tsx` now support conversation-to-template capture, so the latest artifact in chat can jump directly into a prefilled template draft carrying title, description, inferred category, knowledge-base scope, and current `system_prompt`.
+6. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now cover expanded preset inventory, skills discovery, skill import, and artifact-to-template capture, while `python -m pytest` plus Playwright browser coverage remain green.
+7. `app/services/knowledge_base.py` now introduces a lightweight retrieval layer that prefers Chroma when installed, falls back to a deterministic local JSON plus hashing retriever in bare development environments, and seeds scope-specific mock knowledge for repeatable RAG verification.
+8. `Thread` plus the chat/history contracts now persist `knowledge_base_scope`, backed by Alembic migration `20260429_01_thread_knowledge_base_scope.py`, so a template-bound knowledge scope survives from first message creation through replay, follow-up turns, and thread settings updates.
+9. LangGraph `generate_draft_node` now performs a real retrieval hop for template-bound scopes before final generation, appending the retrieved knowledge context into the effective draft prompt instead of treating `knowledge_base_scope` as metadata-only decoration.
+
+### 16.2 Completed in v1.13.15
 
 This version adds or solidifies:
 
@@ -1284,7 +1313,7 @@ This version adds or solidifies:
 4. `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, and `frontend/src/app/types.ts` now own template mutation state, Chinese template contracts, and the preset/custom cascade back into the new-thread modal.
 5. `frontend/e2e/fixtures.ts`, `frontend/e2e/chat.spec.ts`, and `tests/test_chat.py` now cover preset listing, custom creation, protected deletion, batch cleanup, and browser-level template management regressions.
 
-### 16.2 Completed in v1.13.14
+### 16.3 Completed in v1.13.14
 
 This version adds or solidifies:
 
@@ -1294,7 +1323,7 @@ This version adds or solidifies:
 4. `frontend/e2e/fixtures.ts` and `frontend/e2e/chat.spec.ts` now cover template-center rendering and the template-to-modal prefill flow without requiring a live backend.
 5. `tests/test_chat.py`, `README.md`, and `DEVELOPMENT.md` now lock the built-in template API baseline and the updated verification counts.
 
-### 16.3 Completed in v1.13.13
+### 16.4 Completed in v1.13.13
 
 This version adds or solidifies:
 
@@ -1304,7 +1333,7 @@ This version adds or solidifies:
 4. `frontend/src/app/components/views/DraftsView.tsx` now adds selection state, card-level delete actions, a bulk action bar, and a clear-all affordance while preserving search, filters, detail preview, and thread handoff.
 5. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now lock backend ownership-safe draft deletion plus browser coverage for single delete, bulk delete, and clear-all flows.
 
-### 16.4 Completed in v1.13.12
+### 16.5 Completed in v1.13.12
 
 This version adds or solidifies:
 
@@ -1314,7 +1343,7 @@ This version adds or solidifies:
 4. `frontend/src/app/components/LeftSidebar.tsx` now upgrades the business-module area from static placeholders into real workspace navigation, while cleaning up the current Chinese labels and wiring "我的草稿" to the new view.
 5. `frontend/e2e/fixtures.ts`, `frontend/e2e/chat.spec.ts`, and `tests/test_chat.py` now lock the drafts aggregation API plus end-to-end browser behavior for empty-state rendering and draft-to-thread reopen flows.
 
-### 16.5 Completed in v1.13.11
+### 16.6 Completed in v1.13.11
 
 This version adds or solidifies:
 
@@ -1324,7 +1353,7 @@ This version adds or solidifies:
 4. `.env.example` now documents that `TAVILY_API_KEY` powers both LangGraph search retrieval and the market-intelligence business tool path.
 5. `README.md` and `DEVELOPMENT.md` now document the live-or-fallback Business Tool baseline so the roadmap no longer treats all market-trend tooling as purely mock data.
 
-### 16.6 Completed in v1.13.10
+### 16.7 Completed in v1.13.10
 
 This version adds or solidifies:
 
@@ -1335,7 +1364,7 @@ This version adds or solidifies:
 5. Playwright browser coverage now spans the full high-frequency authenticated workspace lifecycle except archive-specific and live-backend delivery paths, reducing regression risk across the operator journey.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded `14 passed` browser baseline and the narrowed remaining E2E gaps.
 
-### 16.7 Completed in v1.13.9
+### 16.8 Completed in v1.13.9
 
 This version adds or solidifies:
 
@@ -1346,7 +1375,7 @@ This version adds or solidifies:
 5. Playwright coverage now exercises much more of the authenticated workspace lifecycle without requiring a live backend, reducing regression risk across the highest-frequency operator flows.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded browser verification baseline and the increased E2E surface area.
 
-### 16.8 Completed in v1.13.8
+### 16.9 Completed in v1.13.8
 
 This version adds or solidifies:
 
@@ -1357,7 +1386,7 @@ This version adds or solidifies:
 5. LangGraph OCR image resolution can now consume OSS-managed image materials by converting normalized stored paths into signed delivery URLs before remote download.
 6. `tests/test_oss.py`, `tests/test_oss_client.py`, `README.md`, `.env.example`, and `DEVELOPMENT.md` now lock the signed delivery, lifecycle, promotion, and normalization baseline.
 
-### 16.9 Completed in v1.13.7
+### 16.10 Completed in v1.13.7
 
 This version adds or solidifies:
 
@@ -1368,7 +1397,7 @@ This version adds or solidifies:
 5. `pytest.ini` constrains default discovery to `tests/`, so `python -m pytest -q` no longer walks transient `uploads/` directories during collection.
 6. `tests/test_graph_tools.py`, `README.md`, and `DEVELOPMENT.md` now lock the sequential Business Tools baseline, title-only single-tool fallback, and the updated verification entrypoint.
 
-### 16.10 Completed in v1.13.6
+### 16.11 Completed in v1.13.6
 
 This version adds or solidifies:
 
@@ -1379,7 +1408,7 @@ This version adds or solidifies:
 5. `tests/test_graph_tools.py` locks the tool schema export, mock tool output, and ReAct loopback behavior without requiring live model credentials.
 6. `README.md` and `DEVELOPMENT.md` now document the Business Tools architecture and preserve the mandatory documentation-update rule.
 
-### 16.11 Completed in v1.13.5
+### 16.12 Completed in v1.13.5
 
 This version adds or solidifies:
 
@@ -1390,7 +1419,7 @@ This version adds or solidifies:
 5. frontend components now expose stable accessibility labels and `data-testid` anchors for critical auth, workspace, composer, and chat-bubble assertions.
 6. `README.md` and `DEVELOPMENT.md` now document E2E setup, commands, coverage scope, and the mandatory documentation-update rule for future changes.
 
-### 16.12 Completed in v1.13.4
+### 16.13 Completed in v1.13.4
 
 This version adds or solidifies:
 
@@ -1401,21 +1430,21 @@ This version adds or solidifies:
 5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the password-reset capability, reset-token lifetime, and global forced sign-out behavior
 6. regression coverage and frontend production build validation now explicitly include account-recovery and password-reset compatibility
 
-### 16.13 Current Non-Blocking Gaps
+### 16.14 Current Non-Blocking Gaps
 
 The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 
 1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
 3. upload cleanup now covers avatars plus local and OSS-backed material retention, OSS delivery now uses signed URLs with lifecycle-ready prefixes, lifecycle rollout can be automated, and users can inspect retention summaries, but the project still lacks CDN invalidation, multi-bucket governance, and a full admin retention console
-4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, and Tavily-backed market-intelligence Business Tools, but still lacks deeper retrieval, first-party business data sources, and richer live external business-system integrations
-5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, and artifact-side follow-up actions, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
+4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a template center that can persist knowledge-base scopes plus discover external prompt Skills, but the project still lacks user-managed document ingestion, richer first-party knowledge execution, product/CRM integrations, and broader live business-system connectivity
+5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, artifact-side follow-up actions, template skill import, and artifact-to-template capture, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
 
 ## 17. Recommended Next Steps
 
 The next engineering steps SHOULD prioritize:
 
-1. deepen LangGraph retrieval beyond the current Tavily-backed market-intelligence tool, and expand into richer live external business-system integrations such as product, competitor, CRM, or internal knowledge sources
+1. evolve the current template-bound lightweight RAG into a full ingestion pipeline with user-managed document upload, chunking, vector indexing, scope administration, and richer internal or external business-system integrations such as product, competitor, CRM, or private knowledge sources
 2. harden OSS governance further with CDN invalidation, multi-bucket policy rollout, admin retention analytics, and richer signed-download policy controls on top of the current lifecycle rollout and retention-summary baseline
 3. expand browser coverage further into archive controls, clipboard/export interactions, and live backend/OSS delivery flows beyond the current mocked regression baseline
 4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain

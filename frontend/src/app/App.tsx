@@ -28,6 +28,7 @@ import {
   deleteTemplates,
   deleteThread,
   fetchArtifacts,
+  fetchTemplateSkills,
   fetchTemplates,
   fetchSessions,
   fetchThreadMessages,
@@ -70,7 +71,10 @@ import type {
   MediaChatMaterialPayload,
   MediaChatRequestPayload,
   ResetPasswordResponse,
+  TemplateCategory,
   TemplateCreatePayload,
+  TemplatePlatform,
+  TemplateSkillDiscoveryItem,
   TemplateSummaryItem,
   ThreadItem,
   ThreadsApiResponse,
@@ -99,6 +103,11 @@ type AuthMode =
 
 type ConversationMessageDraft = Omit<ConversationMessage, "createdAt"> & {
   createdAt?: string;
+};
+
+type TemplateCreationRequest = {
+  key: number;
+  payload: TemplateCreatePayload;
 };
 
 function createConversationMessage(
@@ -443,6 +452,120 @@ function mapTemplatePlatformToWorkspace(
   return null;
 }
 
+function mapWorkspacePlatformToTemplate(platform: UiPlatform): TemplatePlatform {
+  if (platform === "douyin") {
+    return "抖音";
+  }
+  return "小红书";
+}
+
+function mapCategoryToKnowledgeBaseScope(category: TemplateCategory): string {
+  if (category === "美食文旅") {
+    return "travel_local_guides";
+  }
+  if (category === "职场金融") {
+    return "finance_recovery_playbook";
+  }
+  if (category === "数码科技") {
+    return "iot_embedded_lab";
+  }
+  if (category === "电商/闲鱼") {
+    return "secondhand_trade_playbook";
+  }
+  if (category === "教育/干货") {
+    return "education_score_boost";
+  }
+  return "beauty_skin_repair_notes";
+}
+
+function summarizeArtifactForTemplate(artifact: ArtifactPayload): string {
+  if (artifact.artifact_type === "content_draft") {
+    return artifact.body.trim().slice(0, 180);
+  }
+
+  if (artifact.artifact_type === "topic_list") {
+    return artifact.topics
+      .slice(0, 3)
+      .map((topic) => `${topic.title}：${topic.angle}`)
+      .join("；");
+  }
+
+  if (artifact.artifact_type === "hot_post_analysis") {
+    return artifact.analysis_dimensions
+      .slice(0, 3)
+      .map((dimension) => `${dimension.dimension}：${dimension.insight}`)
+      .join("；");
+  }
+
+  return artifact.suggestions
+    .slice(0, 3)
+    .map((suggestion) => `${suggestion.comment_type}：${suggestion.reply}`)
+    .join("；");
+}
+
+function inferTemplateCategoryFromContext(params: {
+  artifact: ArtifactPayload;
+  taskType: UiTaskType;
+  systemPrompt: string;
+  threadTitle: string;
+}): TemplateCategory {
+  const context = [
+    params.systemPrompt,
+    params.threadTitle,
+    params.artifact.title,
+    summarizeArtifactForTemplate(params.artifact),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  if (["文旅", "探店", "citywalk", "周末", "路线", "旅行", "本地生活", "出片"].some((item) => context.includes(item.toLowerCase()))) {
+    return "美食文旅";
+  }
+  if (["闲鱼", "二手", "回血", "断舍离", "sku"].some((item) => context.includes(item.toLowerCase()))) {
+    return "电商/闲鱼";
+  }
+  if (["stm32", "iot", "嵌入式", "开发板", "智能家居", "数码", "测评"].some((item) => context.includes(item.toLowerCase()))) {
+    return "数码科技";
+  }
+  if (["教辅", "提分", "高考", "逆袭", "家长", "学习", "科普", "医疗", "法律"].some((item) => context.includes(item.toLowerCase()))) {
+    return "教育/干货";
+  }
+  if (["理财", "预算", "职场", "面试", "涨薪", "合同", "复盘"].some((item) => context.includes(item.toLowerCase()))) {
+    return "职场金融";
+  }
+  if (["护肤", "美妆", "熬夜", "健身", "成分", "平替", "母婴"].some((item) => context.includes(item.toLowerCase()))) {
+    return "美妆护肤";
+  }
+
+  if (params.taskType === "hot_post_analysis") {
+    return "数码科技";
+  }
+  return "美食文旅";
+}
+
+function buildTemplatePrefillFromArtifact(params: {
+  artifact: ArtifactPayload;
+  platform: UiPlatform;
+  taskType: UiTaskType;
+  systemPrompt: string;
+  threadTitle: string;
+}): TemplateCreatePayload {
+  const category = inferTemplateCategoryFromContext(params);
+  const summary = summarizeArtifactForTemplate(params.artifact);
+  const promptBody = params.systemPrompt.trim()
+    ? `${params.systemPrompt.trim()}\n\n请延续以下已验证内容方向：\n- 代表产物：${params.artifact.title}\n- 内容摘要：${summary}`
+    : `你是一名擅长输出 ${category} 内容的专业编辑。\n请参考以下已验证方向继续生成稳定风格内容：\n- 代表产物：${params.artifact.title}\n- 内容摘要：${summary}\n输出时要兼顾目标受众、结构感、转化动作与风险提醒。`;
+
+  return {
+    title: params.artifact.title || params.threadTitle || "未命名模板",
+    description: `基于会话「${params.threadTitle || "当前线程"}」沉淀的可复用模板：${summary.slice(0, 80)}`,
+    platform: mapWorkspacePlatformToTemplate(params.platform),
+    category,
+    knowledge_base_scope: mapCategoryToKnowledgeBaseScope(category),
+    system_prompt: promptBody,
+  };
+}
+
 function NewThreadModal(props: {
   open: boolean;
   title: string;
@@ -588,17 +711,20 @@ function App() {
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [drafts, setDrafts] = useState<DraftSummaryItem[]>([]);
   const [templates, setTemplates] = useState<TemplateSummaryItem[]>([]);
+  const [templateSkills, setTemplateSkills] = useState<TemplateSkillDiscoveryItem[]>([]);
   const [uploadedMaterials, setUploadedMaterials] = useState<UploadedMaterial[]>([]);
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
   const [statusText, setStatusText] = useState("等待新的内容任务");
   const [activeThreadTitle, setActiveThreadTitle] = useState("New thread");
   const [activeThreadId, setActiveThreadId] = useState("thread-new");
   const [activeSystemPrompt, setActiveSystemPrompt] = useState("");
+  const [activeKnowledgeBaseScope, setActiveKnowledgeBaseScope] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
   const [isLoadingThreadHistory, setIsLoadingThreadHistory] = useState(false);
   const [isLoadingDrafts, setIsLoadingDrafts] = useState(false);
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
+  const [isLoadingTemplateSkills, setIsLoadingTemplateSkills] = useState(false);
   const [isMutatingDrafts, setIsMutatingDrafts] = useState(false);
   const [isMutatingTemplates, setIsMutatingTemplates] = useState(false);
   const [mutatingDraftMessageId, setMutatingDraftMessageId] = useState<string | null>(null);
@@ -607,7 +733,10 @@ function App() {
   const [isNewThreadModalOpen, setIsNewThreadModalOpen] = useState(false);
   const [draftThreadTitle, setDraftThreadTitle] = useState("");
   const [draftSystemPrompt, setDraftSystemPrompt] = useState("");
+  const [draftKnowledgeBaseScope, setDraftKnowledgeBaseScope] = useState("");
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateSummaryItem | null>(null);
+  const [templateCreationRequest, setTemplateCreationRequest] =
+    useState<TemplateCreationRequest | null>(null);
   const [isThreadSettingsOpen, setIsThreadSettingsOpen] = useState(false);
   const [isSavingThreadSettings, setIsSavingThreadSettings] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
@@ -721,45 +850,6 @@ function App() {
     [uploadedMaterials],
   );
 
-  const artifactActions: ArtifactAction[] = useMemo(
-    () => [
-      {
-        id: "continue-optimization",
-        label: "继续优化",
-        variant: "primary",
-        onClick: () =>
-          setMessage(
-            "请继续优化刚才的方案，给我 3 个更强版本，并补充更明确的转化动作。",
-          ),
-      },
-      {
-        id: "rewrite-other-platform",
-        label: "改写到另一平台",
-        onClick: () => {
-          setPlatform((current) => (current === "douyin" ? "xiaohongshu" : "douyin"));
-          setMessage(
-            "请基于当前结果改写成另一平台版本，保留核心观点但调整表达节奏。",
-          );
-        },
-      },
-      {
-        id: "generate-three-versions",
-        label: "生成 3 个版本",
-        onClick: () =>
-          setMessage("请在当前方向上再生成 3 个不同风格版本。"),
-      },
-      {
-        id: "export-markdown",
-        label: "导出 Markdown",
-        onClick: () =>
-          void navigator.clipboard.writeText(
-            "MediaPilot export preview\n\nThe structured artifact can be exported to Markdown in the next iteration.",
-          ),
-      },
-    ],
-    [],
-  );
-
   const isDraftThread = activeThreadId === "thread-new";
 
   const appendSystemMessage = (messagePatch: ConversationMessageDraft) => {
@@ -792,7 +882,11 @@ function App() {
     });
   };
 
-  const resetWorkspace = (nextTitle = "New thread", nextSystemPrompt = "") => {
+  const resetWorkspace = (
+    nextTitle = "New thread",
+    nextSystemPrompt = "",
+    nextKnowledgeBaseScope = "",
+  ) => {
     setMessages([]);
     setArtifact(null);
     replaceUploadedMaterials([]);
@@ -800,6 +894,7 @@ function App() {
     setActiveThreadId("thread-new");
     setActiveThreadTitle(nextTitle);
     setActiveSystemPrompt(nextSystemPrompt);
+    setActiveKnowledgeBaseScope(nextKnowledgeBaseScope);
   };
 
   const handleUnauthorized = (
@@ -814,10 +909,14 @@ function App() {
     setAuthSessions([]);
     setDrafts([]);
     setTemplates([]);
+    setTemplateSkills([]);
     setIsLoadingDrafts(false);
     setIsLoadingTemplates(false);
+    setIsLoadingTemplateSkills(false);
     setIsMutatingDrafts(false);
+    setIsMutatingTemplates(false);
     setMutatingDraftMessageId(null);
+    setMutatingTemplateId(null);
     setThreads([]);
     setMessages([]);
     replaceUploadedMaterials([]);
@@ -830,6 +929,7 @@ function App() {
     setAuthConfirmPassword("");
     setAuthResetToken("");
     setSelectedTemplate(null);
+    setTemplateCreationRequest(null);
     setIsProfileModalOpen(false);
     setIsThreadSettingsOpen(false);
     setRevokingSessionId(null);
@@ -905,6 +1005,7 @@ function App() {
       replaceUploadedMaterials([]);
       setActiveThreadTitle(payload.title || thread.title);
       setActiveSystemPrompt(payload.system_prompt || "");
+      setActiveKnowledgeBaseScope(payload.knowledge_base_scope || "");
       setStatusText("历史会话已载入");
     } catch (error) {
       if (isUnauthorizedError(error)) {
@@ -1047,6 +1148,56 @@ function App() {
       });
     } finally {
       setIsLoadingTemplates(false);
+    }
+  };
+
+  const handleSearchTemplateSkills = async (
+    keyword: string,
+    category?: TemplateCategory,
+  ) => {
+    setTemplateSkills([]);
+    setIsLoadingTemplateSkills(true);
+    setStatusText("正在全网检索并提炼 Skills 灵感…");
+
+    try {
+      const payload = await fetchTemplateSkills({ q: keyword, ...(category ? { category } : {}) });
+      const discoveredSkills = (payload.templates ?? payload.items ?? []).map(
+        (skill, index) => ({
+          ...skill,
+          id: skill.id?.trim() ? skill.id : `cloud-${Date.now()}-${index}`,
+          isCloud: true,
+        }),
+      );
+      console.log("解包处理后的云端数组:", discoveredSkills);
+      console.log("Skills 最终写入界面的数组:", discoveredSkills);
+      setTemplateSkills(discoveredSkills);
+      setStatusText(
+        payload.total > 0
+          ? `已发现 ${payload.total} 条 Skills 灵感`
+          : "暂未发现匹配的 Skills 灵感",
+      );
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "搜索 Skills 灵感失败，请稍后重试。";
+
+      setStatusText("Skills 灵感搜索失败");
+      appendSystemMessage({
+        id: createId("template-skills-search-error"),
+        role: "error",
+        title: "Skills 灵感搜索失败",
+        content: errorMessage,
+      });
+    } finally {
+      setIsLoadingTemplateSkills(false);
     }
   };
 
@@ -1514,10 +1665,40 @@ function App() {
     }
   };
 
+  const openTemplateLibraryWithPrefill = (payload: TemplateCreatePayload) => {
+    setActiveView("templates");
+    setLeftSidebarOpen(false);
+    setRightPanelOpen(false);
+    setSelectedTemplate(null);
+    setTemplateCreationRequest({
+      key: Date.now(),
+      payload,
+    });
+  };
+
+  const handleSaveArtifactAsTemplate = () => {
+    if (!artifact) {
+      return;
+    }
+
+    const prefill = buildTemplatePrefillFromArtifact({
+      artifact,
+      platform,
+      taskType,
+      systemPrompt: activeSystemPrompt,
+      threadTitle: activeThreadTitle,
+    });
+
+    openTemplateLibraryWithPrefill(prefill);
+    setStatusText(`已为当前产物生成模板草稿：${prefill.title}`);
+  };
+
   const openNewThreadModal = () => {
     setSelectedTemplate(null);
+    setTemplateCreationRequest(null);
     setDraftThreadTitle("");
     setDraftSystemPrompt("");
+    setDraftKnowledgeBaseScope("");
     setIsNewThreadModalOpen(true);
   };
 
@@ -1525,18 +1706,21 @@ function App() {
     setSelectedTemplate(template);
     setDraftThreadTitle(template.title);
     setDraftSystemPrompt(template.system_prompt);
+    setDraftKnowledgeBaseScope(template.knowledge_base_scope ?? "");
     setIsNewThreadModalOpen(true);
   };
 
   const closeNewThreadModal = () => {
     setIsNewThreadModalOpen(false);
     setSelectedTemplate(null);
+    setDraftKnowledgeBaseScope("");
   };
 
   const handleUseTemplate = (template: TemplateSummaryItem) => {
     setActiveView("chat");
     setLeftSidebarOpen(false);
     setRightPanelOpen(true);
+    setTemplateCreationRequest(null);
     setStatusText(`已载入模板：${template.title}`);
 
     const mappedPlatform = mapTemplatePlatformToWorkspace(template.platform);
@@ -1547,16 +1731,69 @@ function App() {
     openTemplateNewThreadModal(template);
   };
 
+  const artifactActions: ArtifactAction[] = useMemo(() => {
+    const actions: ArtifactAction[] = [
+      {
+        id: "continue-optimization",
+        label: "继续优化",
+        variant: "primary",
+        onClick: () =>
+          setMessage(
+            "请继续优化刚才的方案，给我 3 个更强版本，并补充更明确的转化动作。",
+          ),
+      },
+      {
+        id: "rewrite-other-platform",
+        label: "改写到另一平台",
+        onClick: () => {
+          setPlatform((current) => (current === "douyin" ? "xiaohongshu" : "douyin"));
+          setMessage(
+            "请基于当前结果改写成另一平台版本，保留核心观点但调整表达节奏。",
+          );
+        },
+      },
+      {
+        id: "generate-three-versions",
+        label: "生成 3 个版本",
+        onClick: () =>
+          setMessage("请在当前方向上再生成 3 个不同风格版本。"),
+      },
+      {
+        id: "export-markdown",
+        label: "导出 Markdown",
+        onClick: () =>
+          void navigator.clipboard.writeText(
+            "MediaPilot export preview\n\nThe structured artifact can be exported to Markdown in the next iteration.",
+          ),
+      },
+    ];
+
+    if (artifact) {
+      actions.unshift({
+        id: "save-as-template",
+        label: "存为模板",
+        onClick: handleSaveArtifactAsTemplate,
+      });
+    }
+
+    return actions;
+  }, [artifact, handleSaveArtifactAsTemplate]);
+
   const handleConfirmNewThread = () => {
     const normalizedTitle = draftThreadTitle.trim() || "New thread";
     const normalizedSystemPrompt = draftSystemPrompt.trim();
+    const normalizedKnowledgeBaseScope = draftKnowledgeBaseScope.trim();
 
     abortRef.current?.abort();
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
     setActiveView("chat");
-    resetWorkspace(normalizedTitle, normalizedSystemPrompt);
+    resetWorkspace(
+      normalizedTitle,
+      normalizedSystemPrompt,
+      normalizedKnowledgeBaseScope,
+    );
     upsertThreadInList({
       id: "thread-new",
       title: normalizedTitle,
@@ -1812,6 +2049,9 @@ function App() {
       message: trimmedMessage,
       materials: requestMaterials,
       ...(activeSystemPrompt.trim() ? { system_prompt: activeSystemPrompt.trim() } : {}),
+      ...(activeKnowledgeBaseScope.trim()
+        ? { knowledge_base_scope: activeKnowledgeBaseScope.trim() }
+        : {}),
       ...(nextThreadTitle.trim() ? { thread_title: nextThreadTitle.trim() } : {}),
     };
 
@@ -2025,8 +2265,10 @@ function App() {
       setAuthSessions([]);
       setDrafts([]);
       setTemplates([]);
+      setTemplateSkills([]);
       setIsLoadingDrafts(false);
       setIsLoadingTemplates(false);
+      setIsLoadingTemplateSkills(false);
       setIsMutatingDrafts(false);
       setIsMutatingTemplates(false);
       setMutatingDraftMessageId(null);
@@ -2037,6 +2279,7 @@ function App() {
       setAuthResetToken("");
       setAuthSuccess("");
       setSelectedTemplate(null);
+      setTemplateCreationRequest(null);
       setThreads([]);
       resetWorkspace();
       setIsProfileModalOpen(false);
@@ -2197,7 +2440,7 @@ function App() {
             isDesktopCollapsed={isLeftSidebarCollapsed}
             isLoading={isLoadingThreads}
             mutatingThreadId={mutatingThreadId}
-            templateCount={templates.length > 0 ? templates.length : 6}
+            templateCount={templates.length > 0 ? templates.length : undefined}
             onCreateThread={openNewThreadModal}
             onDeleteThread={(thread) => void handleDeleteThread(thread)}
             onLogout={() => void handleLogout()}
@@ -2342,11 +2585,15 @@ function App() {
                 >
                   <div className="flex-1 overflow-y-auto px-4 py-6 lg:px-6">
                     <ChatFeed
+                      artifact={artifact}
                       currentUser={currentUser}
                       endRef={chatEndRef}
                       isLoadingHistory={isLoadingThreadHistory}
                       isStreaming={isStreaming}
                       messages={messages}
+                      onSaveArtifactAsTemplate={
+                        artifact ? handleSaveArtifactAsTemplate : undefined
+                      }
                     />
                   </div>
 
@@ -2381,14 +2628,21 @@ function App() {
               />
             ) : activeView === "templates" ? (
               <TemplatesView
+                creationRequest={templateCreationRequest}
                 isLoading={isLoadingTemplates}
+                isLoadingSkills={isLoadingTemplateSkills}
                 isMutating={isMutatingTemplates}
                 mutatingTemplateId={mutatingTemplateId}
+                onCreationRequestHandled={() => setTemplateCreationRequest(null)}
                 onCreateTemplate={(payload) => handleCreateTemplate(payload)}
                 onDeleteTemplate={(template) => handleDeleteTemplate(template)}
                 onDeleteTemplates={(templateIds) => handleDeleteTemplates(templateIds)}
+                onSearchSkills={(keyword, category) =>
+                  handleSearchTemplateSkills(keyword, category)
+                }
                 onUseTemplate={handleUseTemplate}
                 selectedTemplateId={selectedTemplate?.id ?? null}
+                skills={templateSkills}
                 templates={templates}
               />
             ) : (

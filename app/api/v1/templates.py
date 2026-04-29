@@ -1,23 +1,28 @@
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.db.models import Template, User
 from app.models.schemas import (
+    TemplateCategory,
     TemplateCreateRequest,
     TemplateDeleteBatchRequest,
     TemplateDeleteResponse,
     TemplateListItem,
     TemplateListResponse,
+    TemplateSkillDiscoveryItem,
+    TemplateSkillSearchResponse,
 )
 from app.services.auth import get_current_user
+from app.services.knowledge_base import normalize_knowledge_base_scope
 from app.services.template_library import (
     PRESET_TEMPLATE_ORDER,
     ensure_preset_templates,
 )
+from app.services.tools import search_prompt_skills
 
 router = APIRouter(prefix="/api/v1/media", tags=["media-templates"])
 
@@ -29,6 +34,7 @@ def _serialize_template(template: Template) -> TemplateListItem:
         description=template.description,
         platform=template.platform,
         category=template.category,
+        knowledge_base_scope=template.knowledge_base_scope,
         system_prompt=template.system_prompt,
         is_preset=template.is_preset,
         created_at=template.created_at,
@@ -101,6 +107,7 @@ async def create_template(
         description=payload.description.strip(),
         platform=payload.platform,
         category=payload.category,
+        knowledge_base_scope=normalize_knowledge_base_scope(payload.knowledge_base_scope),
         system_prompt=payload.system_prompt.strip(),
         is_preset=False,
     )
@@ -147,12 +154,10 @@ async def delete_templates(
     if len(templates) != len(requested_ids):
         raise HTTPException(status_code=404, detail="部分模板不存在或已被删除。")
 
-    preset_ids = [item.id for item in templates if item.is_preset]
-    if preset_ids:
+    if any(item.is_preset for item in templates):
         raise HTTPException(status_code=403, detail="系统预置模板不支持删除。")
 
-    foreign_templates = [item.id for item in templates if item.user_id != current_user.id]
-    if foreign_templates:
+    if any(item.user_id != current_user.id for item in templates):
         raise HTTPException(status_code=404, detail="部分模板不存在或已被删除。")
 
     for template in templates:
@@ -162,4 +167,30 @@ async def delete_templates(
     return TemplateDeleteResponse(
         deleted_count=len(requested_ids),
         deleted_ids=requested_ids,
+    )
+
+
+@router.get("/skills/search", response_model=TemplateSkillSearchResponse)
+async def search_skills(
+    q: str = Query(default="爆款模板", min_length=1, max_length=120),
+    category: TemplateCategory | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+) -> TemplateSkillSearchResponse:
+    _ = current_user
+    result = search_prompt_skills(
+        keyword=q,
+        category=category.value if category is not None else None,
+    )
+    items = [
+        TemplateSkillDiscoveryItem.model_validate(item)
+        for item in result["items"]
+    ]
+    return TemplateSkillSearchResponse(
+        query=result["query"],
+        category=category,
+        items=items,
+        templates=items,
+        total=result.get("total", len(items)),
+        data_mode=result["data_mode"],
+        fallback_reason=result.get("fallback_reason"),
     )

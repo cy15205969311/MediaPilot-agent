@@ -6,6 +6,8 @@ import type {
   TemplateCreatePayload,
   TemplateDeleteApiResponse,
   TemplateDeletePayload,
+  TemplateCategory,
+  TemplateSkillsApiResponse,
   DraftsDeleteApiResponse,
   DraftsDeletePayload,
   DraftsApiResponse,
@@ -672,6 +674,128 @@ export async function fetchTemplates(): Promise<TemplatesApiResponse> {
   );
 
   return (await response.json()) as TemplatesApiResponse;
+}
+
+function extractTemplateSkillsArray(
+  value: unknown,
+): TemplateSkillsApiResponse["items"] {
+  if (Array.isArray(value)) {
+    return value as TemplateSkillsApiResponse["items"];
+  }
+
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+
+  if (Array.isArray(record.templates)) {
+    return record.templates as TemplateSkillsApiResponse["items"];
+  }
+
+  if (record.data && typeof record.data === "object") {
+    const nestedTemplates = extractTemplateSkillsArray(record.data);
+    if (nestedTemplates.length > 0) {
+      return nestedTemplates;
+    }
+  }
+
+  if (Array.isArray(record.items)) {
+    return record.items as TemplateSkillsApiResponse["items"];
+  }
+
+  if (Array.isArray(record.data)) {
+    return record.data as TemplateSkillsApiResponse["items"];
+  }
+
+  for (const nestedValue of Object.values(record)) {
+    if (!nestedValue || typeof nestedValue !== "object") {
+      continue;
+    }
+
+    const nestedTemplates = extractTemplateSkillsArray(nestedValue);
+    if (nestedTemplates.length > 0) {
+      return nestedTemplates;
+    }
+  }
+
+  return [];
+}
+
+export async function fetchTemplateSkills(params: {
+  q: string;
+  category?: TemplateCategory;
+}): Promise<TemplateSkillsApiResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("q", params.q);
+  if (params.category) {
+    searchParams.set("category", params.category);
+  }
+
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/skills/search?${searchParams.toString()}`,
+    {
+      method: "GET",
+    },
+    { timeoutMs: 20000 },
+  );
+
+  const rawPayload = (await response.json()) as
+    | TemplateSkillsApiResponse
+    | {
+        templates?: TemplateSkillsApiResponse["items"];
+        items?: TemplateSkillsApiResponse["items"];
+        data?: {
+          templates?: TemplateSkillsApiResponse["items"];
+          items?: TemplateSkillsApiResponse["items"];
+          data?: TemplateSkillsApiResponse["items"];
+        };
+      }
+    | TemplateSkillsApiResponse["items"];
+  const payload = JSON.parse(JSON.stringify(rawPayload)) as typeof rawPayload;
+
+  console.log("前端收到的云端原始数据:", payload);
+  const extractedItems = extractTemplateSkillsArray(payload);
+
+  console.log("解包后的数组:", extractedItems);
+
+  if (Array.isArray(payload)) {
+    return {
+      query: params.q,
+      category: params.category ?? null,
+      items: extractedItems,
+      templates: extractedItems,
+      total: extractedItems.length,
+      data_mode: "mock",
+      fallback_reason: null,
+    };
+  }
+
+  return {
+    query: "query" in payload && typeof payload.query === "string" ? payload.query : params.q,
+    category:
+      "category" in payload
+        ? (payload.category as TemplateSkillsApiResponse["category"])
+        : (params.category ?? null),
+    items: extractedItems,
+    templates: extractedItems,
+    total:
+      "total" in payload && typeof payload.total === "number"
+        ? payload.total
+        : extractedItems.length,
+    data_mode:
+      "data_mode" in payload &&
+      (payload.data_mode === "mock" ||
+        payload.data_mode === "mock_fallback" ||
+        payload.data_mode === "live_tavily" ||
+        payload.data_mode === "llm_fallback")
+        ? payload.data_mode
+        : "mock",
+    fallback_reason:
+      "fallback_reason" in payload && typeof payload.fallback_reason === "string"
+        ? payload.fallback_reason
+        : null,
+  };
 }
 
 export async function createTemplate(

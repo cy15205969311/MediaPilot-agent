@@ -11,6 +11,7 @@ from app.db.models import Material, Message, Thread, User
 from app.models.schemas import MediaChatRequest
 from app.services.agent import media_agent_workflow
 from app.services.auth import get_current_user
+from app.services.knowledge_base import normalize_knowledge_base_scope
 from app.services.persistence import (
     bind_material_uploads_to_thread,
     derive_thread_title,
@@ -49,6 +50,7 @@ def persist_chat_request(
             user_id=current_user.id,
             title=(request.thread_title or "").strip() or derive_thread_title(request.message),
             system_prompt=(request.system_prompt or "").strip(),
+            knowledge_base_scope=normalize_knowledge_base_scope(request.knowledge_base_scope),
         )
         db.add(thread)
     else:
@@ -60,6 +62,10 @@ def persist_chat_request(
 
         if request.system_prompt is not None:
             thread.system_prompt = request.system_prompt.strip()
+        if request.knowledge_base_scope is not None:
+            thread.knowledge_base_scope = normalize_knowledge_base_scope(
+                request.knowledge_base_scope,
+            )
 
         thread.touch()
 

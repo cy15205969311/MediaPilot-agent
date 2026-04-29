@@ -8,6 +8,7 @@ import {
   createMockDraftSummary,
   createMockHistoryMessage,
   createMockSession,
+  createMockTemplateSkill,
   createMockTemplate,
   createMockThreadMessages,
   createMockThreadSummary,
@@ -206,7 +207,187 @@ test("creates a custom template and batch deletes selected templates", async ({
 
   await page.getByTestId("template-delete-selected").click();
   await expect(customCards).toHaveCount(0);
+  await page.getByTestId("template-collection-recommended").click();
   await expect(page.getByTestId("template-card-template-preset-travel-hotflow")).toBeVisible();
+});
+
+test("saves the latest artifact into a prefilled template draft", async ({ page }) => {
+  const threadId = "thread-save-template";
+  const artifact = {
+    artifact_type: "content_draft" as const,
+    title: "福州周边周末探店模板",
+    title_candidates: ["福州周边轻度假", "周末半日探店路线"],
+    body: "正文围绕真实路线、预算感、出片机位、拍照氛围与自然 CTA 展开。",
+    platform_cta: "评论区回复“福州”领取路线清单。",
+  };
+
+  await openWorkspace(page, {
+    threads: [
+      createMockThreadSummary({
+        id: threadId,
+        title: "福州周边周末探店",
+        latest_message_excerpt: artifact.body,
+      }),
+    ],
+    threadMessagesById: {
+      [threadId]: createMockThreadMessages({
+        thread_id: threadId,
+        title: "福州周边周末探店",
+        system_prompt: "你是一名擅长福州本地文旅内容的小红书编辑。",
+        messages: [
+          createMockHistoryMessage({
+            id: "save-template-user-1",
+            thread_id: threadId,
+            role: "user",
+            content: "帮我写一篇福州周边周末探店笔记。",
+          }),
+          createMockHistoryMessage({
+            id: "save-template-assistant-1",
+            thread_id: threadId,
+            role: "assistant",
+            content: "我先给你整理一份路线和正文骨架。",
+          }),
+          createMockHistoryMessage({
+            id: "save-template-artifact-1",
+            thread_id: threadId,
+            role: "assistant",
+            message_type: "artifact",
+            content: artifact.title,
+            artifact,
+          }),
+        ],
+      }),
+    },
+  });
+
+  await expect(page.getByTestId("chat-save-template")).toBeVisible();
+  await page.getByTestId("chat-save-template").click();
+
+  await expect(page.getByTestId("templates-view")).toBeVisible();
+  await expect(page.getByTestId("template-create-modal")).toBeVisible();
+  await expect(page.getByTestId("template-create-title")).toHaveValue(artifact.title);
+  await expect(page.getByTestId("template-create-description")).toHaveValue(
+    /福州周边周末探店/,
+  );
+  await expect(page.getByTestId("template-create-system-prompt")).toContainText("福州本地文旅内容");
+  await expect(page.getByTestId("template-create-knowledge-base")).toHaveValue(
+    "travel_local_guides",
+  );
+});
+
+test("saves a discovered skill card into my templates after cloud search", async ({
+  page,
+}) => {
+  const skill = createMockTemplateSkill({
+    id: "skill-tech-lab-markdown",
+    title: "实验室复盘 Markdown",
+    description: "适合 STM32 / IoT / 嵌入式教程的工程化模板。",
+    platform: "技术博客",
+    category: "数码科技",
+    knowledge_base_scope: "iot_embedded_lab",
+    system_prompt:
+      "你是一名习惯写实验记录和工程复盘的嵌入式工程师，请围绕日志、异常、定位和结论组织内容。",
+  });
+
+  await openWorkspace(page, {
+    templateSkills: [skill],
+    responseDelayMsByPath: {
+      "/api/v1/media/skills/search": 800,
+    },
+  });
+
+  await page.getByTestId("sidebar-shortcut-templates").click();
+  await page.getByTestId("template-collection-skills").click();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeVisible();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeHidden();
+  await expect(page.getByTestId(`skill-card-${skill.id}`)).toBeVisible();
+
+  await page.getByTestId("template-skills-search-input").fill("STM32");
+  await page.getByTestId("template-skills-search-button").click();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeVisible();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeHidden();
+  await expect(page.getByTestId(`skill-card-${skill.id}`)).toBeVisible();
+
+  await page.getByTestId(`skill-save-${skill.id}`).click();
+  await expect(page.getByTestId(`skill-save-${skill.id}`)).toContainText(
+    "已保存到我的模板",
+  );
+
+  await page.getByTestId("template-collection-mine").click();
+  const savedTemplateCard = page
+    .locator('[data-testid^="template-card-template-user-"]')
+    .filter({ hasText: skill.title });
+  await expect(savedTemplateCard).toHaveCount(1);
+});
+
+test("keeps cloud skill cards visible when the local category tab does not match", async ({
+  page,
+}) => {
+  const skill = createMockTemplateSkill({
+    id: "skill-cloud-visibility-mismatch",
+    title: "云端结构化科技 Prompt",
+    platform: "技术博客",
+    category: "数码科技",
+    knowledge_base_scope: "iot_embedded_lab",
+  });
+
+  await openWorkspace(page, {
+    templateSkills: [skill],
+    responseDelayMsByPath: {
+      "/api/v1/media/skills/search": 800,
+    },
+  });
+
+  await page.getByTestId("sidebar-shortcut-templates").click();
+  await page.getByTestId("template-collection-skills").click();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeVisible();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeHidden();
+
+  await page.locator('[data-testid^="template-tab-"]').nth(1).click();
+  await page.getByTestId("template-skills-search-input").fill("科技 Prompt");
+  await page.getByTestId("template-skills-search-button").click();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeVisible();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeHidden();
+
+  await expect(page.getByTestId(`skill-card-${skill.id}`)).toBeVisible();
+  await expect(page.getByTestId("template-skills-empty-state")).toBeHidden();
+});
+
+test("keeps cloud skill cards visible even when the search query is not in the title", async ({
+  page,
+}) => {
+  const skill = createMockTemplateSkill({
+    id: "skill-cloud-search-query-mismatch",
+    title: "RTF 视觉冲击型美妆 AI 生成框架",
+    description: "标题里故意不出现用户原始搜索词，用于验证前端不会本地误杀云端结果。",
+    platform: "小红书",
+    category: "美妆护肤",
+    knowledge_base_scope: "beauty_skin_repair_notes",
+  });
+
+  await openWorkspace(page, {
+    templateSkills: [skill],
+    responseDelayMsByPath: {
+      "/api/v1/media/skills/search": 800,
+    },
+  });
+
+  await page.getByTestId("sidebar-shortcut-templates").click();
+  await page.getByTestId("template-collection-skills").click();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeVisible();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeHidden();
+
+  await page.getByTestId("template-tab-美妆护肤").click();
+  await page.getByTestId("template-skills-search-input").fill("法拍房");
+  await page.getByTestId("template-skills-search-button").click();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeVisible();
+  await expect(page.getByTestId("template-skills-loading-state")).toBeHidden();
+
+  await expect(page.getByTestId(`skill-card-${skill.id}`)).toBeVisible();
+  await expect(page.getByTestId(`skill-card-${skill.id}`)).toContainText(
+    "RTF 视觉冲击型美妆 AI 生成框架",
+  );
+  await expect(page.getByTestId("template-skills-empty-state")).toBeHidden();
 });
 
 test("opens a saved draft preview and jumps back into its conversation", async ({

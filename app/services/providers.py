@@ -84,6 +84,11 @@ class _OpenAIToolBindingAdapter:
         tool_specs = [convert_to_openai_tool(tool) for tool in tools]
         temperature = kwargs.get("temperature", 0)
 
+        def _invoke_sync(_: Any) -> AIMessage:
+            raise RuntimeError(
+                "This tool-bound chat model only supports async invocation. Use `ainvoke()`.",
+            )
+
         async def _invoke(messages_input: Any) -> AIMessage:
             messages = _coerce_tool_binding_messages(messages_input)
             response = await self._client_factory().chat.completions.create(
@@ -96,7 +101,11 @@ class _OpenAIToolBindingAdapter:
             )
             return _normalize_tool_binding_response_message(response.choices[0].message)
 
-        return RunnableLambda(afunc=_invoke, name=f"bound_tools_{self._model}")
+        return RunnableLambda(
+            _invoke_sync,
+            afunc=_invoke,
+            name=f"bound_tools_{self._model}",
+        )
 
 
 def _coerce_tool_binding_messages(messages_input: Any) -> list[BaseMessage]:

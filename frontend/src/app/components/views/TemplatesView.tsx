@@ -2,8 +2,13 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import {
   BadgePlus,
+  BookOpen,
+  Bot,
+  Cloud,
   Cpu,
   FileText,
+  Link2,
+  Loader2,
   MapPinned,
   RefreshCw,
   Search,
@@ -18,24 +23,57 @@ import type {
   TemplateCategory,
   TemplateCreatePayload,
   TemplatePlatform,
+  TemplateSkillDiscoveryItem,
   TemplateSummaryItem,
 } from "../../types";
 
 type TemplateCategoryFilter = "全部" | TemplateCategory;
+type TemplateCollection = "recommended" | "industry" | "mine" | "skills";
+
+type TemplateCreationRequest = {
+  key: number;
+  payload: TemplateCreatePayload;
+};
 
 type TemplatesViewProps = {
   templates: TemplateSummaryItem[];
+  skills: TemplateSkillDiscoveryItem[];
   isLoading: boolean;
+  isLoadingSkills: boolean;
   isMutating: boolean;
   mutatingTemplateId: string | null;
   selectedTemplateId: string | null;
+  creationRequest: TemplateCreationRequest | null;
+  onCreationRequestHandled: () => void;
   onUseTemplate: (template: TemplateSummaryItem) => void;
   onCreateTemplate: (payload: TemplateCreatePayload) => Promise<TemplateSummaryItem | null>;
   onDeleteTemplate: (template: TemplateSummaryItem) => Promise<boolean>;
   onDeleteTemplates: (templateIds: string[]) => Promise<boolean>;
+  onSearchSkills: (
+    keyword: string,
+    category?: TemplateCategory,
+  ) => Promise<void> | void;
 };
 
-type TemplateFormState = TemplateCreatePayload;
+type TemplateFormState = {
+  title: string;
+  description: string;
+  platform: TemplatePlatform;
+  category: TemplateCategory;
+  knowledge_base_scope: string;
+  system_prompt: string;
+};
+
+const collectionTabs: Array<{
+  id: TemplateCollection;
+  label: string;
+  description: string;
+}> = [
+  { id: "recommended", label: "推荐", description: "系统预置精选模板" },
+  { id: "industry", label: "行业", description: "按行业检索全部模板" },
+  { id: "mine", label: "我的", description: "管理个人沉淀模板" },
+  { id: "skills", label: "Skills", description: "探索最新 Prompt 灵感" },
+];
 
 const categoryTabs: Array<{ id: TemplateCategoryFilter; label: string }> = [
   { id: "全部", label: "全部" },
@@ -62,8 +100,20 @@ const initialFormState: TemplateFormState = {
   description: "",
   platform: "小红书",
   category: "美食文旅",
+  knowledge_base_scope: "",
   system_prompt: "",
 };
+
+function toFormState(payload?: Partial<TemplateCreatePayload> | null): TemplateFormState {
+  return {
+    title: payload?.title ?? "",
+    description: payload?.description ?? "",
+    platform: payload?.platform ?? "小红书",
+    category: payload?.category ?? "美食文旅",
+    knowledge_base_scope: payload?.knowledge_base_scope ?? "",
+    system_prompt: payload?.system_prompt ?? "",
+  };
+}
 
 function PlatformGlyph(props: { platform: TemplatePlatform }) {
   const { platform } = props;
@@ -123,55 +173,74 @@ function formatCreatedAtLabel(value: string): string {
   }).format(date);
 }
 
+function normalizeSearchValue(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function matchesSearch(template: TemplateSummaryItem, normalizedSearch: string): boolean {
+  if (!normalizedSearch) {
+    return true;
+  }
+
+  return [
+    template.title,
+    template.description,
+    template.platform,
+    template.category,
+    template.system_prompt,
+    template.knowledge_base_scope ?? "",
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(normalizedSearch);
+}
+
+function toTemplatePayloadFromSkill(skill: TemplateSkillDiscoveryItem): TemplateCreatePayload {
+  return {
+    title: skill.title,
+    description: skill.description,
+    platform: skill.platform,
+    category: skill.category,
+    knowledge_base_scope: skill.knowledge_base_scope ?? null,
+    system_prompt: skill.system_prompt,
+  };
+}
+
 export function TemplatesView(props: TemplatesViewProps) {
   const {
     templates,
+    skills,
     isLoading,
+    isLoadingSkills,
     isMutating,
     mutatingTemplateId,
     selectedTemplateId,
+    creationRequest,
+    onCreationRequestHandled,
     onUseTemplate,
     onCreateTemplate,
     onDeleteTemplate,
     onDeleteTemplates,
+    onSearchSkills,
   } = props;
 
+  const [activeCollection, setActiveCollection] = useState<TemplateCollection>("recommended");
   const [activeCategory, setActiveCategory] = useState<TemplateCategoryFilter>("全部");
   const [searchValue, setSearchValue] = useState("");
+  const [skillsSearchValue, setSkillsSearchValue] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [formState, setFormState] = useState<TemplateFormState>(initialFormState);
+  const [hasRequestedSkills, setHasRequestedSkills] = useState(false);
+  const [isSearchingSkills, setIsSearchingSkills] = useState(false);
+  const [savingSkillId, setSavingSkillId] = useState<string | null>(null);
+  const [savedSkillIds, setSavedSkillIds] = useState<string[]>([]);
 
   const isCreating = isMutating && mutatingTemplateId === "template-create";
   const isBulkDeleting = isMutating && mutatingTemplateId === "template-bulk";
-
-  const filteredTemplates = useMemo(() => {
-    const normalizedSearch = searchValue.trim().toLowerCase();
-
-    return templates.filter((template) => {
-      const matchesCategory =
-        activeCategory === "全部" ? true : template.category === activeCategory;
-      if (!matchesCategory) {
-        return false;
-      }
-
-      if (!normalizedSearch) {
-        return true;
-      }
-
-      const searchableText = [
-        template.title,
-        template.description,
-        template.platform,
-        template.category,
-        template.system_prompt,
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      return searchableText.includes(normalizedSearch);
-    });
-  }, [activeCategory, searchValue, templates]);
+  const shouldShowSkillsLoading =
+    activeCollection === "skills" &&
+    (isLoadingSkills || isSearchingSkills || (!hasRequestedSkills && skills.length === 0));
 
   useEffect(() => {
     const availableIds = new Set(
@@ -180,12 +249,89 @@ export function TemplatesView(props: TemplatesViewProps) {
     setSelectedIds((current) => current.filter((id) => availableIds.has(id)));
   }, [templates]);
 
-  const toggleSelected = (templateId: string) => {
-    setSelectedIds((current) =>
-      current.includes(templateId)
-        ? current.filter((id) => id !== templateId)
-        : [...current, templateId],
+  useEffect(() => {
+    const availableIds = new Set(skills.map((skill) => skill.id));
+    setSavedSkillIds((current) => current.filter((id) => availableIds.has(id)));
+  }, [skills]);
+
+  useEffect(() => {
+    if (!creationRequest) {
+      return;
+    }
+
+    setActiveCollection("mine");
+    setFormState(toFormState(creationRequest.payload));
+    setIsCreateModalOpen(true);
+    onCreationRequestHandled();
+  }, [creationRequest, onCreationRequestHandled]);
+
+  useEffect(() => {
+    if (activeCollection !== "skills" || hasRequestedSkills) {
+      return;
+    }
+
+    setHasRequestedSkills(true);
+    setIsSearchingSkills(true);
+    void (async () => {
+      try {
+        await onSearchSkills(
+          skillsSearchValue.trim() || "爆款 Prompt",
+          activeCategory === "全部" ? undefined : activeCategory,
+        );
+      } finally {
+        setIsSearchingSkills(false);
+      }
+    })();
+  }, [
+    activeCategory,
+    activeCollection,
+    hasRequestedSkills,
+    onSearchSkills,
+    skillsSearchValue,
+  ]);
+
+  const filteredTemplates = useMemo(() => {
+    const normalizedSearch = normalizeSearchValue(searchValue);
+    const baseTemplates =
+      activeCollection === "recommended"
+        ? templates.filter((template) => template.is_preset)
+        : activeCollection === "mine"
+          ? templates.filter((template) => !template.is_preset)
+          : templates;
+
+    return baseTemplates.filter((template) => {
+      const matchesCategory =
+        activeCategory === "全部" ? true : template.category === activeCategory;
+      return matchesCategory && matchesSearch(template, normalizedSearch);
+    });
+  }, [activeCategory, activeCollection, searchValue, templates]);
+
+  const filteredSkills = useMemo(() => {
+    // Server-side skills search is query-driven. We intentionally do not
+    // re-apply the local keyword input here, otherwise semantically relevant
+    // cloud results could be hidden just because the generated title does not
+    // literally contain the user's original search phrase.
+    if (activeCategory === "全部") {
+      return skills;
+    }
+
+    const categoryMatchedSkills = skills.filter(
+      (item) => item.category === activeCategory,
     );
+
+    // Cloud discoveries come from a server-side query. If the local tab filter
+    // would hide every returned card, fall back to showing the full result set
+    // instead of rendering a misleading empty state.
+    if (skills.length > 0 && categoryMatchedSkills.length === 0) {
+      return skills;
+    }
+
+    return categoryMatchedSkills;
+  }, [activeCategory, skills]);
+
+  const openCreateModal = (payload?: Partial<TemplateCreatePayload>) => {
+    setFormState(toFormState(payload));
+    setIsCreateModalOpen(true);
   };
 
   const closeCreateModal = () => {
@@ -196,6 +342,14 @@ export function TemplatesView(props: TemplatesViewProps) {
     setFormState(initialFormState);
   };
 
+  const toggleSelected = (templateId: string) => {
+    setSelectedIds((current) =>
+      current.includes(templateId)
+        ? current.filter((id) => id !== templateId)
+        : [...current, templateId],
+    );
+  };
+
   const handleCreateSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -204,6 +358,7 @@ export function TemplatesView(props: TemplatesViewProps) {
       description: formState.description.trim(),
       platform: formState.platform,
       category: formState.category,
+      knowledge_base_scope: formState.knowledge_base_scope.trim() || null,
       system_prompt: formState.system_prompt.trim(),
     };
 
@@ -217,6 +372,7 @@ export function TemplatesView(props: TemplatesViewProps) {
       return;
     }
 
+    setActiveCollection("mine");
     setSearchValue("");
     closeCreateModal();
   };
@@ -253,6 +409,46 @@ export function TemplatesView(props: TemplatesViewProps) {
     }
   };
 
+  const handleSearchSkills = async () => {
+    setHasRequestedSkills(true);
+    setIsSearchingSkills(true);
+    try {
+      await onSearchSkills(
+        skillsSearchValue.trim() || "爆款 Prompt",
+        activeCategory === "全部" ? undefined : activeCategory,
+      );
+    } finally {
+      setIsSearchingSkills(false);
+    }
+  };
+
+  const handleSaveSkill = async (skill: TemplateSkillDiscoveryItem) => {
+    setSavingSkillId(skill.id);
+    try {
+      const createdTemplate = await onCreateTemplate(toTemplatePayloadFromSkill(skill));
+      if (!createdTemplate) {
+        return;
+      }
+
+      setSavedSkillIds((current) =>
+        current.includes(skill.id) ? current : [...current, skill.id],
+      );
+    } finally {
+      setSavingSkillId(null);
+    }
+  };
+
+  const collectionMeta = collectionTabs.find((item) => item.id === activeCollection);
+  const renderedTemplateCount =
+    activeCollection === "skills" ? filteredSkills.length : filteredTemplates.length;
+
+  console.log(
+    "当前用于渲染的模板总数:",
+    renderedTemplateCount,
+    "云端数量:",
+    skills.length,
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background" data-testid="templates-view">
       <div className="border-b border-border bg-surface-elevated px-4 py-5 backdrop-blur-sm lg:px-6">
@@ -261,40 +457,71 @@ export function TemplatesView(props: TemplatesViewProps) {
             <div>
               <div className="inline-flex items-center gap-2 rounded-full bg-brand-soft px-3 py-1 text-xs font-medium text-brand">
                 <Sparkles className="h-3.5 w-3.5" />
-                中文模板中台
+                模板生态中心
               </div>
               <h2 className="mt-3 text-3xl font-bold tracking-tight text-foreground">
                 模板中心
               </h2>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                统一管理官方预置模板与个人沉淀的人设 Prompt，一键应用到新建会话，也支持新增与批量清理。
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+                把官方预置、人设沉淀、对话反哺与实时 Skills 探索放进同一套工作流里。
+                你可以一键应用模板、从当前产物沉淀模板，或者把联网发现的 Prompt 灵感导入成自己的资产。
               </p>
             </div>
 
             <div className="flex w-full flex-col gap-3 xl:max-w-2xl">
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <label className="relative block flex-1">
-                  <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    className="w-full rounded-2xl border border-border bg-card py-3 pl-11 pr-4 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
-                    data-testid="templates-search-input"
-                    onChange={(event) => setSearchValue(event.target.value)}
-                    placeholder="搜索模板名称、行业分类或提示词关键词"
-                    value={searchValue}
-                  />
-                </label>
+              {activeCollection !== "skills" ? (
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <label className="relative block flex-1">
+                    <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      className="w-full rounded-2xl border border-border bg-card py-3 pl-11 pr-4 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                      data-testid="templates-search-input"
+                      onChange={(event) => setSearchValue(event.target.value)}
+                      placeholder="搜索模板名称、行业分类、知识库作用域或 Prompt 关键词"
+                      value={searchValue}
+                    />
+                  </label>
 
-                <button
-                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-                  data-testid="template-create-open"
-                  disabled={isMutating}
-                  onClick={() => setIsCreateModalOpen(true)}
-                  type="button"
-                >
-                  <BadgePlus className="h-4 w-4" />
-                  新建模板
-                </button>
-              </div>
+                  <button
+                    className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                    data-testid="template-create-open"
+                    disabled={isMutating}
+                    onClick={() => openCreateModal()}
+                    type="button"
+                  >
+                    <BadgePlus className="h-4 w-4" />
+                    新建模板
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <label className="relative block flex-1">
+                    <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      className="w-full rounded-2xl border border-border bg-card py-3 pl-11 pr-4 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                      data-testid="template-skills-search-input"
+                      onChange={(event) => setSkillsSearchValue(event.target.value)}
+                      placeholder="搜索近期爆款 Prompt、行业写法或关键词趋势"
+                      value={skillsSearchValue}
+                    />
+                  </label>
+
+                  <button
+                    className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                    data-testid="template-skills-search-button"
+                    disabled={shouldShowSkillsLoading}
+                    onClick={() => void handleSearchSkills()}
+                    type="button"
+                  >
+                    {shouldShowSkillsLoading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Bot className="h-4 w-4" />
+                    )}
+                    云端发现 Skills
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ) : (
@@ -343,6 +570,28 @@ export function TemplatesView(props: TemplatesViewProps) {
         )}
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
+          {collectionTabs.map((tab) => (
+            <button
+              key={tab.id}
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                activeCollection === tab.id
+                  ? "border-brand/40 bg-brand-soft text-brand"
+                  : "border-border bg-card text-muted-foreground hover:text-foreground"
+              }`}
+              data-testid={`template-collection-${tab.id}`}
+              onClick={() => setActiveCollection(tab.id)}
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+
+          <div className="text-xs text-muted-foreground">
+            当前视图：{collectionMeta?.label} · {collectionMeta?.description}
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           {categoryTabs.map((tab) => (
             <button
               key={tab.id}
@@ -360,16 +609,17 @@ export function TemplatesView(props: TemplatesViewProps) {
           ))}
 
           <div className="text-xs text-muted-foreground">
-            共 {templates.length} 个模板
-            {filteredTemplates.length !== templates.length
-              ? `，当前显示 ${filteredTemplates.length} 个`
-              : ""}
+            {activeCollection === "skills"
+              ? shouldShowSkillsLoading
+                ? "正在全网检索并提炼 Skills 灵感…"
+                : `共发现 ${filteredSkills.length} 条 Skills 灵感`
+              : `共 ${filteredTemplates.length} 个模板${activeCollection === "industry" ? `（库内总数 ${templates.length}）` : ""}`}
           </div>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-6 lg:px-6">
-        {isLoading ? (
+        {activeCollection !== "skills" && isLoading ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 6 }).map((_, index) => (
               <div
@@ -385,7 +635,7 @@ export function TemplatesView(props: TemplatesViewProps) {
           </div>
         ) : null}
 
-        {!isLoading && filteredTemplates.length === 0 ? (
+        {activeCollection !== "skills" && !isLoading && filteredTemplates.length === 0 ? (
           <div
             className="flex min-h-[360px] flex-col items-center justify-center rounded-[32px] border border-dashed border-border bg-card px-6 py-12 text-center"
             data-testid="templates-empty-state"
@@ -397,17 +647,16 @@ export function TemplatesView(props: TemplatesViewProps) {
               暂无匹配模板
             </div>
             <p className="mt-3 max-w-md text-sm leading-6 text-muted-foreground">
-              可以尝试切换行业分类、修改搜索关键词，或者直接新建一个属于你的专属模板。
+              可以尝试切换分类、修改搜索词，或者直接新建一个属于你的模板资产。
             </p>
           </div>
         ) : null}
 
-        {!isLoading && filteredTemplates.length > 0 ? (
+        {activeCollection !== "skills" && !isLoading && filteredTemplates.length > 0 ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {filteredTemplates.map((template) => {
               const isSelected = selectedIds.includes(template.id);
-              const isDeleting =
-                isMutating && mutatingTemplateId === template.id;
+              const isDeleting = isMutating && mutatingTemplateId === template.id;
               const isRecentlyUsed = selectedTemplateId === template.id;
 
               return (
@@ -462,6 +711,11 @@ export function TemplatesView(props: TemplatesViewProps) {
                           >
                             {template.category}
                           </span>
+                          {template.knowledge_base_scope ? (
+                            <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+                              知识库：{template.knowledge_base_scope}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -524,6 +778,179 @@ export function TemplatesView(props: TemplatesViewProps) {
             })}
           </div>
         ) : null}
+
+        {activeCollection === "skills" ? (
+          <div className="space-y-4">
+            <div className="rounded-[28px] border border-border bg-card p-5 shadow-sm">
+              <div className="flex items-start gap-3">
+                <div className="rounded-2xl bg-brand-soft p-3 text-brand">
+                  <Bot className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="text-lg font-semibold text-foreground">Skills 扩展中心</div>
+                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                    这里会把实时搜索到的 Prompt 结构、近期热门写法和可迁移的人设框架整理成可导入卡片。
+                    你可以先搜行业关键词，再把结果导入为自己的模板。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {shouldShowSkillsLoading ? (
+              <div
+                className="flex min-h-[320px] flex-col items-center justify-center rounded-[32px] border border-brand/20 bg-card px-6 py-12 text-center shadow-sm"
+                data-testid="template-skills-loading-state"
+              >
+                <div className="flex h-20 w-20 items-center justify-center rounded-full bg-brand-soft text-brand">
+                  <Loader2 className="h-10 w-10 animate-spin" />
+                </div>
+                <div className="mt-6 text-2xl font-semibold text-foreground">
+                  正在全网检索并提炼顶级 Prompt 框架
+                </div>
+                <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">
+                  这一步会先搜索近期框架写法，再让模型提炼成可复用的 Meta-Prompt，
+                  通常需要 10-20 秒，请稍候...
+                </p>
+              </div>
+            ) : null}
+
+            {!shouldShowSkillsLoading && filteredSkills.length === 0 ? (
+              <div
+                className="flex min-h-[320px] flex-col items-center justify-center rounded-[32px] border border-dashed border-border bg-card px-6 py-12 text-center"
+                data-testid="template-skills-empty-state"
+              >
+                <div className="flex h-20 w-20 items-center justify-center rounded-full bg-brand-soft text-brand">
+                  <BookOpen className="h-10 w-10" />
+                </div>
+                <div className="mt-6 text-2xl font-semibold text-foreground">
+                  暂无匹配的 Skills 灵感
+                </div>
+                <p className="mt-3 max-w-md text-sm leading-6 text-muted-foreground">
+                  换一个行业关键词试试，例如“福州文旅”“闲鱼教辅”“STM32 教程”“熬夜护肤”。
+                </p>
+              </div>
+            ) : null}
+
+            {!shouldShowSkillsLoading && filteredSkills.length > 0 ? (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {filteredSkills.map((skill) => {
+                  const isSavingSkill = savingSkillId === skill.id;
+                  const isSavedSkill = savedSkillIds.includes(skill.id);
+                  const discoveryLabel =
+                    skill.data_mode === "live_tavily"
+                      ? "联网提炼"
+                      : skill.data_mode === "llm_fallback"
+                        ? "模型回退"
+                        : "安全回退";
+
+                  return (
+                    <article
+                      key={skill.id}
+                      className="rounded-[28px] border border-border bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand/30 hover:shadow-md"
+                      data-testid={`skill-card-${skill.id}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="rounded-2xl bg-secondary p-2 text-secondary-foreground">
+                            <PlatformGlyph platform={skill.platform} />
+                          </div>
+                          <div>
+                            <div className="text-lg font-semibold text-foreground">
+                              {skill.title}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2">
+                              <span
+                                className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${getPlatformBadgeClass(skill.platform)}`}
+                              >
+                                {skill.platform}
+                              </span>
+                              <span
+                                className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${getCategoryBadgeClass(skill.category)}`}
+                              >
+                                {skill.category}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex flex-col items-end gap-2">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-1 text-[11px] font-medium text-violet-700 dark:bg-violet-950/60 dark:text-violet-300">
+                            <Cloud className="h-3.5 w-3.5" />
+                            云端发现
+                          </span>
+                          <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+                            {discoveryLabel}
+                          </span>
+                        </div>
+                      </div>
+
+                      <p className="mt-4 min-h-16 text-sm leading-6 text-muted-foreground">
+                        {skill.description}
+                      </p>
+
+                      <div className="mt-4 rounded-2xl border border-border bg-muted/60 p-4">
+                        <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                          <Sparkles className="h-3.5 w-3.5" />
+                          Prompt 预览
+                        </div>
+                        <p className="line-clamp-5 text-sm leading-6 text-card-foreground">
+                          {skill.system_prompt}
+                        </p>
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-border bg-card p-4">
+                        <div className="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                          来源线索
+                        </div>
+                        <div className="mt-2 text-sm font-medium text-foreground">
+                          {skill.source_title}
+                        </div>
+                        {skill.source_url ? (
+                          <a
+                            className="mt-2 inline-flex items-center gap-1 text-xs text-brand transition hover:opacity-90"
+                            href={skill.source_url}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            <Link2 className="h-3.5 w-3.5" />
+                            查看来源
+                          </a>
+                        ) : (
+                          <div className="mt-2 text-xs text-muted-foreground">
+                            当前结果由云端回退策略整理，可直接保存到你的模板库继续迭代。
+                          </div>
+                        )}
+                        {skill.knowledge_base_scope ? (
+                          <div className="mt-3 text-xs text-muted-foreground">
+                            推荐知识库：{skill.knowledge_base_scope}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="mt-6 flex justify-end">
+                        <button
+                          className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                          data-testid={`skill-save-${skill.id}`}
+                          disabled={isMutating || isSavingSkill || isSavedSkill}
+                          onClick={() => void handleSaveSkill(skill)}
+                          type="button"
+                        >
+                          {isSavingSkill ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : isSavedSkill ? (
+                            <Cloud className="h-4 w-4" />
+                          ) : (
+                            <Sparkles className="h-4 w-4" />
+                          )}
+                          {isSavedSkill ? "已保存到我的模板" : "保存至我的模板"}
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {isCreateModalOpen ? (
@@ -536,7 +963,7 @@ export function TemplatesView(props: TemplatesViewProps) {
               <div>
                 <div className="text-xl font-semibold text-foreground">新建模板</div>
                 <div className="mt-1 text-sm text-muted-foreground">
-                  保存你的高质量人设与 Prompt，下次创建会话时一键带入。
+                  保存你的人设、行业 Prompt 和知识库作用域，下次创建会话时可以一键带入。
                 </div>
               </div>
               <button
@@ -564,7 +991,7 @@ export function TemplatesView(props: TemplatesViewProps) {
                         title: event.target.value,
                       }))
                     }
-                    placeholder="例如：女性理财回血周报"
+                    placeholder="例如：福州周边周末出片模板"
                     value={formState.title}
                   />
                 </label>
@@ -635,6 +1062,24 @@ export function TemplatesView(props: TemplatesViewProps) {
                   />
                 </label>
               </div>
+
+              <label className="block">
+                <div className="mb-2 text-sm font-medium text-card-foreground">
+                  关联知识库
+                </div>
+                <input
+                  className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+                  data-testid="template-create-knowledge-base"
+                  onChange={(event) =>
+                    setFormState((current) => ({
+                      ...current,
+                      knowledge_base_scope: event.target.value,
+                    }))
+                  }
+                  placeholder="例如：travel_local_guides / education_score_boost / iot_embedded_lab"
+                  value={formState.knowledge_base_scope}
+                />
+              </label>
 
               <label className="block">
                 <div className="mb-2 text-sm font-medium text-card-foreground">

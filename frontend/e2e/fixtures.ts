@@ -11,6 +11,7 @@ import type {
   HistoryMessageItem,
   HistoryThreadSummary,
   MediaChatRequestPayload,
+  TemplateSkillDiscoveryItem,
   TemplateSummaryItem,
   ThreadMessagesApiResponse,
   UploadApiResponse,
@@ -36,6 +37,7 @@ export type MockBackendOptions = {
   threads?: HistoryThreadSummary[];
   drafts?: DraftSummaryItem[];
   templates?: TemplateSummaryItem[];
+  templateSkills?: TemplateSkillDiscoveryItem[];
   threadMessagesById?: Record<string, ThreadMessagesApiResponse>;
   sessions?: AuthSessionItem[];
   failOnceUnauthorizedPaths?: string[];
@@ -58,6 +60,7 @@ type MockBackendState = {
   threads: HistoryThreadSummary[];
   drafts: DraftSummaryItem[];
   templates: TemplateSummaryItem[];
+  templateSkills: TemplateSkillDiscoveryItem[];
   threadMessagesById: Record<string, ThreadMessagesApiResponse>;
   sessions: AuthSessionItem[];
   unauthorizedOncePending: Set<string>;
@@ -103,6 +106,7 @@ export function createMockThreadSummary(
     title: overrides.title ?? "E2E 默认会话",
     latest_message_excerpt: overrides.latest_message_excerpt ?? "Playwright 自动化回复",
     is_archived: overrides.is_archived ?? false,
+    knowledge_base_scope: overrides.knowledge_base_scope ?? null,
     updated_at: overrides.updated_at ?? "2026-04-28T08:00:00Z",
   };
 }
@@ -115,6 +119,7 @@ export function createMockThreadMessages(
     thread_id: threadId,
     title: overrides.title ?? "E2E 默认会话",
     system_prompt: overrides.system_prompt ?? "你是一位专业内容策划助手。",
+    knowledge_base_scope: overrides.knowledge_base_scope ?? null,
     messages: overrides.messages ?? [],
     materials: overrides.materials ?? [],
   };
@@ -193,11 +198,32 @@ export function createMockTemplate(
     description: overrides.description ?? "模板描述",
     platform: overrides.platform ?? "小红书",
     category: overrides.category ?? "美食文旅",
+    knowledge_base_scope: overrides.knowledge_base_scope ?? null,
     system_prompt:
       overrides.system_prompt ??
       "你是一个可复用的内容生产模板，用于快速生成符合场景的人设与提示词。",
     is_preset: overrides.is_preset ?? false,
     created_at: overrides.created_at ?? nowIso(),
+  };
+}
+
+export function createMockTemplateSkill(
+  overrides: Partial<TemplateSkillDiscoveryItem> = {},
+): TemplateSkillDiscoveryItem {
+  return {
+    id: overrides.id ?? `skill-${Math.random().toString(36).slice(2, 8)}`,
+    title: overrides.title ?? "技能发现卡片",
+    description:
+      overrides.description ?? "适合导入为模板的实时 Prompt 灵感。",
+    platform: overrides.platform ?? "小红书",
+    category: overrides.category ?? "美食文旅",
+    knowledge_base_scope: overrides.knowledge_base_scope ?? "travel_local_guides",
+    system_prompt:
+      overrides.system_prompt ??
+      "你是一名擅长输出高点击内容结构的编辑，请围绕目标人群、情绪触发点和转化动作组织内容。",
+    source_title: overrides.source_title ?? "Mock Skills Discovery",
+    source_url: overrides.source_url ?? null,
+    data_mode: overrides.data_mode ?? "mock",
   };
 }
 
@@ -262,6 +288,35 @@ function createDefaultTemplates(): TemplateSummaryItem[] {
       system_prompt:
         "你是一名擅长教育内容增长的选题编辑，请围绕提分、逆袭、家长焦虑等真实场景生成标题与引流文案。",
       is_preset: true,
+    }),
+  ];
+}
+
+function createDefaultTemplateSkills(): TemplateSkillDiscoveryItem[] {
+  return [
+    createMockTemplateSkill({
+      id: "skill-travel-emotion-route",
+      title: "在地情绪路线笔记",
+      description: "适合周末短途和城市 Citywalk 的文旅 Prompt 模板。",
+      platform: "小红书",
+      category: "美食文旅",
+      knowledge_base_scope: "travel_local_guides",
+    }),
+    createMockTemplateSkill({
+      id: "skill-xianyu-recovery-close",
+      title: "闲鱼回血成交话术",
+      description: "适合断舍离回血和二手转化文案。",
+      platform: "闲鱼",
+      category: "电商/闲鱼",
+      knowledge_base_scope: "secondhand_trade_playbook",
+    }),
+    createMockTemplateSkill({
+      id: "skill-tech-lab-markdown",
+      title: "实验室复盘 Markdown",
+      description: "适合 STM32 / IoT / 嵌入式教程的工程化模板。",
+      platform: "技术博客",
+      category: "数码科技",
+      knowledge_base_scope: "iot_embedded_lab",
     }),
   ];
 }
@@ -454,6 +509,7 @@ function createTemplateFromPayload(
     description?: string;
     platform?: TemplateSummaryItem["platform"];
     category?: TemplateSummaryItem["category"];
+    knowledge_base_scope?: string | null;
     system_prompt?: string;
   },
 ): TemplateSummaryItem {
@@ -463,6 +519,7 @@ function createTemplateFromPayload(
     description: body.description ?? "",
     platform: body.platform ?? "小红书",
     category: body.category ?? "美食文旅",
+    knowledge_base_scope: body.knowledge_base_scope ?? null,
     system_prompt: body.system_prompt ?? "",
     is_preset: false,
     created_at: nowIso(),
@@ -480,6 +537,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
     threads: clone(options.threads ?? []),
     drafts: clone(options.drafts ?? []),
     templates: clone(options.templates ?? createDefaultTemplates()),
+    templateSkills: clone(options.templateSkills ?? createDefaultTemplateSkills()),
     threadMessagesById: clone(options.threadMessagesById ?? {}),
     sessions: clone(
       options.sessions ?? [
@@ -627,12 +685,26 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
       return;
     }
 
+    if (path === "/api/v1/media/skills/search" && request.method() === "GET") {
+      const url = new URL(request.url());
+      await fulfillJson(route, {
+        query: url.searchParams.get("q") ?? "爆款 Prompt",
+        category: url.searchParams.get("category"),
+        templates: state.templateSkills,
+        total: state.templateSkills.length,
+        data_mode: "mock",
+        fallback_reason: null,
+      });
+      return;
+    }
+
     if (path === "/api/v1/media/templates" && request.method() === "POST") {
       const body = parseJsonBody<{
         title?: string;
         description?: string;
         platform?: TemplateSummaryItem["platform"];
         category?: TemplateSummaryItem["category"];
+        knowledge_base_scope?: string | null;
         system_prompt?: string;
       }>(route);
       const createdTemplate = createTemplateFromPayload(body);
@@ -778,6 +850,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         title?: string;
         is_archived?: boolean;
         system_prompt?: string;
+        knowledge_base_scope?: string | null;
       }>(route);
       const existingSummary =
         state.threads.find((thread) => thread.id === threadId) ??
@@ -786,6 +859,9 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         ...existingSummary,
         ...(body.title !== undefined ? { title: body.title } : {}),
         ...(body.is_archived !== undefined ? { is_archived: body.is_archived } : {}),
+        ...(body.knowledge_base_scope !== undefined
+          ? { knowledge_base_scope: body.knowledge_base_scope }
+          : {}),
         updated_at: nowIso(),
       };
       upsertThreadSummary(state, nextSummary);
@@ -800,6 +876,10 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
           body.system_prompt !== undefined
             ? body.system_prompt
             : existingMessages.system_prompt,
+        knowledge_base_scope:
+          body.knowledge_base_scope !== undefined
+            ? body.knowledge_base_scope
+            : existingMessages.knowledge_base_scope,
       };
 
       await fulfillJson(route, nextSummary);
@@ -850,6 +930,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         createMockThreadMessages({
           thread_id: body.thread_id,
           title: body.thread_title ?? "Untitled thread",
+          knowledge_base_scope: body.knowledge_base_scope ?? null,
           system_prompt: body.system_prompt ?? "",
         });
 
@@ -879,6 +960,8 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
           state.threads.find((thread) => thread.id === body.thread_id)?.title ??
           "Untitled thread",
         system_prompt: body.system_prompt ?? existingThreadMessages.system_prompt ?? "",
+        knowledge_base_scope:
+          body.knowledge_base_scope ?? existingThreadMessages.knowledge_base_scope ?? null,
         messages: [
           ...existingThreadMessages.messages,
           userMessage,
@@ -896,6 +979,8 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
           "Untitled thread",
         latest_message_excerpt: assistantContent || body.message,
         is_archived: false,
+        knowledge_base_scope:
+          body.knowledge_base_scope ?? existingThreadMessages.knowledge_base_scope ?? null,
         updated_at: createdAt,
       });
 

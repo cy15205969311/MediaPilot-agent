@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import type { RefObject } from "react";
 
 import type {
+  ArtifactPayload,
   AuthenticatedUser,
   ConversationMessage,
   MediaChatMaterialPayload,
@@ -20,9 +21,11 @@ import { buildAbsoluteUrl, formatChatTimestamp, getDisplayName } from "../utils"
 type ChatFeedProps = {
   currentUser: AuthenticatedUser | null;
   messages: ConversationMessage[];
+  artifact: ArtifactPayload | null;
   isStreaming: boolean;
   isLoadingHistory?: boolean;
   endRef: RefObject<HTMLDivElement>;
+  onSaveArtifactAsTemplate?: () => void;
 };
 
 function materialLabel(material: MediaChatMaterialPayload): string {
@@ -102,9 +105,11 @@ function renderMessageMaterials(item: ConversationMessage) {
 export function ChatFeed({
   currentUser,
   messages,
+  artifact,
   isStreaming,
   isLoadingHistory = false,
   endRef,
+  onSaveArtifactAsTemplate,
 }: ChatFeedProps) {
   const resolvedUserAvatarUrl = currentUser?.avatar_url
     ? buildAbsoluteUrl(currentUser.avatar_url)
@@ -117,6 +122,9 @@ export function ChatFeed({
 
   const userDisplayName = getDisplayName(currentUser) || "User";
   const showUserAvatar = Boolean(resolvedUserAvatarUrl) && !hasUserAvatarError;
+  const latestAssistantMessageId = [...messages]
+    .reverse()
+    .find((item) => item.role === "assistant")?.id;
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
@@ -217,6 +225,22 @@ export function ChatFeed({
                   }`}
                 >
                   {timestamp}
+                </div>
+              ) : null}
+              {item.role === "assistant" &&
+              artifact &&
+              onSaveArtifactAsTemplate &&
+              item.id === latestAssistantMessageId ? (
+                <div className="mt-4 flex justify-end">
+                  <button
+                    className="inline-flex items-center gap-2 rounded-full border border-brand/20 bg-brand-soft px-3.5 py-2 text-xs font-medium text-brand transition hover:opacity-90"
+                    data-testid="chat-save-template"
+                    onClick={onSaveArtifactAsTemplate}
+                    type="button"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    存为模板
+                  </button>
                 </div>
               ) : null}
             </div>

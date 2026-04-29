@@ -112,6 +112,10 @@ class Thread(Base):
     )
     title: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     system_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    knowledge_base_scope: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
@@ -244,6 +248,10 @@ class Template(Base):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     platform: Mapped[str] = mapped_column(String(64), nullable=False)
     category: Mapped[str] = mapped_column(String(64), nullable=False)
+    knowledge_base_scope: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     is_preset: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

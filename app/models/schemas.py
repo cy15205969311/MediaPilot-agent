@@ -98,6 +98,11 @@ class MediaChatRequest(SchemaModel):
         default=None,
         description="Optional per-thread persona or brand prompt.",
     )
+    knowledge_base_scope: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Optional thread-level knowledge-base scope for retrieval.",
+    )
     thread_title: str | None = Field(
         default=None,
         description="Optional explicit thread title.",
@@ -324,6 +329,10 @@ class ThreadSummaryItem(SchemaModel):
     title: str = Field(default="", description="Thread title.")
     latest_message_excerpt: str = Field(default="", description="Latest message excerpt.")
     is_archived: bool = Field(default=False, description="Archive flag.")
+    knowledge_base_scope: str | None = Field(
+        default=None,
+        description="Optional thread-level knowledge-base scope.",
+    )
     updated_at: UTCDateTime = Field(..., description="Last updated time in UTC.")
 
 
@@ -340,6 +349,11 @@ class ThreadUpdateRequest(SchemaModel):
     system_prompt: str | None = Field(
         default=None,
         description="Updated system prompt for the thread.",
+    )
+    knowledge_base_scope: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Updated knowledge-base scope for the thread.",
     )
 
 
@@ -379,6 +393,10 @@ class ThreadMessagesResponse(SchemaModel):
     thread_id: str = Field(..., description="Thread ID.")
     title: str = Field(default="", description="Thread title.")
     system_prompt: str = Field(default="", description="Persisted system prompt.")
+    knowledge_base_scope: str | None = Field(
+        default=None,
+        description="Persisted thread-level knowledge-base scope.",
+    )
     messages: list[MessageHistoryItem] = Field(
         default_factory=list,
         description="Thread messages.",
@@ -445,6 +463,10 @@ class TemplateListItem(SchemaModel):
     description: str = Field(..., description="Short business-facing template summary.")
     platform: TemplatePlatform = Field(..., description="Template platform.")
     category: TemplateCategory = Field(..., description="Template industry category.")
+    knowledge_base_scope: str | None = Field(
+        default=None,
+        description="Optional bound knowledge-base scope reserved for downstream RAG use.",
+    )
     system_prompt: str = Field(
         ...,
         description="Prebuilt system prompt copied into the new-thread modal.",
@@ -471,6 +493,11 @@ class TemplateCreateRequest(SchemaModel):
     )
     platform: TemplatePlatform = Field(..., description="Template platform.")
     category: TemplateCategory = Field(..., description="Template category.")
+    knowledge_base_scope: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Optional knowledge-base scope key bound to this template.",
+    )
     system_prompt: str = Field(
         ...,
         min_length=1,
@@ -491,4 +518,51 @@ class TemplateDeleteResponse(SchemaModel):
     deleted_ids: list[str] = Field(
         default_factory=list,
         description="Deleted template IDs.",
+    )
+
+
+class TemplateSkillDiscoveryItem(SchemaModel):
+    id: str = Field(..., description="Discovered skill/template idea identifier.")
+    title: str = Field(..., description="Discovered prompt card title.")
+    description: str = Field(..., description="Short discovery summary for the card.")
+    platform: TemplatePlatform = Field(..., description="Suggested platform for the prompt idea.")
+    category: TemplateCategory = Field(..., description="Suggested industry category.")
+    knowledge_base_scope: str | None = Field(
+        default=None,
+        description="Suggested knowledge-base scope for downstream RAG linkage.",
+    )
+    system_prompt: str = Field(..., description="Recommended reusable system prompt body.")
+    source_title: str = Field(..., description="Upstream discovery source title.")
+    source_url: str | None = Field(
+        default=None,
+        description="Optional upstream discovery source URL.",
+    )
+    data_mode: Literal["mock", "mock_fallback", "live_tavily", "llm_fallback"] = Field(
+        ...,
+        description="Whether the discovery came from mock data or live Tavily search.",
+    )
+
+
+class TemplateSkillSearchResponse(SchemaModel):
+    query: str = Field(..., description="Normalized search query used for discovery.")
+    category: TemplateCategory | None = Field(
+        default=None,
+        description="Optional category constraint applied during discovery.",
+    )
+    items: list[TemplateSkillDiscoveryItem] = Field(
+        default_factory=list,
+        description="Discovered prompt-skill cards.",
+    )
+    templates: list[TemplateSkillDiscoveryItem] = Field(
+        default_factory=list,
+        description="Compatibility alias for discovered prompt-skill cards.",
+    )
+    total: int = Field(..., description="Returned discovery count.")
+    data_mode: Literal["mock", "mock_fallback", "live_tavily", "llm_fallback"] = Field(
+        ...,
+        description="Overall discovery mode used for the response.",
+    )
+    fallback_reason: str | None = Field(
+        default=None,
+        description="Fallback note when live discovery was unavailable.",
     )

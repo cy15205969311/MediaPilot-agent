@@ -16,3 +16,4 @@ frontend/node_modules/
 frontend/dist/
 frontend/playwright-report/
 frontend/test-results/
+.omnimedia_knowledge_base/

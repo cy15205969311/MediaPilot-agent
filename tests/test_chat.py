@@ -21,6 +21,7 @@ from app.models.schemas import (
     TopicPlanningArtifactPayload,
 )
 from app.services.graph import LangGraphProvider
+from app.services.tools import get_business_tools
 
 
 def parse_sse_events(raw_stream: str) -> list[dict[str, object]]:
@@ -766,6 +767,18 @@ def test_providers_create_clients_with_strict_http_timeouts(monkeypatch: pytest.
     assert compatible_timeout.read == 55.0
 
 
+def test_compatible_provider_bind_tools_returns_async_runnable():
+    provider = providers_module.CompatibleLLMProvider(
+        api_key="compatible-key",
+        base_url="https://example.com/v1",
+    )
+
+    runnable = provider.bind_tools(get_business_tools())
+
+    assert type(runnable).__name__ == "RunnableLambda"
+    assert hasattr(runnable, "ainvoke")
+
+
 def test_media_chat_stream_emits_content_generation_artifact(client: TestClient):
     headers = register_user(client, username="alice-content")
     payload = {
@@ -1037,12 +1050,17 @@ def test_history_endpoints_are_isolated_by_user_and_store_system_prompt(client: 
         "thread_title": "年度复盘工作台",
     }
 
+    payload["knowledge_base_scope"] = "finance_recovery_playbook"
     collect_stream_events(client, payload, headers=alice_headers)
 
     alice_threads_response = client.get("/api/v1/media/threads", headers=alice_headers)
     assert alice_threads_response.status_code == 200
     alice_threads_payload = alice_threads_response.json()
     assert alice_threads_payload["total"] == 1
+    assert (
+        alice_threads_payload["items"][0]["knowledge_base_scope"]
+        == "finance_recovery_playbook"
+    )
     assert alice_threads_payload["items"][0]["title"] == "年度复盘工作台"
     assert alice_threads_payload["items"][0]["updated_at"].endswith("Z")
 
@@ -1057,6 +1075,10 @@ def test_history_endpoints_are_isolated_by_user_and_store_system_prompt(client: 
     assert alice_messages_response.status_code == 200
     alice_messages_payload = alice_messages_response.json()
     assert alice_messages_payload["thread_id"] == "thread-history"
+    assert (
+        alice_messages_payload["knowledge_base_scope"]
+        == "finance_recovery_playbook"
+    )
     assert alice_messages_payload["title"] == "年度复盘工作台"
     assert alice_messages_payload["system_prompt"] == payload["system_prompt"]
     assert alice_messages_payload["materials"] == []
@@ -1194,8 +1216,8 @@ def test_template_list_endpoint_returns_preset_templates(client: TestClient):
     assert response.status_code == 200
 
     payload = response.json()
-    assert payload["total"] == 6
-    assert [item["id"] for item in payload["items"]] == [
+    assert payload["total"] >= 20
+    assert [item["id"] for item in payload["items"][:6]] == [
         "template-preset-travel-hotflow",
         "template-preset-finance-recovery",
         "template-preset-beauty-overnight-repair",
@@ -1203,7 +1225,7 @@ def test_template_list_endpoint_returns_preset_templates(client: TestClient):
         "template-preset-xianyu-secondhand-sku",
         "template-preset-education-score-boost",
     ]
-    assert [item["platform"] for item in payload["items"]] == [
+    assert [item["platform"] for item in payload["items"][:6]] == [
         "小红书",
         "小红书",
         "小红书",
@@ -1211,7 +1233,7 @@ def test_template_list_endpoint_returns_preset_templates(client: TestClient):
         "闲鱼",
         "抖音",
     ]
-    assert [item["category"] for item in payload["items"]] == [
+    assert [item["category"] for item in payload["items"][:6]] == [
         "美食文旅",
         "职场金融",
         "美妆护肤",
@@ -1222,12 +1244,17 @@ def test_template_list_endpoint_returns_preset_templates(client: TestClient):
     assert payload["items"][0]["title"] == "文旅探店爆款流"
     assert "周末短途游" in payload["items"][0]["description"]
     assert "生活方式编辑" in payload["items"][0]["system_prompt"]
+    assert payload["items"][0]["knowledge_base_scope"] == "travel_local_guides"
     assert payload["items"][1]["title"] == "精致穷回血理财方案"
     assert "28-35 岁女性" in payload["items"][1]["description"]
     assert "同龄人焦虑" in payload["items"][1]["system_prompt"]
     assert payload["items"][3]["title"] == "硬核技术教程（IoT / STM32）"
     assert "STM32" in payload["items"][3]["description"]
     assert "Markdown" in payload["items"][3]["system_prompt"]
+    ids = {item["id"] for item in payload["items"]}
+    assert "template-preset-citywalk-weekend" in ids
+    assert "template-preset-legal-risk-qa" in ids
+    assert "template-preset-medical-pop-science" in ids
     assert all(item["is_preset"] is True for item in payload["items"])
     assert all(item["created_at"].endswith("Z") for item in payload["items"])
 
@@ -1243,6 +1270,7 @@ def test_template_create_endpoint_persists_user_template(client: TestClient):
             "description": "适合 28-35 岁女性做月度预算复盘。",
             "platform": "小红书",
             "category": "职场金融",
+            "knowledge_base_scope": "finance_recovery_playbook",
             "system_prompt": "请围绕精致穷、预算焦虑、温柔理财建议输出内容。",
         },
     )
@@ -1252,14 +1280,41 @@ def test_template_create_endpoint_persists_user_template(client: TestClient):
     assert created["title"] == "我的理财复盘模板"
     assert created["platform"] == "小红书"
     assert created["category"] == "职场金融"
+    assert created["knowledge_base_scope"] == "finance_recovery_playbook"
     assert created["is_preset"] is False
     assert created["created_at"].endswith("Z")
 
     list_response = client.get("/api/v1/media/templates", headers=headers)
     assert list_response.status_code == 200
     items = list_response.json()["items"]
-    assert len(items) == 7
+    assert len(items) >= 21
     assert any(item["id"] == created["id"] for item in items)
+
+
+def test_template_skills_search_endpoint_returns_discoveries(client: TestClient):
+    headers = register_user(client, username="alice-template-skills")
+
+    response = client.get(
+        "/api/v1/media/skills/search?q=福州文旅&category=美食文旅",
+        headers=headers,
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["query"]
+    assert payload["category"] == "美食文旅"
+    assert payload["total"] >= 1
+    assert payload["data_mode"] in {"mock", "mock_fallback", "live_tavily", "llm_fallback"}
+    assert len(payload["templates"]) == len(payload["items"])
+    assert payload["templates"][0]["title"] == payload["items"][0]["title"]
+    first_item = payload["items"][0]
+    assert first_item["title"]
+    assert first_item["platform"] in {"小红书", "抖音", "闲鱼", "技术博客"}
+    assert first_item["category"] == "美食文旅"
+    assert first_item["system_prompt"]
+    assert "[Role]" in first_item["system_prompt"]
+    assert "[Task]" in first_item["system_prompt"]
+    assert "data_mode" in first_item
 
 
 def test_template_delete_endpoint_removes_only_owned_custom_template(
@@ -1688,6 +1743,13 @@ def test_thread_update_can_change_system_prompt(client: TestClient):
         headers=headers,
     )
     assert update_response.status_code == 200
+    scope_update_response = client.patch(
+        "/api/v1/media/threads/thread-settings",
+        json={"knowledge_base_scope": "travel_local_guides"},
+        headers=headers,
+    )
+    assert scope_update_response.status_code == 200
+    assert scope_update_response.json()["knowledge_base_scope"] == "travel_local_guides"
     assert update_response.json()["title"] == "年度资产配置复盘"
 
     history_response = client.get(
@@ -1696,6 +1758,7 @@ def test_thread_update_can_change_system_prompt(client: TestClient):
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()
+    assert history_payload["knowledge_base_scope"] == "travel_local_guides"
     assert history_payload["title"] == "年度资产配置复盘"
     assert (
         history_payload["system_prompt"]

@@ -49,6 +49,10 @@ from app.services.oss_client import (
     normalize_storage_reference,
     parse_stored_file_path,
 )
+from app.services.knowledge_base import (
+    get_knowledge_base_service,
+    normalize_knowledge_base_scope,
+)
 from app.services.persistence import extract_upload_relative_path
 from app.services.providers import (
     BaseLLMProvider,
@@ -138,6 +142,8 @@ class GraphState(TypedDict, total=False):
     pending_tool_calls: list[dict[str, object]]
     business_tool_results: list[str]
     business_tool_iteration: int
+    knowledge_base_scope: str
+    knowledge_base_context: str
 
 
 class SearchRouteDecision(BaseModel):
@@ -270,6 +276,8 @@ class LangGraphProvider(BaseLLMProvider):
             "pending_tool_calls": [],
             "business_tool_results": [],
             "business_tool_iteration": 0,
+            "knowledge_base_scope": "",
+            "knowledge_base_context": "",
         }
 
         try:
@@ -554,8 +562,45 @@ class LangGraphProvider(BaseLLMProvider):
                 "current_step": "generate_draft:tool_calls_requested",
             }
 
+        knowledge_base_scope = _resolve_knowledge_base_scope_from_state(state)
+        knowledge_base_context = str(state.get("knowledge_base_context", "") or "").strip()
+        if knowledge_base_scope and not knowledge_base_context:
+            _emit_tool_call(
+                writer,
+                name="retrieve_knowledge_base",
+                status="processing",
+                message=f"scope={knowledge_base_scope}",
+            )
+            try:
+                knowledge_base_context = get_knowledge_base_service().retrieve_context(
+                    knowledge_base_scope,
+                    request.message,
+                ).strip()
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning(
+                    "knowledge base retrieval failed thread_id=%s scope=%s error=%s",
+                    state["request"].thread_id,
+                    knowledge_base_scope,
+                    exc,
+                )
+                _emit_tool_call(
+                    writer,
+                    name="retrieve_knowledge_base",
+                    status="failed",
+                    message=f"scope={knowledge_base_scope}",
+                )
+                knowledge_base_context = ""
+            else:
+                _emit_tool_call(
+                    writer,
+                    name="retrieve_knowledge_base",
+                    status="completed" if knowledge_base_context else "skipped",
+                    message=f"scope={knowledge_base_scope}",
+                )
+
         draft_system_prompt = _build_draft_system_prompt(
             state=state,
+            knowledge_base_context=knowledge_base_context,
         )
         adapted_request = _build_enriched_draft_request(
             request=request,
@@ -608,6 +653,8 @@ class LangGraphProvider(BaseLLMProvider):
             "artifact_candidate": latest_artifact,
             "error": latest_error,
             "messages": updated_messages,
+            "knowledge_base_scope": knowledge_base_scope,
+            "knowledge_base_context": knowledge_base_context,
             "current_step": "generate_draft:completed",
         }
 
@@ -1527,9 +1574,21 @@ def _build_enriched_draft_request(
 def _build_draft_system_prompt(
     *,
     state: GraphState,
+    knowledge_base_context: str,
 ) -> str | None:
     base_prompt = _resolve_review_prompt(state).strip()
-    return base_prompt or None
+    prompt_sections = [base_prompt] if base_prompt else []
+
+    if knowledge_base_context.strip():
+        prompt_sections.append(
+            "【专属外挂知识库检索结果】：\n"
+            f"{knowledge_base_context.strip()}\n"
+            "请务必基于以上独家知识进行创作，切勿使用通用废话！"
+        )
+
+    if not prompt_sections:
+        return None
+    return "\n\n".join(prompt_sections)
 
 
 def _rewrite_draft_user_message(
@@ -1817,6 +1876,25 @@ def _resolve_review_prompt(state: GraphState) -> str:
     request = state["request"]
     if request.system_prompt is not None and request.system_prompt.strip():
         return request.system_prompt.strip()
+
+    return ""
+
+
+def _resolve_knowledge_base_scope_from_state(state: GraphState) -> str:
+    thread = state.get("thread")
+    if thread is not None:
+        normalized_thread_scope = normalize_knowledge_base_scope(
+            thread.knowledge_base_scope,
+        )
+        if normalized_thread_scope:
+            return normalized_thread_scope
+
+    request = state["request"]
+    normalized_request_scope = normalize_knowledge_base_scope(
+        request.knowledge_base_scope,
+    )
+    if normalized_request_scope:
+        return normalized_request_scope
 
     return ""
 

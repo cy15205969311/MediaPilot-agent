@@ -20,6 +20,7 @@ from app.models.schemas import (
     ThreadUpdateRequest,
 )
 from app.services.auth import get_current_user
+from app.services.knowledge_base import normalize_knowledge_base_scope
 from app.services.persistence import (
     build_artifact_history_item,
     build_history_message_item,
@@ -83,6 +84,7 @@ def _build_thread_summary(db: Session, thread: Thread) -> ThreadSummaryItem:
             else ""
         ),
         is_archived=thread.is_archived,
+        knowledge_base_scope=thread.knowledge_base_scope,
         updated_at=thread.updated_at,
     )
 
@@ -234,6 +236,7 @@ async def get_thread_messages(
         thread_id=thread_id,
         title=thread.title,
         system_prompt=thread.system_prompt,
+        knowledge_base_scope=thread.knowledge_base_scope,
         messages=history_messages,
         materials=[
             build_material_history_item(material)
@@ -354,6 +357,7 @@ async def update_thread(
         payload.title is None
         and payload.is_archived is None
         and payload.system_prompt is None
+        and payload.knowledge_base_scope is None
     ):
         raise HTTPException(status_code=400, detail="至少需要提供一个可更新字段。")
 
@@ -368,6 +372,10 @@ async def update_thread(
 
     if payload.system_prompt is not None:
         thread.system_prompt = payload.system_prompt.strip()
+    if payload.knowledge_base_scope is not None:
+        thread.knowledge_base_scope = normalize_knowledge_base_scope(
+            payload.knowledge_base_scope,
+        )
 
     thread.touch()
     db.commit()

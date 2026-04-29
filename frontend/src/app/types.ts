@@ -84,6 +84,7 @@ export type MediaChatRequestPayload = {
   message: string;
   materials: MediaChatMaterialPayload[];
   system_prompt?: string;
+  knowledge_base_scope?: string | null;
   thread_title?: string;
 };
 
@@ -92,6 +93,7 @@ export type HistoryThreadSummary = {
   title: string;
   latest_message_excerpt: string;
   is_archived: boolean;
+  knowledge_base_scope?: string | null;
   updated_at: string;
 };
 
@@ -147,6 +149,7 @@ export type TemplateSummaryItem = {
   description: string;
   platform: TemplatePlatform;
   category: TemplateCategory;
+  knowledge_base_scope?: string | null;
   system_prompt: string;
   is_preset: boolean;
   created_at: string;
@@ -162,6 +165,7 @@ export type TemplateCreatePayload = {
   description: string;
   platform: TemplatePlatform;
   category: TemplateCategory;
+  knowledge_base_scope?: string | null;
   system_prompt: string;
 };
 
@@ -174,10 +178,35 @@ export type TemplateDeleteApiResponse = {
   deleted_ids: string[];
 };
 
+export type TemplateSkillDiscoveryItem = {
+  id: string;
+  title: string;
+  description: string;
+  platform: TemplatePlatform;
+  category: TemplateCategory;
+  knowledge_base_scope?: string | null;
+  system_prompt: string;
+  source_title: string;
+  source_url?: string | null;
+  data_mode: "mock" | "mock_fallback" | "live_tavily" | "llm_fallback";
+  isCloud?: boolean;
+};
+
+export type TemplateSkillsApiResponse = {
+  query: string;
+  category?: TemplateCategory | null;
+  items: TemplateSkillDiscoveryItem[];
+  templates?: TemplateSkillDiscoveryItem[] | null;
+  total: number;
+  data_mode: "mock" | "mock_fallback" | "live_tavily" | "llm_fallback";
+  fallback_reason?: string | null;
+};
+
 export type ThreadUpdatePayload = {
   title?: string;
   is_archived?: boolean;
   system_prompt?: string;
+  knowledge_base_scope?: string | null;
 };
 
 export type ThreadDeleteApiResponse = {
@@ -263,6 +292,7 @@ export type ThreadMessagesApiResponse = {
   thread_id: string;
   title: string;
   system_prompt: string;
+  knowledge_base_scope?: string | null;
   messages: HistoryMessageItem[];
   materials: HistoryMaterialItem[];
 };

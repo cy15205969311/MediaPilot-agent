@@ -255,6 +255,10 @@ npx playwright test --ui
 ## 10. 模板库
 
 - 模板数据来自后端 `GET /api/v1/media/templates`
-- 当前内置了小红书文旅探店、闲鱼二手转化、TechBlog 硬核教程三类模板
+- 当前内置了 20+ 个覆盖文旅、美妆、职场、数码、闲鱼、教育等主流行业的预置模板
 - 点击模板卡片上的“一键使用”后，工作台会自动切回聊天区并弹出新建会话窗口
 - 被选模板的 `title` 与 `system_prompt` 会自动填入新建会话表单，减少重复输入成本
+- 模板记录现已支持 `knowledge_base_scope`，可以提前声明后续 RAG / 私有知识库的关联范围
+- 使用模板开启新会话时，`knowledge_base_scope` 会随线程一起持久化，并在 LangGraph 最终生成前自动检索对应知识上下文
+- 聊天区最新产物支持“存为模板”，会把当前 `system_prompt`、产物标题和摘要直接预填到模板创建弹窗
+- 模板中心新增 `Skills` 扩展视图，可通过 `GET /api/v1/media/skills/search` 搜索实时 Prompt 灵感并导入为模板
