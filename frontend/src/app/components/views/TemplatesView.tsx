@@ -23,6 +23,7 @@ import type {
 } from "../../types";
 
 type TemplateCategoryFilter = "全部" | TemplateCategory;
+type TemplateViewMode = "all" | "preset" | "custom";
 
 type TemplateCreationRequest = {
   key: number;
@@ -64,6 +65,12 @@ const categoryTabs: Array<{ id: TemplateCategoryFilter; label: string }> = [
   { id: "汽车/出行", label: "汽车/出行" },
   { id: "母婴/宠物", label: "母婴/宠物" },
   { id: "情感/心理", label: "情感/心理" },
+];
+
+const viewModeTabs: Array<{ id: TemplateViewMode; label: string }> = [
+  { id: "all", label: "全部" },
+  { id: "preset", label: "官方预置" },
+  { id: "custom", label: "我的模板" },
 ];
 
 const platformOptions: TemplatePlatform[] = [
@@ -224,6 +231,7 @@ export function TemplatesView(props: TemplatesViewProps) {
   } = props;
 
   const [activeCategory, setActiveCategory] = useState<TemplateCategoryFilter>("全部");
+  const [viewMode, setViewMode] = useState<TemplateViewMode>("all");
   const [searchValue, setSearchValue] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -253,9 +261,15 @@ export function TemplatesView(props: TemplatesViewProps) {
     return templates.filter((template) => {
       const matchesCategory =
         activeCategory === "全部" ? true : template.category === activeCategory;
-      return matchesCategory && matchesSearch(template, normalizedSearch);
+      const matchesViewMode =
+        viewMode === "all"
+          ? true
+          : viewMode === "preset"
+            ? template.is_preset === true
+            : template.is_preset === false;
+      return matchesCategory && matchesSearch(template, normalizedSearch) && matchesViewMode;
     });
-  }, [activeCategory, searchValue, templates]);
+  }, [activeCategory, searchValue, templates, viewMode]);
 
   const presetCount = useMemo(
     () => templates.filter((template) => template.is_preset).length,
@@ -263,6 +277,18 @@ export function TemplatesView(props: TemplatesViewProps) {
   );
   const customCount = templates.length - presetCount;
   const isBulkDeleting = isMutating && mutatingTemplateId === "template-bulk";
+  const emptyStateTitle =
+    viewMode === "preset"
+      ? "当前筛选条件下还没有官方预置模板"
+      : viewMode === "custom"
+        ? "您还没有创建专属模板"
+        : "当前筛选条件下还没有模板";
+  const emptyStateDescription =
+    viewMode === "preset"
+      ? "试着切换行业标签，或者放宽搜索词，看看其他行业的官方预置资产。"
+      : viewMode === "custom"
+        ? "您还没有创建专属模板，去尝试存一个吧！也可以切换分类或搜索条件后再看看。"
+        : "试着切换行业标签，或者放宽搜索词。你也可以直接新建模板，把自己的最佳 Prompt 沉淀到本地模板库。";
 
   const openCreateModal = (payload?: Partial<TemplateCreatePayload>) => {
     setFormState(toFormState(payload));
@@ -308,6 +334,7 @@ export function TemplatesView(props: TemplatesViewProps) {
     }
 
     setSearchValue("");
+    setViewMode("custom");
     setActiveCategory(payload.category);
     closeCreateModal();
   };
@@ -434,7 +461,36 @@ export function TemplatesView(props: TemplatesViewProps) {
 
       <div className="flex-1 overflow-y-auto px-4 py-5 lg:px-6">
         <div className="rounded-[28px] border border-border bg-card p-5 shadow-sm">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+              <div className="inline-flex w-fit flex-wrap items-center gap-2 rounded-full bg-muted p-1">
+                {viewModeTabs.map((tab) => {
+                  const isActive = tab.id === viewMode;
+                  return (
+                    <button
+                      key={tab.id}
+                      className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+                        isActive
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "bg-muted text-muted-foreground hover:bg-background hover:text-foreground"
+                      }`}
+                      data-testid={`template-view-mode-${tab.id}`}
+                      onClick={() => setViewMode(tab.id)}
+                      type="button"
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                <span>本地模板 {templates.length} 张</span>
+                <span>官方预置 {presetCount} 张</span>
+                <span>我的模板 {customCount} 张</span>
+              </div>
+            </div>
+
             <div className="flex flex-wrap gap-2">
               {categoryTabs.map((tab) => {
                 const isActive = tab.id === activeCategory;
@@ -454,12 +510,6 @@ export function TemplatesView(props: TemplatesViewProps) {
                   </button>
                 );
               })}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-              <span>本地模板 {templates.length} 张</span>
-              <span>官方预置 {presetCount} 张</span>
-              <span>我的模板 {customCount} 张</span>
             </div>
           </div>
         </div>
@@ -481,11 +531,10 @@ export function TemplatesView(props: TemplatesViewProps) {
               <BookOpen className="h-10 w-10" />
             </div>
             <div className="mt-6 text-2xl font-semibold text-foreground">
-              当前筛选条件下还没有模板
+              {emptyStateTitle}
             </div>
             <p className="mt-3 max-w-md text-sm leading-6 text-muted-foreground">
-              试着切换行业标签，或者放宽搜索词。你也可以直接新建模板，把自己的最佳 Prompt
-              沉淀到本地模板库。
+              {emptyStateDescription}
             </p>
           </div>
         ) : null}
