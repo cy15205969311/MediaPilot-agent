@@ -182,6 +182,7 @@ class KnowledgeDocument:
     source: str
     text: str
     created_at: str
+    chunk_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -386,12 +387,13 @@ class KnowledgeBaseService:
 
         deduped_documents: dict[str, KnowledgeDocument] = {}
         created_at = utcnow_iso()
-        for text in cleaned_texts:
+        for chunk_index, text in enumerate(cleaned_texts):
             document_id = self._build_document_id(
                 normalized_user_id,
                 normalized_scope,
                 normalized_source,
                 text,
+                chunk_index,
             )
             deduped_documents[document_id] = KnowledgeDocument(
                 document_id=document_id,
@@ -400,6 +402,7 @@ class KnowledgeBaseService:
                 source=normalized_source,
                 text=text,
                 created_at=created_at,
+                chunk_index=chunk_index,
             )
 
         if not deduped_documents:
@@ -419,6 +422,7 @@ class KnowledgeBaseService:
                             "scope": item.scope,
                             "source": item.source,
                             "created_at": item.created_at,
+                            "chunk_index": item.chunk_index,
                         }
                         for item in deduped_documents.values()
                     ],
@@ -514,6 +518,7 @@ class KnowledgeBaseService:
                             "scope": document.scope,
                             "source": document.source,
                             "created_at": document.created_at,
+                            "chunk_index": document.chunk_index,
                         }
                         for document in renamed_documents
                     ],
@@ -554,6 +559,38 @@ class KnowledgeBaseService:
         ]
         return sorted(items, key=lambda item: (-item.chunk_count, item.filename.lower()))
 
+    def list_source_documents(
+        self,
+        user_id: str,
+        scope: str,
+        source: str,
+    ) -> list[KnowledgeDocument]:
+        normalized_user_id = (user_id or "").strip()
+        normalized_scope = normalize_knowledge_base_scope(scope)
+        normalized_source = normalize_knowledge_source(source)
+        if not normalized_user_id or normalized_scope is None:
+            return []
+
+        if self._using_chroma:
+            chroma_documents = self._get_source_documents_from_chroma(
+                normalized_user_id,
+                normalized_scope,
+                normalized_source,
+            )
+            if chroma_documents:
+                return chroma_documents
+
+        documents = [
+            document
+            for document in self._iter_documents()
+            if (
+                document.user_id == normalized_user_id
+                and document.scope == normalized_scope
+                and document.source == normalized_source
+            )
+        ]
+        return self._sort_source_documents(documents)
+
     def delete_scope(self, user_id: str, scope: str) -> int:
         normalized_user_id = (user_id or "").strip()
         normalized_scope = normalize_knowledge_base_scope(scope)
@@ -565,7 +602,7 @@ class KnowledgeBaseService:
             scope=normalized_scope,
         )
 
-        if deleted_ids and self._using_chroma:
+        if self._using_chroma:
             try:  # pragma: no cover - exercised only when chromadb is installed
                 collection = self._get_collection()
                 collection.delete(
@@ -599,7 +636,7 @@ class KnowledgeBaseService:
             source=normalized_source,
         )
 
-        if deleted_ids and self._using_chroma:
+        if self._using_chroma:
             try:  # pragma: no cover - exercised only when chromadb is installed
                 collection = self._get_collection()
                 collection.delete(
@@ -744,6 +781,7 @@ class KnowledgeBaseService:
                     source=source,
                     text=text,
                     created_at=created_at,
+                    chunk_index=int(raw_document.get("chunk_index", 0) or 0),
                 )
             return normalized_documents
 
@@ -762,6 +800,7 @@ class KnowledgeBaseService:
                     source="legacy_seed",
                     text=text,
                     created_at=utcnow_iso(),
+                    chunk_index=0,
                 )
         return legacy_documents
 
@@ -865,6 +904,7 @@ class KnowledgeBaseService:
                     new_scope,
                     document.source,
                     document.text,
+                    document.chunk_index,
                 )
                 renamed_documents[renamed_document_id] = KnowledgeDocument(
                     document_id=renamed_document_id,
@@ -873,6 +913,7 @@ class KnowledgeBaseService:
                     source=document.source,
                     text=document.text,
                     created_at=document.created_at,
+                    chunk_index=document.chunk_index,
                 )
 
             for document_id in removed_ids:
@@ -977,6 +1018,7 @@ class KnowledgeBaseService:
                 scope,
                 normalize_knowledge_source(metadata.get("source") if isinstance(metadata, dict) else None),
                 str(raw_document),
+                int(metadata.get("chunk_index", index) or index),
             )
             text = str(raw_document).strip()
             if not text:
@@ -991,9 +1033,83 @@ class KnowledgeBaseService:
                     ),
                     text=text,
                     created_at=str(metadata.get("created_at", "")).strip() or utcnow_iso(),
+                    chunk_index=int(metadata.get("chunk_index", index) or index),
                 )
             )
         return hydrated_documents
+
+    def _get_source_documents_from_chroma(
+        self,
+        user_id: str,
+        scope: str,
+        source: str,
+    ) -> list[KnowledgeDocument]:
+        try:  # pragma: no cover - exercised only when chromadb is installed
+            collection = self._get_collection()
+            results = collection.get(
+                where={
+                    "$and": [
+                        {"user_id": user_id},
+                        {"scope": scope},
+                        {"source": source},
+                    ]
+                },
+                include=["documents", "metadatas"],
+            )
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Knowledge base Chroma source preview failed user_id=%s scope=%s source=%s: %s",
+                user_id,
+                scope,
+                source,
+                exc,
+            )
+            return []
+
+        raw_ids = results.get("ids") or []
+        raw_documents = results.get("documents") or []
+        raw_metadatas = results.get("metadatas") or []
+        hydrated_documents: list[KnowledgeDocument] = []
+        for index, raw_document in enumerate(raw_documents):
+            metadata = (
+                raw_metadatas[index]
+                if index < len(raw_metadatas) and isinstance(raw_metadatas[index], dict)
+                else {}
+            )
+            text = str(raw_document).strip()
+            if not text:
+                continue
+            chunk_index = int(metadata.get("chunk_index", index) or index)
+            document_id = str(raw_ids[index]) if index < len(raw_ids) else self._build_document_id(
+                user_id,
+                scope,
+                source,
+                text,
+                chunk_index,
+            )
+            hydrated_documents.append(
+                KnowledgeDocument(
+                    document_id=document_id,
+                    user_id=str(metadata.get("user_id", user_id)),
+                    scope=normalize_knowledge_base_scope(str(metadata.get("scope", scope))) or scope,
+                    source=normalize_knowledge_source(str(metadata.get("source", source))),
+                    text=text,
+                    created_at=str(metadata.get("created_at", "")).strip() or utcnow_iso(),
+                    chunk_index=chunk_index,
+                )
+            )
+        return self._sort_source_documents(hydrated_documents)
+
+    @staticmethod
+    def _sort_source_documents(documents: list[KnowledgeDocument]) -> list[KnowledgeDocument]:
+        return sorted(
+            documents,
+            key=lambda document: (
+                document.chunk_index,
+                document.created_at,
+                document.document_id,
+            ),
+        )
 
     def _get_collection(self):
         if self._client is None:  # pragma: no cover - defensive guard
@@ -1005,8 +1121,16 @@ class KnowledgeBaseService:
         )
 
     @staticmethod
-    def _build_document_id(user_id: str, scope: str, source: str, text: str) -> str:
-        digest = sha1(f"{user_id}:{scope}:{source}:{text}".encode("utf-8")).hexdigest()
+    def _build_document_id(
+        user_id: str,
+        scope: str,
+        source: str,
+        text: str,
+        chunk_index: int = 0,
+    ) -> str:
+        digest = sha1(
+            f"{user_id}:{scope}:{source}:{chunk_index}:{text}".encode("utf-8"),
+        ).hexdigest()
         return f"{scope}-{digest[:20]}"
 
 

@@ -1735,6 +1735,55 @@ def test_knowledge_scope_source_management_and_rename_are_user_scoped(
     assert bob_sources.json()["total"] == 1
     assert bob_sources.json()["items"][0]["filename"] == "voice-guide.md"
 
+    replacement_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=alice_headers,
+        data={"scope": "brand_guide_2026"},
+        files={
+            "file": (
+                "voice-guide.md",
+                "# Voice guide v2\nUse direct, playful, concrete wording instead of a premium tone.",
+                "text/markdown",
+            )
+        },
+    )
+    assert replacement_upload.status_code == 201
+    assert replacement_upload.json()["source"] == "voice-guide.md"
+
+    alice_sources_after_replacement = client.get(
+        "/api/v1/media/knowledge/scopes/brand_guide_2026/sources",
+        headers=alice_headers,
+    )
+    assert alice_sources_after_replacement.status_code == 200
+    assert alice_sources_after_replacement.json()["total"] == 2
+    assert {
+        (item["filename"], item["chunk_count"])
+        for item in alice_sources_after_replacement.json()["items"]
+    } == {
+        ("faq.md", 1),
+        ("voice-guide.md", 1),
+    }
+
+    preview_response = client.get(
+        "/api/v1/media/knowledge/scopes/brand_guide_2026/sources/voice-guide.md/preview",
+        headers=alice_headers,
+    )
+    assert preview_response.status_code == 200
+    assert preview_response.json() == {
+        "source": "voice-guide.md",
+        "content": "# Voice guide v2\nUse direct, playful, concrete wording instead of a premium tone.",
+        "chunk_count": 1,
+    }
+
+    service = knowledge_base_module.get_knowledge_base_service()
+    replaced_context = service.retrieve_context(
+        alice_user_id,
+        "brand_guide_2026",
+        "direct playful concrete wording",
+    )
+    assert "direct, playful, concrete wording" in replaced_context
+    assert "calm, premium, reassuring tone" not in replaced_context
+
     existing_scope_upload = client.post(
         "/api/v1/media/knowledge/upload",
         headers=alice_headers,
@@ -1773,14 +1822,15 @@ def test_knowledge_scope_source_management_and_rename_are_user_scoped(
     renamed_context = service.retrieve_context(
         alice_user_id,
         "brand_manual_q3",
-        "calm premium reassuring tone",
+        "direct playful concrete wording",
     )
     old_scope_context = service.retrieve_context(
         alice_user_id,
         "brand_guide_2026",
-        "calm premium reassuring tone",
+        "direct playful concrete wording",
     )
-    assert "calm, premium, reassuring tone" in renamed_context
+    assert "direct, playful, concrete wording" in renamed_context
+    assert "calm, premium, reassuring tone" not in renamed_context
     assert old_scope_context == ""
 
     alice_scopes_after_rename = client.get(

@@ -17,6 +17,7 @@ import type {
   KnowledgeScopeSourcesApiResponse,
   KnowledgeScopesApiResponse,
   KnowledgeSourceDeleteApiResponse,
+  KnowledgeSourcePreviewApiResponse,
   KnowledgeUploadApiResponse,
   LogoutResponse,
   MediaChatRequestPayload,
@@ -835,6 +836,21 @@ export async function deleteKnowledgeSource(
   );
 
   return (await response.json()) as KnowledgeSourceDeleteApiResponse;
+}
+
+export async function previewKnowledgeSource(
+  scope: string,
+  source: string,
+): Promise<KnowledgeSourcePreviewApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/knowledge/scopes/${encodeURIComponent(scope)}/sources/${encodeURIComponent(source)}/preview`,
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as KnowledgeSourcePreviewApiResponse;
 }
 
 export async function fetchTemplates(): Promise<TemplatesApiResponse> {

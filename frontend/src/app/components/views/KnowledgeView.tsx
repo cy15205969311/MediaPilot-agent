@@ -13,6 +13,7 @@ import {
   FileText,
   FileUp,
   FolderOpen,
+  Eye,
   LoaderCircle,
   Pencil,
   Search,
@@ -20,7 +21,11 @@ import {
   X,
 } from "lucide-react";
 
-import type { KnowledgeScopeItem, KnowledgeScopeSourceItem } from "../../types";
+import type {
+  KnowledgeScopeItem,
+  KnowledgeScopeSourceItem,
+  KnowledgeSourcePreviewApiResponse,
+} from "../../types";
 
 type KnowledgeViewProps = {
   scopes: KnowledgeScopeItem[];
@@ -30,6 +35,10 @@ type KnowledgeViewProps = {
   onDeleteScope: (scope: string) => Promise<boolean>;
   onDeleteSource: (scope: string, source: string) => Promise<boolean>;
   onLoadScopeSources: (scope: string) => Promise<KnowledgeScopeSourceItem[] | null>;
+  onPreviewSource: (
+    scope: string,
+    source: string,
+  ) => Promise<KnowledgeSourcePreviewApiResponse | null>;
   onRenameScope: (scope: string, nextScopeName: string) => Promise<string | null>;
   onUploadFiles: (scope: string, files: File[]) => Promise<void>;
 };
@@ -59,11 +68,13 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     onDeleteScope,
     onDeleteSource,
     onLoadScopeSources,
+    onPreviewSource,
     onRenameScope,
     onUploadFiles,
   } = props;
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const scopeFileInputRef = useRef<HTMLInputElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const sourceRequestIdRef = useRef(0);
   const [scopeInput, setScopeInput] = useState("");
@@ -75,6 +86,10 @@ export function KnowledgeView(props: KnowledgeViewProps) {
   const [selectedScopeSources, setSelectedScopeSources] = useState<KnowledgeScopeSourceItem[]>([]);
   const [isLoadingSources, setIsLoadingSources] = useState(false);
   const [sourceError, setSourceError] = useState("");
+  const [previewSourceName, setPreviewSourceName] = useState<string | null>(null);
+  const [sourcePreview, setSourcePreview] = useState<KnowledgeSourcePreviewApiResponse | null>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState("");
 
   useEffect(() => {
     if (!editingScope) {
@@ -112,6 +127,17 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     }
   };
 
+  const handleScopedFileSelection = async (files: FileList | null) => {
+    if (!selectedScopeName || !files || files.length === 0) {
+      return;
+    }
+    await onUploadFiles(selectedScopeName, Array.from(files));
+    if (scopeFileInputRef.current) {
+      scopeFileInputRef.current.value = "";
+    }
+    await refreshScopeSources(selectedScopeName);
+  };
+
   const handleDrop = async (event: DragEvent<HTMLLabelElement>) => {
     event.preventDefault();
     setIsDragging(false);
@@ -130,6 +156,9 @@ export function KnowledgeView(props: KnowledgeViewProps) {
       setSelectedScopeName(null);
       setSelectedScopeSources([]);
       setSourceError("");
+      setPreviewSourceName(null);
+      setSourcePreview(null);
+      setPreviewError("");
     }
   };
 
@@ -158,6 +187,9 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     setSelectedScopeName(scope);
     setSelectedScopeSources([]);
     setSourceError("");
+    setPreviewSourceName(null);
+    setSourcePreview(null);
+    setPreviewError("");
     await refreshScopeSources(scope);
   };
 
@@ -167,6 +199,10 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     setSelectedScopeSources([]);
     setSourceError("");
     setIsLoadingSources(false);
+    setPreviewSourceName(null);
+    setSourcePreview(null);
+    setPreviewError("");
+    setIsLoadingPreview(false);
   };
 
   const startRename = (scope: string) => {
@@ -227,8 +263,41 @@ export function KnowledgeView(props: KnowledgeViewProps) {
 
     const deleted = await onDeleteSource(scope, source);
     if (deleted) {
+      if (previewSourceName === source) {
+        setPreviewSourceName(null);
+        setSourcePreview(null);
+        setPreviewError("");
+      }
       await refreshScopeSources(scope);
     }
+  };
+
+  const handlePreviewSource = async (scope: string, source: string) => {
+    if (isLoadingPreview && previewSourceName === source) {
+      return;
+    }
+
+    if (sourcePreview?.source === source && previewSourceName === source) {
+      setPreviewSourceName(null);
+      setSourcePreview(null);
+      setPreviewError("");
+      return;
+    }
+
+    setPreviewSourceName(source);
+    setSourcePreview(null);
+    setPreviewError("");
+    setIsLoadingPreview(true);
+
+    const preview = await onPreviewSource(scope, source);
+    if (preview) {
+      setSourcePreview(preview);
+      setPreviewError("");
+    } else {
+      setSourcePreview(null);
+      setPreviewError("加载切片预览失败，请稍后重试。");
+    }
+    setIsLoadingPreview(false);
   };
 
   return (
@@ -501,6 +570,33 @@ export function KnowledgeView(props: KnowledgeViewProps) {
               </div>
             </div>
 
+            <label
+              className={`mt-4 flex cursor-pointer items-center justify-between gap-4 rounded-[24px] border border-dashed border-brand/30 bg-brand-soft/60 px-4 py-4 transition hover:border-brand hover:bg-brand-soft ${
+                isMutating ? "pointer-events-none opacity-60" : ""
+              }`}
+            >
+              <input
+                ref={scopeFileInputRef}
+                accept=".txt,.md,.markdown,text/plain,text/markdown"
+                className="hidden"
+                multiple
+                onChange={(event) => void handleScopedFileSelection(event.target.files)}
+                type="file"
+              />
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <FileUp className="h-4 w-4 text-brand" />
+                  上传/覆盖到此知识库
+                </div>
+                <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                  自动绑定 Scope「{selectedScopeName}」；同名文件会先删除旧切片再写入新版本。
+                </div>
+              </div>
+              <span className="shrink-0 rounded-2xl bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground">
+                选择文件
+              </span>
+            </label>
+
             <div className="mt-6 min-h-0 flex-1 overflow-y-auto">
               {isLoadingSources ? (
                 <div className="space-y-3">
@@ -529,14 +625,16 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                   </div>
                   <div className="text-lg font-semibold text-foreground">这个 Scope 里还没有源文件</div>
                   <div className="mt-2 text-sm leading-6 text-muted-foreground">
-                    可以回到上传区继续追加文件，或者关闭这个面板查看其他知识库。
+                    可以直接使用上方按钮上传文件到当前 Scope，无需手动输入知识库名称。
                   </div>
                 </div>
               ) : null}
 
               {!isLoadingSources && !sourceError && selectedScopeSources.length > 0 ? (
                 <div className="space-y-3">
-                  {selectedScopeSources.map((source) => (
+                  {selectedScopeSources.map((source) => {
+                    const isPreviewOpen = previewSourceName === source.filename;
+                    return (
                     <div
                       key={source.filename}
                       className="rounded-[24px] border border-border bg-card p-4"
@@ -551,24 +649,70 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                           </div>
                         </div>
 
-                        <button
-                          className="inline-flex items-center gap-2 rounded-2xl border border-destructive/20 px-3 py-2 text-sm font-medium text-destructive transition hover:bg-destructive/5 disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={isMutating && mutatingScope === selectedScopeName}
-                          onClick={() =>
-                            void handleDeleteSource(selectedScopeName, source.filename)
-                          }
-                          type="button"
-                        >
-                          {isMutating && mutatingScope === selectedScopeName ? (
-                            <LoaderCircle className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-4 w-4" />
-                          )}
-                          移除该文件
-                        </button>
+                        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                          <button
+                            className="inline-flex items-center gap-2 rounded-2xl border border-border px-3 py-2 text-sm font-medium text-muted-foreground transition hover:border-brand/30 hover:bg-brand-soft hover:text-brand disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={isLoadingPreview || (isMutating && mutatingScope === selectedScopeName)}
+                            onClick={() => void handlePreviewSource(selectedScopeName, source.filename)}
+                            type="button"
+                          >
+                            {isLoadingPreview && isPreviewOpen ? (
+                              <LoaderCircle className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Eye className="h-4 w-4" />
+                            )}
+                            {isPreviewOpen ? "收起预览" : "预览"}
+                          </button>
+
+                          <button
+                            className="inline-flex items-center gap-2 rounded-2xl border border-destructive/20 px-3 py-2 text-sm font-medium text-destructive transition hover:bg-destructive/5 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={isMutating && mutatingScope === selectedScopeName}
+                            onClick={() =>
+                              void handleDeleteSource(selectedScopeName, source.filename)
+                            }
+                            type="button"
+                          >
+                            {isMutating && mutatingScope === selectedScopeName ? (
+                              <LoaderCircle className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                            移除该文件
+                          </button>
+                        </div>
                       </div>
+
+                      {isPreviewOpen ? (
+                        <div className="mt-4 rounded-[20px] border border-border bg-surface-muted p-4">
+                          {previewError ? (
+                            <div className="text-sm text-destructive">{previewError}</div>
+                          ) : null}
+
+                          {isLoadingPreview ? (
+                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                              <LoaderCircle className="h-4 w-4 animate-spin" />
+                              正在加载切片预览…
+                            </div>
+                          ) : null}
+
+                          {!isLoadingPreview && sourcePreview ? (
+                            <div>
+                              <div className="mb-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                                <span className="truncate">{sourcePreview.source}</span>
+                                <span className="shrink-0 rounded-full bg-primary/10 px-3 py-1 font-medium text-primary">
+                                  {sourcePreview.chunk_count} chunks
+                                </span>
+                              </div>
+                              <pre className="prose dark:prose-invert max-h-[420px] max-w-none overflow-auto whitespace-pre-wrap rounded-2xl bg-card px-4 py-3 font-sans text-sm leading-7 text-foreground">
+                                {sourcePreview.content}
+                              </pre>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : null}
             </div>

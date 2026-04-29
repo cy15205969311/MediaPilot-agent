@@ -654,6 +654,12 @@ class KnowledgeSourceDeleteResponse(SchemaModel):
     deleted: bool = Field(default=True, description="Whether any chunks were deleted.")
 
 
+class KnowledgeSourcePreviewResponse(SchemaModel):
+    source: str = Field(..., description="Previewed source filename.")
+    content: str = Field(..., description="Markdown text rebuilt from stored chunks.")
+    chunk_count: int = Field(..., description="Number of chunks included in the preview.")
+
+
 class TemplateSkillDiscoveryItem(SchemaModel):
     id: str = Field(..., description="Discovered skill/template idea identifier.")
     title: str = Field(..., description="Discovered prompt card title.")

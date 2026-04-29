@@ -14,6 +14,7 @@ from app.models.schemas import (
     KnowledgeScopeSourceItem,
     KnowledgeScopeSourceListResponse,
     KnowledgeSourceDeleteResponse,
+    KnowledgeSourcePreviewResponse,
     KnowledgeUploadResponse,
 )
 from app.services.auth import get_current_user
@@ -104,7 +105,13 @@ async def upload_knowledge_document(
     if not chunks:
         raise HTTPException(status_code=400, detail="文件内容为空，无法切分知识块。")
 
-    chunk_count = get_knowledge_base_service().add_documents(
+    service = get_knowledge_base_service()
+    service.delete_source(
+        current_user.id,
+        normalized_scope,
+        filename,
+    )
+    chunk_count = service.add_documents(
         current_user.id,
         normalized_scope,
         chunks,
@@ -227,6 +234,37 @@ async def list_knowledge_scope_sources(
         scope=normalized_scope_name,
         items=items,
         total=len(items),
+    )
+
+
+@router.get(
+    "/knowledge/scopes/{scope_name}/sources/{source_name}/preview",
+    response_model=KnowledgeSourcePreviewResponse,
+)
+async def preview_knowledge_source(
+    scope_name: str,
+    source_name: str,
+    _db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> KnowledgeSourcePreviewResponse:
+    _ = _db
+    normalized_scope_name = normalize_knowledge_base_scope(scope_name)
+    if normalized_scope_name is None:
+        raise HTTPException(status_code=400, detail="Knowledge scope cannot be empty.")
+
+    normalized_source_name = normalize_knowledge_source(source_name)
+    documents = get_knowledge_base_service().list_source_documents(
+        current_user.id,
+        normalized_scope_name,
+        normalized_source_name,
+    )
+    if not documents:
+        raise HTTPException(status_code=404, detail="Knowledge source not found.")
+
+    return KnowledgeSourcePreviewResponse(
+        source=normalized_source_name,
+        content="\n\n---\n\n".join(document.text for document in documents),
+        chunk_count=len(documents),
     )
 
 

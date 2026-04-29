@@ -46,6 +46,7 @@ import {
   isUnauthorizedError,
   login,
   logoutAPI,
+  previewKnowledgeSource,
   requestPasswordReset,
   register,
   revokeSession,
@@ -82,6 +83,7 @@ import type {
   HistoryMessageItem,
   KnowledgeScopeItem,
   KnowledgeScopeSourceItem,
+  KnowledgeSourcePreviewApiResponse,
   MediaChatMaterialPayload,
   MediaChatRequestPayload,
   ResetPasswordResponse,
@@ -1571,6 +1573,36 @@ function App() {
         id: createId("knowledge-sources-error"),
         role: "error",
         title: "知识库文件明细加载失败",
+        content: errorMessage,
+      });
+      return null;
+    }
+  };
+
+  const handlePreviewKnowledgeSource = async (
+    scope: string,
+    source: string,
+  ): Promise<KnowledgeSourcePreviewApiResponse | null> => {
+    try {
+      return await previewKnowledgeSource(scope, source);
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return null;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载知识库文件预览失败，请稍后重试。";
+
+      setStatusText("知识库文件预览加载失败");
+      appendSystemMessage({
+        id: createId("knowledge-preview-error"),
+        role: "error",
+        title: "知识库文件预览失败",
         content: errorMessage,
       });
       return null;
@@ -3315,6 +3347,7 @@ function App() {
                 onDeleteScope={(scope) => handleDeleteKnowledgeScope(scope)}
                 onDeleteSource={(scope, source) => handleDeleteKnowledgeSource(scope, source)}
                 onLoadScopeSources={(scope) => handleLoadKnowledgeScopeSources(scope)}
+                onPreviewSource={(scope, source) => handlePreviewKnowledgeSource(scope, source)}
                 onRenameScope={(scope, nextScopeName) =>
                   handleRenameKnowledgeScope(scope, nextScopeName)
                 }

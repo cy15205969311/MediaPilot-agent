@@ -5,7 +5,7 @@
 - Document: `DEVELOPMENT.md`
 - Current version: `v1.13.20`
 - Updated on: `2026-04-29`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion and scope management, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, and drafting-state transitions, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, and chunk preview, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, and drafting-state transitions, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -75,7 +75,7 @@ The current baseline includes:
 33. Sidebar-driven workspace view routing with an authenticated drafts aggregation page backed by persisted `ArtifactRecord` history.
 34. Draft lifecycle management across single delete, batch delete, and clear-all operations for authenticated artifact cards.
 35. Persistent template-library API with preset seeding, user-scoped CRUD, Chinese management UI, and new-thread cascade prefill.
-36. Multi-tenant knowledge-base management with authenticated scope listing, txt/md upload chunking, per-user scope deletion, and a dedicated frontend knowledge workspace.
+36. Multi-tenant knowledge-base management with authenticated scope listing, txt/md upload chunking, same-source upsert, chunk-content preview, per-user scope/source deletion, and a dedicated frontend knowledge workspace.
 
 ### 3.2 Out of Scope
 
@@ -415,10 +415,11 @@ alembic upgrade head
 | `GET` | `/api/v1/media/threads/{thread_id}/messages` | authenticated thread replay |
 | `GET` | `/api/v1/media/artifacts` | authenticated artifact aggregation for drafts workspace |
 | `GET` | `/api/v1/media/knowledge/scopes` | list owned knowledge scopes with chunk and source counts |
-| `POST` | `/api/v1/media/knowledge/upload` | upload txt/md knowledge content into an owned scope |
+| `POST` | `/api/v1/media/knowledge/upload` | upload txt/md knowledge content into an owned scope; same filename in the same scope is overwritten by deleting old chunks first |
 | `PATCH` | `/api/v1/media/knowledge/scopes/{scope}` | rename one owned knowledge scope and sync bound thread/template references |
 | `DELETE` | `/api/v1/media/knowledge/scopes/{scope}` | delete all owned chunks for one knowledge scope |
 | `GET` | `/api/v1/media/knowledge/scopes/{scope}/sources` | list distinct uploaded sources inside one owned knowledge scope |
+| `GET` | `/api/v1/media/knowledge/scopes/{scope}/sources/{source}/preview` | rebuild one source preview by joining stored chunks with Markdown separators |
 | `DELETE` | `/api/v1/media/knowledge/scopes/{scope}/sources/{source}` | delete one uploaded source and all of its owned chunks |
 | `GET` | `/api/v1/media/topics` | authenticated topic-pool list with optional status filter |
 | `POST` | `/api/v1/media/topics` | create a new owned topic idea |
@@ -1305,12 +1306,12 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 This version adds or solidifies:
 
-- `app/services/knowledge_base.py` now provides a multi-tenant knowledge service keyed by `user_id + scope + source`, with normalized scope handling, text chunking, Chroma persistence, and a JSON fallback store.
+- `app/services/knowledge_base.py` now provides a multi-tenant knowledge service keyed by `user_id + scope + source`, with normalized scope handling, text chunking, source-document preview ordering, Chroma persistence, and a JSON fallback store.
 - the knowledge service preserves built-in seed scopes as system-owned documents while keeping uploaded user documents tenant-isolated.
-- `app/api/v1/knowledge.py` now exposes authenticated scope listing, txt/md upload ingestion, scope rename, grouped source inspection, single-source deletion, and per-scope deletion routes.
-- upload ingestion now decodes `utf-8-sig`, `utf-8`, and `gb18030`, then chunks content before persistence and reports normalized scope plus chunk counts back to the frontend.
+- `app/api/v1/knowledge.py` now exposes authenticated scope listing, txt/md upload ingestion, scope rename, grouped source inspection, chunk-joined source preview, single-source deletion, and per-scope deletion routes.
+- upload ingestion now decodes `utf-8-sig`, `utf-8`, and `gb18030`, deletes any existing same-filename source inside the target scope, then chunks content before persistence and reports normalized scope plus chunk counts back to the frontend.
 - `app/services/graph/provider.py` now injects tenant-scoped knowledge retrieval before final generation and logs `RAG Activated for user ...` when matching chunks are found.
-- `frontend/src/app/components/views/KnowledgeView.tsx`, `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `frontend/src/app/components/LeftSidebar.tsx` now deliver a dedicated knowledge workspace with upload, scope rename, grouped source preview, single-file deletion, and whole-scope deletion interactions.
+- `frontend/src/app/components/views/KnowledgeView.tsx`, `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `frontend/src/app/components/LeftSidebar.tsx` now deliver a dedicated knowledge workspace with global upload, drawer-bound append/overwrite upload, scope rename, grouped source inspection, chunk-content preview, single-file deletion, and whole-scope deletion interactions.
 - scope rename now also rewrites current-user `Thread.knowledge_base_scope` and `Template.knowledge_base_scope` references so existing bindings continue to resolve after the rename.
 - `tests/test_chat.py` now covers user-scoped upload/list/delete flows, grouped source management, scope rename conflict handling, and seeded-knowledge fallback, and the current repository baseline is verified by backend tests plus a passing frontend production build.
 

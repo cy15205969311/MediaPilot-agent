@@ -225,6 +225,12 @@ export type KnowledgeSourceDeleteApiResponse = {
   deleted: boolean;
 };
 
+export type KnowledgeSourcePreviewApiResponse = {
+  source: string;
+  content: string;
+  chunk_count: number;
+};
+
 export type TemplatePlatform = "小红书" | "抖音" | "双平台" | "闲鱼" | "技术博客";
 
 export type TemplateCategory =
