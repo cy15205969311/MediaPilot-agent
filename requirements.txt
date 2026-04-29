@@ -14,6 +14,8 @@ langchain-community==0.3.31
 langchain-text-splitters==0.3.11
 chromadb==1.2.1
 tiktoken==0.12.0
+PyPDF2==3.0.1
+moviepy==2.2.1
 PyJWT==2.10.1
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1

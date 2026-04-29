@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.20`
+- Current version: `v1.13.22`
 - Updated on: `2026-04-29`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, and chunk preview, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, and drafting-state transitions, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, and chunk preview, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, and drafting-state transitions, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -77,6 +77,7 @@ The current baseline includes:
 35. Persistent template-library API with preset seeding, user-scoped CRUD, Chinese management UI, and new-thread cascade prefill.
 36. Multi-tenant knowledge-base management with authenticated scope listing, txt/md upload chunking, same-source upsert, chunk-content preview, per-user scope/source deletion, and a dedicated frontend knowledge workspace.
 37. User-level productivity dashboard with aggregated draft generation, topic lifecycle, knowledge-base asset counts, estimated words/tokens, and recent activity trend visualization.
+38. LangGraph multimodal attachment parsing for txt/md/pdf documents plus moviepy-and-Whisper-backed video transcription, with progress tool calls and `<document_context>` / `<video_transcript>` prompt injection.
 
 ### 3.2 Out of Scope
 
@@ -244,6 +245,8 @@ omnimedia-agent/
 - `langgraph==1.1.9`
 - `langchain-core==1.3.1`
 - `langchain-text-splitters==0.3.11`
+- `PyPDF2==3.0.1`
+- `moviepy==2.2.1`
 - `PyJWT==2.10.1`
 - `passlib[bcrypt]==1.7.4`
 - `bcrypt==4.0.1`
@@ -283,6 +286,9 @@ Current supported runtime variables:
 - `OPENAI_MODEL`
 - `OPENAI_ARTIFACT_MODEL`
 - `OPENAI_VISION_MODEL`
+- `OPENAI_TRANSCRIPTION_API_KEY`
+- `OPENAI_TRANSCRIPTION_BASE_URL`
+- `OPENAI_TRANSCRIPTION_MODEL`
 - `OPENAI_TIMEOUT_SECONDS`
 - `LANGGRAPH_INNER_PROVIDER=mock|openai|compatible`
 - `LLM_API_KEY`
@@ -291,6 +297,10 @@ Current supported runtime variables:
 - `LLM_ARTIFACT_MODEL`
 - `LLM_VISION_MODEL`
 - `LLM_TIMEOUT_SECONDS`
+- `MEDIA_PARSER_DOWNLOAD_TIMEOUT_SECONDS`
+- `MEDIA_PARSER_TRANSCRIPTION_TIMEOUT_SECONDS`
+- `MEDIA_PARSER_DOCUMENT_MAX_CHARS`
+- `MEDIA_PARSER_TRANSCRIPT_MAX_CHARS`
 - `TAVILY_API_KEY`
 - `SEARCH_TIMEOUT_SECONDS`
 - `CORS_ALLOWED_ORIGINS`
@@ -846,12 +856,12 @@ Provider selection is controlled by `OMNIMEDIA_LLM_PROVIDER`:
 Current execution rules:
 
 1. `router` performs a structured search-intent decision, sets `needs_search`, and extracts a `search_query` when the request needs up-to-date external context
-2. `parse_materials_node` emits a `tool_call` event and converts raw materials into summarized text clues
+2. `parse_materials_node` emits attachment-progress `tool_call` events, converts raw materials into summarized text clues, extracts txt/md/pdf documents into `<document_context>`, and transcribes video speech into `<video_transcript>`
 3. after parse, the graph conditionally routes to `ocr_node` only when image materials are present
 4. after parse or OCR, the graph conditionally routes to `search_node` only when `needs_search == true`
 5. `search_node` emits `web_search` tool events, prefers real Tavily search when configured, and otherwise falls back to deterministic mock search results
 6. `generate_draft_node` first invokes a tool-aware planner created via `inner_provider.bind_tools(...)` when the provider supports it, and otherwise falls back to deterministic heuristic planning so Mock and test providers remain stable
-7. the planner appends `AIMessage` entries into `GraphState.messages`; if `AIMessage.tool_calls` are present, the graph routes to `tool_execution_node`, otherwise final drafting proceeds through the configured inner provider with XML-style `<image_context>`, `<search_context>`, and `<business_tool_context>` blocks injected when those contexts exist
+7. the planner appends `AIMessage` entries into `GraphState.messages`; if `AIMessage.tool_calls` are present, the graph routes to `tool_execution_node`, otherwise final drafting proceeds through the configured inner provider with XML-style `<image_context>`, `<document_context>`, `<video_transcript>`, `<search_context>`, and `<business_tool_context>` blocks injected when those contexts exist
 8. `tool_execution_node` emits `tool_call` progress, executes local Python tools from `app/services/tools.py`, stores `ToolMessage` results in graph state, and loops back to `generate_draft_node` until the planner stops requesting tools or `business_tool_max_iterations` is reached
 9. the current baseline supports sequential Business Tools such as Tavily-backed `analyze_market_trends` followed by local `generate_content_outline`, which enables a real ReAct-style "analyze first, draft later" loop before the final draft is streamed
 10. `review_node` emits `tool_call` progress, validates the draft against lightweight structural and persona constraints, and can retry generation up to `2` times
@@ -1259,6 +1269,7 @@ Covered cases:
 61. `GET /api/v1/media/artifacts` returns user-scoped structured drafts ordered newest-first with thread handoff metadata and best-effort platform inference
 62. Playwright workspace coverage verifies the drafts empty state, draft-detail preview, and "open in conversation" navigation flow
 63. `GET /api/v1/media/templates` returns built-in prompt templates, and Playwright workspace coverage verifies template-center rendering plus one-click modal prefilling
+64. LangGraph attachment parsing now reads txt/md/pdf uploads into `<document_context>`, transcribes video speech into `<video_transcript>`, and streams parsing progress back through `tool_call` SSE events
 
 ### 15.2 E2E Browser Automation
 
@@ -1304,19 +1315,26 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.20
+### 16.1 Completed in v1.13.22
 
 This version adds or solidifies:
 
+- `app/services/media_parser.py` now routes speech transcription through two provider-aware paths: OpenAI-compatible `/audio/transcriptions` when a true transcription endpoint is configured, and DashScope-compatible `qwen3-asr-flash` chat completions with inline audio data when only the DashScope-compatible gateway is available.
+- `app/services/media_parser.py` now extracts compact mono `mp3` audio before transcription so video-to-ASR payloads are less likely to violate provider-side audio size limits.
+- `app/services/knowledge_base.py` now keeps its Chroma embedding adapter compatible with the current `chromadb` query contract by accepting `input=` on `embed_query(...)` and by sending explicit `query_embeddings=[...]` during retrieval.
+- `tests/test_media_parser.py` now verifies the DashScope-compatible transcription dispatch path, while `tests/test_knowledge_base.py` now covers the live Chroma query path instead of only the fallback JSON store.
 - `app/services/knowledge_base.py` now provides a multi-tenant knowledge service keyed by `user_id + scope + source`, with normalized scope handling, text chunking, source-document preview ordering, Chroma persistence, and a JSON fallback store.
 - the knowledge service preserves built-in seed scopes as system-owned documents while keeping uploaded user documents tenant-isolated.
 - `app/api/v1/knowledge.py` now exposes authenticated scope listing, txt/md upload ingestion, scope rename, grouped source inspection, chunk-joined source preview, single-source deletion, and per-scope deletion routes.
 - upload ingestion now decodes `utf-8-sig`, `utf-8`, and `gb18030`, deletes any existing same-filename source inside the target scope, then chunks content before persistence and reports normalized scope plus chunk counts back to the frontend.
 - `app/services/dashboard.py` and `app/api/v1/dashboard.py` now provide `GET /api/v1/media/dashboard/summary`, aggregating owned draft counts, 7-day generation, estimated words/tokens, topic status buckets, knowledge scope/chunk totals, and a 14-day activity series in one authenticated request.
 - `app/services/graph/provider.py` now injects tenant-scoped knowledge retrieval before final generation and logs `RAG Activated for user ...` when matching chunks are found.
+- `app/services/media_parser.py` now centralizes attachment deep parsing, supporting txt/md decoding, full-PDF text extraction through `PyPDF2`, remote-or-local material resolution, and OpenAI-compatible Whisper transcription after `moviepy` audio extraction.
+- `app/services/graph/provider.py` now enriches `parse_materials_node` with document parsing and video transcription progress messages, appends `<document_context>` and `<video_transcript>` blocks into downstream drafting context, and degrades gracefully when a single attachment fails to parse.
 - `frontend/src/app/components/views/DashboardView.tsx` now turns the sidebar Data Dashboard entry into a professional SaaS cockpit with stat cards, 14-day productivity bars, topic lifecycle progress, and knowledge/token asset snapshots.
 - `frontend/src/app/components/views/KnowledgeView.tsx`, `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `frontend/src/app/components/LeftSidebar.tsx` now deliver a dedicated knowledge workspace with global upload, drawer-bound append/overwrite upload, scope rename, grouped source inspection, chunk-content preview, single-file deletion, and whole-scope deletion interactions.
 - scope rename now also rewrites current-user `Thread.knowledge_base_scope` and `Template.knowledge_base_scope` references so existing bindings continue to resolve after the rename.
+- `tests/test_media_parser.py` now verifies local document parsing, `<document_context>` / `<video_transcript>` injection into LangGraph draft requests, and graceful attachment-parse degradation without collapsing the chat flow.
 - `tests/test_chat.py` now covers user-scoped upload/list/delete flows, grouped source management, scope rename conflict handling, and seeded-knowledge fallback, and the current repository baseline is verified by backend tests plus a passing frontend production build.
 
 1. `TopicRecord` now persists an optional `thread_id`, backed by Alembic migration `20260429_03_topic_thread_binding.py`, so every topic can bind to a single drafting conversation and avoid spawning duplicate chat threads.
@@ -1466,14 +1484,14 @@ The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
 3. upload cleanup now covers avatars plus local and OSS-backed material retention, OSS delivery now uses signed URLs with lifecycle-ready prefixes, lifecycle rollout can be automated, and users can inspect retention summaries, but the project still lacks CDN invalidation, multi-bucket governance, and a full admin retention console
-4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a user-managed multi-tenant knowledge workspace, but the project still lacks richer document loaders such as PDF/Docx, citation surfacing in the chat UI, advanced vector backends, product/CRM integrations, and broader live business-system connectivity
+4. LangGraph now has branching, real vision integration, txt/md/pdf attachment parsing, video transcription, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a user-managed multi-tenant knowledge workspace, but the project still lacks richer office-document loaders such as Docx, citation surfacing in the chat UI, advanced vector backends, product/CRM integrations, and broader live business-system connectivity
 5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, artifact-side follow-up actions, local-first template-center management, and artifact-to-template capture, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
 
 ## 17. Recommended Next Steps
 
 The next engineering steps SHOULD prioritize:
 
-1. evolve the current tenant-scoped RAG ingestion baseline into a richer document pipeline with PDF/Docx loaders, citation surfacing, chunk inspection, stronger embeddings or vector backends, and broader internal or external business-system integrations such as product, competitor, CRM, or private knowledge sources
+1. evolve the current tenant-scoped RAG ingestion baseline into a richer document pipeline with Docx and spreadsheet loaders, citation surfacing, chunk inspection, stronger embeddings or vector backends, and broader internal or external business-system integrations such as product, competitor, CRM, or private knowledge sources
 2. harden OSS governance further with CDN invalidation, multi-bucket policy rollout, admin retention analytics, and richer signed-download policy controls on top of the current lifecycle rollout and retention-summary baseline
 3. expand browser coverage further into archive controls, clipboard/export interactions, and live backend/OSS delivery flows beyond the current mocked regression baseline
 4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain

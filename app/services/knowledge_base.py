@@ -284,13 +284,31 @@ class _HashingEmbeddingFunction:
         self._config = {"name": "omnimedia_hashing_embedding", "dimensions": EMBEDDING_DIMENSIONS}
 
     def __call__(self, input: Any) -> list[list[float]]:
-        return self.embed_documents(self._coerce_texts(input))
+        return self.embed_documents(input=input)
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [_embed_text(text) for text in texts]
+    def embed_documents(
+        self,
+        texts: list[str] | None = None,
+        *,
+        input: Any = None,
+        **kwargs: Any,
+    ) -> list[list[float]]:
+        raw_value = input if input is not None else texts
+        if raw_value is None:
+            raw_value = kwargs.get("texts", kwargs.get("documents", []))
+        return [_embed_text(text) for text in self._coerce_texts(raw_value)]
 
-    def embed_query(self, text: str) -> list[float]:
-        return _embed_text(text)
+    def embed_query(
+        self,
+        text: str | None = None,
+        *,
+        input: str | None = None,
+        **kwargs: Any,
+    ) -> list[float]:
+        raw_text = input if input is not None else text
+        if raw_text is None:
+            raw_text = kwargs.get("query", kwargs.get("text", ""))
+        return _embed_text(str(raw_text))
 
     @staticmethod
     def _coerce_texts(input: Any) -> list[str]:
@@ -976,7 +994,7 @@ class KnowledgeBaseService:
         try:  # pragma: no cover - exercised only when chromadb is installed
             collection = self._get_collection()
             results = collection.query(
-                query_texts=[query],
+                query_embeddings=[self._embedding_function.embed_query(input=query)],
                 n_results=top_k,
                 where={
                     "$and": [

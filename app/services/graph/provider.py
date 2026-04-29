@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TypedDict
+from urllib.parse import unquote, urlparse
 
 import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -53,6 +54,7 @@ from app.services.knowledge_base import (
     get_knowledge_base_service,
     normalize_knowledge_base_scope,
 )
+from app.services.media_parser import MediaParserError, parse_document, transcribe_video
 from app.services.persistence import extract_upload_relative_path
 from app.services.providers import (
     BaseLLMProvider,
@@ -386,16 +388,107 @@ class LangGraphProvider(BaseLLMProvider):
 
     async def _parse_materials_node(self, state: GraphState) -> GraphState:
         writer = get_stream_writer()
-        _emit_tool_call(writer, name="parse_materials", status="processing")
+        _emit_tool_call(
+            writer,
+            name="parse_materials",
+            status="processing",
+            message="正在整理并解析附件素材...",
+        )
         logger.info(
             "langgraph node=parse_materials thread_id=%s materials=%s",
             state["request"].thread_id,
             len(state["request"].materials),
         )
 
-        parsed_materials, needs_ocr = _parse_materials(state["request"])
+        request = state["request"]
+        parsed_materials, needs_ocr = _parse_materials(request)
+        enriched_materials = list(parsed_materials)
+
+        for material in request.materials:
+            if material.type == MaterialType.TEXT_LINK and material.url:
+                source_name = _resolve_material_source_name(material)
+                _emit_tool_call(
+                    writer,
+                    name="parse_document",
+                    status="processing",
+                    message=f"正在解析文档素材：{source_name}",
+                )
+                try:
+                    extracted_text = await parse_document(material.url)
+                except MediaParserError as exc:
+                    logger.warning(
+                        "Document parsing failed thread_id=%s source=%s error=%s",
+                        request.thread_id,
+                        source_name,
+                        exc,
+                    )
+                    _emit_tool_call(
+                        writer,
+                        name="parse_document",
+                        status="failed",
+                        message=f"文档解析失败：{source_name}，{exc}",
+                    )
+                    enriched_materials.append(f"文档素材《{source_name}》解析失败：{exc}")
+                else:
+                    _emit_tool_call(
+                        writer,
+                        name="parse_document",
+                        status="completed",
+                        message=f"文档解析完成：{source_name}",
+                    )
+                    escaped_source_name = _escape_context_attribute(source_name)
+                    enriched_materials.append(
+                        f'<document_context source="{escaped_source_name}">\n'
+                        f"{extracted_text}\n"
+                        "</document_context>"
+                    )
+
+            if material.type == MaterialType.VIDEO_URL and material.url:
+                source_name = _resolve_material_source_name(material)
+                _emit_tool_call(
+                    writer,
+                    name="video_transcription",
+                    status="processing",
+                    message=f"正在对视频素材进行语音转写：{source_name}",
+                )
+                try:
+                    transcript = await transcribe_video(material.url)
+                except MediaParserError as exc:
+                    logger.warning(
+                        "Video transcription failed thread_id=%s source=%s error=%s",
+                        request.thread_id,
+                        source_name,
+                        exc,
+                    )
+                    _emit_tool_call(
+                        writer,
+                        name="video_transcription",
+                        status="failed",
+                        message=f"视频转写失败：{source_name}，{exc}",
+                    )
+                    enriched_materials.append(f"视频素材《{source_name}》转写失败：{exc}")
+                else:
+                    _emit_tool_call(
+                        writer,
+                        name="video_transcription",
+                        status="completed",
+                        message=f"视频转写完成：{source_name}",
+                    )
+                    escaped_source_name = _escape_context_attribute(source_name)
+                    enriched_materials.append(
+                        f'<video_transcript source="{escaped_source_name}">\n'
+                        f"{transcript}\n"
+                        "</video_transcript>"
+                    )
+
+        _emit_tool_call(
+            writer,
+            name="parse_materials",
+            status="completed",
+            message="附件解析完成，正在组织生成上下文。",
+        )
         return {
-            "materials_parsed": parsed_materials,
+            "materials_parsed": enriched_materials,
             "needs_ocr": needs_ocr,
             "current_step": "parse_materials:completed",
         }
@@ -1233,6 +1326,39 @@ def _emit_tool_call(
     if message:
         payload["message"] = message
     writer({"payload": payload})
+
+
+def _escape_context_attribute(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _resolve_material_source_name(material: MaterialInput) -> str:
+    display_name = material.text.strip()
+    if display_name:
+        return display_name
+
+    raw_url = (material.url or "").strip()
+    if not raw_url:
+        return "未命名素材"
+
+    normalized_reference = normalize_storage_reference(raw_url)
+    if normalized_reference and not (
+        normalized_reference.startswith("http://")
+        or normalized_reference.startswith("https://")
+    ):
+        _, object_key = parse_stored_file_path(normalized_reference)
+        candidate = Path(unquote(object_key)).name
+        if candidate:
+            return candidate
+
+    parsed = urlparse(raw_url)
+    candidate = Path(unquote(parsed.path or raw_url)).name
+    return candidate or "未命名素材"
 
 
 def _stream_message_chunks(writer, draft: str, chunk_size: int = 32) -> None:

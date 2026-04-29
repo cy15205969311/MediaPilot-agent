@@ -49,6 +49,9 @@ import type {
 const TOKEN_STORAGE_KEY = "omnimedia_token";
 const REFRESH_TOKEN_STORAGE_KEY = "omnimedia_refresh_token";
 const USER_STORAGE_KEY = "omnimedia_user";
+const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
+const LONG_UPLOAD_TIMEOUT_MS = 120000;
+const STREAM_CONNECT_TIMEOUT_MS = 120000;
 
 type APIErrorOptions = {
   status: number;
@@ -255,10 +258,11 @@ async function executeRequest(
   init: RequestInit = {},
   options: RequestOptions = {},
 ): Promise<Response> {
-  const timeoutMs = options.timeoutMs ?? 15000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
   const externalSignal = init.signal;
   let didTimeout = false;
+  let timeoutId: number | null = null;
 
   const onAbort = () => controller.abort();
 
@@ -270,10 +274,12 @@ async function executeRequest(
     }
   }
 
-  const timeoutId = window.setTimeout(() => {
-    didTimeout = true;
-    controller.abort();
-  }, timeoutMs);
+  if (timeoutMs > 0) {
+    timeoutId = window.setTimeout(() => {
+      didTimeout = true;
+      controller.abort();
+    }, timeoutMs);
+  }
 
   try {
     const response = await fetch(input, {
@@ -331,7 +337,9 @@ async function executeRequest(
       cause: error,
     });
   } finally {
-    window.clearTimeout(timeoutId);
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
     if (externalSignal) {
       externalSignal.removeEventListener("abort", onAbort);
     }
@@ -631,7 +639,7 @@ export async function uploadMedia(
       method: "POST",
       body: formData,
     },
-    { timeoutMs: 20000 },
+    { timeoutMs: LONG_UPLOAD_TIMEOUT_MS },
   );
 
   return (await response.json()) as UploadApiResponse;
@@ -783,7 +791,7 @@ export async function uploadKnowledgeDocument(
       method: "POST",
       body: formData,
     },
-    { timeoutMs: 30000 },
+    { timeoutMs: LONG_UPLOAD_TIMEOUT_MS },
   );
 
   return (await response.json()) as KnowledgeUploadApiResponse;
@@ -1181,7 +1189,7 @@ export async function createChatStream(
       body: JSON.stringify(request),
       signal,
     },
-    { timeoutMs: 20000 },
+    { timeoutMs: STREAM_CONNECT_TIMEOUT_MS },
   );
 
   if (!response.body) {

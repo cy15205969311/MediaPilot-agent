@@ -2213,6 +2213,11 @@ function App() {
     kind: UploadedMaterialKind,
   ) => {
     try {
+      setStatusText(
+        file.size >= 8 * 1024 * 1024
+          ? `正在上传大文件素材：${file.name}，这可能需要 10-120 秒，请耐心等待`
+          : `正在上传素材：${file.name}`,
+      );
       const uploadThreadId =
         activeThreadId !== "thread-new" ? activeThreadId : undefined;
       const payload = await uploadMedia(file, "material", uploadThreadId);
@@ -2222,6 +2227,7 @@ function App() {
         fileType: payload.file_type,
         previewUrl: kind === "image" ? payload.url : undefined,
       });
+      setStatusText(`素材上传完成：${file.name}`);
     } catch (error) {
       if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
@@ -2230,7 +2236,9 @@ function App() {
 
       const errorMessage =
         error instanceof APIError
-          ? error.message
+          ? error.code === "REQUEST_TIMEOUT"
+            ? "上传等待时间过长，请检查网络带宽或稍后重试；10MB 左右的视频在 OSS 模式下可能需要更久。"
+            : error.message
           : error instanceof Error
             ? error.message
             : "上传失败，请稍后重试。";

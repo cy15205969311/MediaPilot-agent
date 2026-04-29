@@ -74,6 +74,11 @@ export function Composer({
 }: ComposerProps) {
   const isLoading = isStreaming || isUploading;
   const canSubmit = message.trim().length > 0 && !isLoading;
+  const sendButtonLabel = isUploading
+    ? "上传中..."
+    : isStreaming
+      ? "生成中..."
+      : "发送消息";
 
   const handleSubmit = () => {
     if (!canSubmit) {
@@ -106,27 +111,27 @@ export function Composer({
         <div className="mb-3 flex flex-wrap gap-2">
           <button
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
+            data-testid="composer-upload-image"
             onClick={() => onTriggerFilePicker("image")}
             type="button"
-            data-testid="composer-upload-image"
           >
             <ImageIcon className="h-4 w-4" />
             上传图片
           </button>
           <button
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
+            data-testid="composer-upload-video"
             onClick={() => onTriggerFilePicker("video")}
             type="button"
-            data-testid="composer-upload-video"
           >
             <Video className="h-4 w-4" />
             视频转写稿
           </button>
           <button
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
+            data-testid="composer-upload-text"
             onClick={() => onTriggerFilePicker("text")}
             type="button"
-            data-testid="composer-upload-text"
           >
             <FileText className="h-4 w-4" />
             文本文件
@@ -188,56 +193,65 @@ export function Composer({
 
         <div className="relative">
           <textarea
-            className="min-h-32 w-full resize-none rounded-[28px] border border-border bg-card px-5 py-4 pr-16 text-sm leading-7 text-card-foreground shadow-sm outline-none transition focus:border-primary focus:outline-none focus:ring-0"
+            className="min-h-32 w-full resize-none rounded-[28px] border border-border bg-card px-5 py-4 pr-20 text-sm leading-7 text-card-foreground shadow-sm outline-none transition focus:border-primary focus:outline-none focus:ring-0"
+            data-testid="composer-textarea"
             onChange={(event) => onMessageChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="描述你的内容需求，或上传素材让 Agent 帮你分析..."
-            data-testid="composer-textarea"
             value={message}
           />
           <button
-            aria-label="发送消息"
+            aria-label={sendButtonLabel}
             className="absolute bottom-4 right-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-md transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            data-testid="composer-send-button"
             disabled={!canSubmit}
             onClick={handleSubmit}
             type="button"
-            data-testid="composer-send-button"
           >
-            <Send className="h-4 w-4" />
+            {isLoading ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
           </button>
         </div>
 
         <div className="mt-2 px-2 text-xs text-muted-foreground">
           Enter 发送，Shift + Enter 换行
         </div>
+        {isUploading ? (
+          <div className="mt-1 px-2 text-xs text-warning-foreground">
+            大文件上传和 OSS 转存可能需要 10-120 秒，请耐心等待上传完成后再发送。
+          </div>
+        ) : null}
       </div>
 
       <input
         accept="image/*"
         className="hidden"
+        data-testid="composer-image-input"
         multiple
         onChange={(event) => onFilesSelected("image", event)}
         ref={imageInputRef}
         type="file"
-        data-testid="composer-image-input"
       />
       <input
         accept="video/*,.mp4,.mov"
         className="hidden"
+        data-testid="composer-video-input"
         multiple
         onChange={(event) => onFilesSelected("video", event)}
         ref={videoInputRef}
         type="file"
-        data-testid="composer-video-input"
       />
       <input
         accept=".txt,.pdf,.md"
         className="hidden"
+        data-testid="composer-text-input"
         multiple
         onChange={(event) => onFilesSelected("text", event)}
         ref={textInputRef}
         type="file"
-        data-testid="composer-text-input"
       />
     </>
   );
