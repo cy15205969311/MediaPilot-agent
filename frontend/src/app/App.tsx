@@ -449,10 +449,17 @@ function mapTemplatePlatformToWorkspace(
     return "douyin";
   }
 
+  if (platform === "双平台") {
+    return "both";
+  }
+
   return null;
 }
 
 function mapWorkspacePlatformToTemplate(platform: UiPlatform): TemplatePlatform {
+  if (platform === "both") {
+    return "双平台";
+  }
   if (platform === "douyin") {
     return "抖音";
   }
@@ -474,6 +481,18 @@ function mapCategoryToKnowledgeBaseScope(category: TemplateCategory): string {
   }
   if (category === "教育/干货") {
     return "education_score_boost";
+  }
+  if (category === "房产/家居") {
+    return "housing_home_revival";
+  }
+  if (category === "汽车/出行") {
+    return "car_lifestyle_commuter";
+  }
+  if (category === "母婴/宠物") {
+    return "parenting_pet_care";
+  }
+  if (category === "情感/心理") {
+    return "emotional_wellbeing_notes";
   }
   return "beauty_skin_repair_notes";
 }
@@ -523,6 +542,18 @@ function inferTemplateCategoryFromContext(params: {
   }
   if (["闲鱼", "二手", "回血", "断舍离", "sku"].some((item) => context.includes(item.toLowerCase()))) {
     return "电商/闲鱼";
+  }
+  if (["装修", "租房", "法拍房", "软装", "家居", "老破小"].some((item) => context.includes(item.toLowerCase()))) {
+    return "房产/家居";
+  }
+  if (["汽车", "试驾", "油耗", "保养", "二手车", "新能源", "自驾"].some((item) => context.includes(item.toLowerCase()))) {
+    return "汽车/出行";
+  }
+  if (["母婴", "宝宝", "幼猫", "幼犬", "宠物", "喂养", "囤货"].some((item) => context.includes(item.toLowerCase()))) {
+    return "母婴/宠物";
+  }
+  if (["焦虑", "恋爱", "人格", "独处", "关系", "情绪", "心理"].some((item) => context.includes(item.toLowerCase()))) {
+    return "情感/心理";
   }
   if (["stm32", "iot", "嵌入式", "开发板", "智能家居", "数码", "测评"].some((item) => context.includes(item.toLowerCase()))) {
     return "数码科技";
@@ -2630,19 +2661,14 @@ function App() {
               <TemplatesView
                 creationRequest={templateCreationRequest}
                 isLoading={isLoadingTemplates}
-                isLoadingSkills={isLoadingTemplateSkills}
                 isMutating={isMutatingTemplates}
                 mutatingTemplateId={mutatingTemplateId}
                 onCreationRequestHandled={() => setTemplateCreationRequest(null)}
                 onCreateTemplate={(payload) => handleCreateTemplate(payload)}
                 onDeleteTemplate={(template) => handleDeleteTemplate(template)}
                 onDeleteTemplates={(templateIds) => handleDeleteTemplates(templateIds)}
-                onSearchSkills={(keyword, category) =>
-                  handleSearchTemplateSkills(keyword, category)
-                }
                 onUseTemplate={handleUseTemplate}
                 selectedTemplateId={selectedTemplate?.id ?? null}
-                skills={templateSkills}
                 templates={templates}
               />
             ) : (

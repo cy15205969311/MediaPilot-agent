@@ -133,7 +133,7 @@ export type DraftsDeleteApiResponse = {
   cleared_all: boolean;
 };
 
-export type TemplatePlatform = "小红书" | "抖音" | "闲鱼" | "技术博客";
+export type TemplatePlatform = "小红书" | "抖音" | "双平台" | "闲鱼" | "技术博客";
 
 export type TemplateCategory =
   | "美妆护肤"
@@ -141,7 +141,11 @@ export type TemplateCategory =
   | "职场金融"
   | "数码科技"
   | "电商/闲鱼"
-  | "教育/干货";
+  | "教育/干货"
+  | "房产/家居"
+  | "汽车/出行"
+  | "母婴/宠物"
+  | "情感/心理";
 
 export type TemplateSummaryItem = {
   id: string;

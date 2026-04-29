@@ -66,6 +66,10 @@ MOCK_KNOWLEDGE_DOCUMENTS: dict[str, list[str]] = {
     "smart_home_reviews": [
         "Smart-home review notes should compare setup friction, ecosystem compatibility, automation depth, and hidden subscription or maintenance costs.",
     ],
+    "ai_productivity_stack": [
+        "AI productivity content converts better when it names the exact before-and-after workflow instead of praising the tool abstractly.",
+        "For tool-stack notes, explain trigger conditions, handoff points, prompt structure, and what part still needs human judgment.",
+    ],
     "secondhand_trade_playbook": [
         "High-conversion secondhand listings should describe condition honestly, including visible flaws, usage frequency, included accessories, and preferred transaction method.",
         "For Xianyu-style resale-recovery copy, the trust signal matters more than hype: explain why the item is being sold, what type of buyer it fits, and a realistic price anchor.",
@@ -73,6 +77,14 @@ MOCK_KNOWLEDGE_DOCUMENTS: dict[str, list[str]] = {
     ],
     "declutter_recovery_board": [
         "Declutter-to-recovery copy should focus on reclaiming space, lowering sunk-cost stress, and making the next owner feel safe about the purchase.",
+    ],
+    "secondhand_digital_guide": [
+        "Secondhand digital-device copy should surface battery health, purchase channel, invoice status, repair history, and real usage intensity before trying to sell the highlight.",
+        "For cameras, tablets, headphones, and gaming devices, clear accessory lists and condition grades convert better than emotional adjectives.",
+    ],
+    "private_domain_followup": [
+        "Private-domain follow-up should lower pressure first, then clarify the next action, instead of jumping straight into repeated closing language.",
+        "High-trust follow-up scripts mention the user's original concern, offer one precise answer, and end with a single low-friction CTA.",
     ],
     "education_score_boost": [
         "Education lead-generation titles convert better when they specify subject, score gap, and a believable improvement window instead of shouting miracle results.",
@@ -84,6 +96,30 @@ MOCK_KNOWLEDGE_DOCUMENTS: dict[str, list[str]] = {
     ],
     "study_method_reviews": [
         "Study-method notes perform better when they contrast ineffective habits with one testable replacement method and a specific review cycle.",
+    ],
+    "medical_pop_science": [
+        "Medical popular-science content should explain common misunderstandings in plain language while clearly stating what requires a real doctor visit.",
+        "Health content gains trust when it separates symptoms, scenarios, and red-flag warnings instead of giving absolute advice.",
+    ],
+    "legal_common_qa": [
+        "Legal explainers should define the scenario boundary first, then describe evidence, procedure, and practical next steps without pretending to replace a lawyer.",
+        "High-trust labor or contract content performs better when it lists what documents to keep and what promises should not be believed verbally.",
+    ],
+    "housing_home_revival": [
+        "Housing and renovation notes should always separate purchase cost, hidden cost, and long-term maintenance cost rather than only showing the aesthetic result.",
+        "For rental or renovation topics, readers save content when it includes contract clauses, material tradeoffs, and what is worth spending on first.",
+    ],
+    "car_lifestyle_commuter": [
+        "Automotive decision notes should compare commuting radius, charging or fueling convenience, parking constraints, and yearly ownership cost in one frame.",
+        "Test-drive content performs better when it names the road condition, passenger mix, and one deal-breaking pain point rather than saying the car feels good.",
+    ],
+    "parenting_pet_care": [
+        "Parenting and pet-care notes should reduce guilt and explain manageable routines, because anxious readers trust calm structure more than perfection language.",
+        "Caregiving content is more reusable when it lists observation signals, frequency, timing, and what requires professional help.",
+    ],
+    "emotional_wellbeing_notes": [
+        "Emotional-wellbeing content should validate the feeling first, then name a boundary or action the reader can try within 24 hours.",
+        "Relationship or anxiety notes gain saves when they offer one concrete script, one reflection question, and one stop-doing reminder.",
     ],
 }
 

@@ -1187,26 +1187,14 @@ def legacy_template_list_endpoint_returns_builtin_templates(client: TestClient):
     assert response.status_code == 200
 
     payload = response.json()
-    assert payload["total"] == 3
-    assert [item["id"] for item in payload["items"]] == [
-        "template-xiaohongshu-travel-hotflow",
-        "template-xianyu-secondhand-sku",
-        "template-techblog-hardcore-markdown",
-    ]
-    assert [item["platform"] for item in payload["items"]] == [
-        "Xiaohongshu",
-        "Xianyu",
-        "TechBlog",
-    ]
-    assert payload["items"][0]["title"] == "文旅探店爆款流"
-    assert "周末短途游" in payload["items"][0]["description"]
-    assert "情绪价值" in payload["items"][0]["system_prompt"]
-    assert payload["items"][1]["title"] == "高转化二手闲置 SKU"
-    assert "精致穷" in payload["items"][1]["description"]
-    assert "闲鱼" in payload["items"][1]["system_prompt"]
-    assert payload["items"][2]["title"] == "硬核技术教程（如 IoT / 嵌入式）"
-    assert "Markdown" in payload["items"][2]["description"]
-    assert "Markdown" in payload["items"][2]["system_prompt"]
+    assert payload["total"] >= 100
+    ids = {item["id"] for item in payload["items"]}
+    assert "template-preset-travel-hotflow" in ids
+    assert "template-preset-finance-recovery" in ids
+    assert "template-preset-beauty-overnight-repair" in ids
+    assert "template-preset-tech-iot-markdown" in ids
+    assert "template-preset-xianyu-secondhand-sku" in ids
+    assert "template-preset-education-score-boost" in ids
 
 
 def test_template_list_endpoint_returns_preset_templates(client: TestClient):
@@ -1216,45 +1204,52 @@ def test_template_list_endpoint_returns_preset_templates(client: TestClient):
     assert response.status_code == 200
 
     payload = response.json()
-    assert payload["total"] >= 20
-    assert [item["id"] for item in payload["items"][:6]] == [
-        "template-preset-travel-hotflow",
-        "template-preset-finance-recovery",
-        "template-preset-beauty-overnight-repair",
-        "template-preset-tech-iot-markdown",
-        "template-preset-xianyu-secondhand-sku",
-        "template-preset-education-score-boost",
-    ]
-    assert [item["platform"] for item in payload["items"][:6]] == [
-        "小红书",
-        "小红书",
-        "小红书",
-        "技术博客",
-        "闲鱼",
-        "抖音",
-    ]
-    assert [item["category"] for item in payload["items"][:6]] == [
-        "美食文旅",
-        "职场金融",
-        "美妆护肤",
-        "数码科技",
-        "电商/闲鱼",
-        "教育/干货",
-    ]
-    assert payload["items"][0]["title"] == "文旅探店爆款流"
-    assert "周末短途游" in payload["items"][0]["description"]
-    assert "生活方式编辑" in payload["items"][0]["system_prompt"]
-    assert payload["items"][0]["knowledge_base_scope"] == "travel_local_guides"
-    assert payload["items"][1]["title"] == "精致穷回血理财方案"
-    assert "28-35 岁女性" in payload["items"][1]["description"]
-    assert "同龄人焦虑" in payload["items"][1]["system_prompt"]
-    assert payload["items"][3]["title"] == "硬核技术教程（IoT / STM32）"
-    assert "STM32" in payload["items"][3]["description"]
-    assert "Markdown" in payload["items"][3]["system_prompt"]
+    assert payload["total"] >= 100
     ids = {item["id"] for item in payload["items"]}
     assert "template-preset-citywalk-weekend" in ids
     assert "template-preset-legal-risk-qa" in ids
     assert "template-preset-medical-pop-science" in ids
+
+    categories: dict[str, int] = {}
+    for item in payload["items"]:
+        categories[item["category"]] = categories.get(item["category"], 0) + 1
+
+    assert categories["美妆护肤"] >= 10
+    assert categories["美食文旅"] >= 10
+    assert categories["职场金融"] >= 10
+    assert categories["数码科技"] >= 10
+    assert categories["电商/闲鱼"] >= 10
+    assert categories["教育/干货"] >= 10
+    assert categories["房产/家居"] >= 10
+    assert categories["汽车/出行"] >= 10
+    assert categories["母婴/宠物"] >= 10
+    assert categories["情感/心理"] >= 10
+
+    travel_item = next(
+        item for item in payload["items"] if item["id"] == "template-preset-travel-hotflow"
+    )
+    assert travel_item["title"] == "文旅探店爆款流"
+    assert "周末短途游" in travel_item["description"]
+    assert "[Role]" in travel_item["system_prompt"]
+    assert travel_item["knowledge_base_scope"] == "travel_local_guides"
+
+    housing_item = next(
+        item
+        for item in payload["items"]
+        if item["id"] == "template-preset-housing-foreclosure-guide"
+    )
+    assert housing_item["platform"] in {"小红书", "双平台"}
+    assert housing_item["category"] == "房产/家居"
+    assert "法拍房" in housing_item["title"]
+    assert housing_item["knowledge_base_scope"] == "housing_home_revival"
+
+    emotion_item = next(
+        item
+        for item in payload["items"]
+        if item["id"] == "template-preset-emotion-peer-anxiety"
+    )
+    assert emotion_item["category"] == "情感/心理"
+    assert "[Variables]" in emotion_item["system_prompt"]
     assert all(item["is_preset"] is True for item in payload["items"])
     assert all(item["created_at"].endswith("Z") for item in payload["items"])
 
@@ -1287,7 +1282,7 @@ def test_template_create_endpoint_persists_user_template(client: TestClient):
     list_response = client.get("/api/v1/media/templates", headers=headers)
     assert list_response.status_code == 200
     items = list_response.json()["items"]
-    assert len(items) >= 21
+    assert len(items) >= 101
     assert any(item["id"] == created["id"] for item in items)
 
 
@@ -1309,7 +1304,7 @@ def test_template_skills_search_endpoint_returns_discoveries(client: TestClient)
     assert payload["templates"][0]["title"] == payload["items"][0]["title"]
     first_item = payload["items"][0]
     assert first_item["title"]
-    assert first_item["platform"] in {"小红书", "抖音", "闲鱼", "技术博客"}
+    assert first_item["platform"] in {"小红书", "抖音", "双平台", "闲鱼", "技术博客"}
     assert first_item["category"] == "美食文旅"
     assert first_item["system_prompt"]
     assert "[Role]" in first_item["system_prompt"]

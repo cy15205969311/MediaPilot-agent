@@ -679,6 +679,14 @@ export async function fetchTemplates(): Promise<TemplatesApiResponse> {
 function extractTemplateSkillsArray(
   value: unknown,
 ): TemplateSkillsApiResponse["items"] {
+  if (typeof value === "string") {
+    const nestedValue = parseTemplateSkillsPayload(value);
+    if (nestedValue !== value) {
+      return extractTemplateSkillsArray(nestedValue);
+    }
+    return [];
+  }
+
   if (Array.isArray(value)) {
     return value as TemplateSkillsApiResponse["items"];
   }
@@ -722,6 +730,29 @@ function extractTemplateSkillsArray(
   return [];
 }
 
+function parseTemplateSkillsPayload(rawText: string): unknown {
+  let current: unknown = rawText;
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (typeof current !== "string") {
+      break;
+    }
+
+    const trimmed = current.trim();
+    if (!trimmed) {
+      return {};
+    }
+
+    try {
+      current = JSON.parse(trimmed) as unknown;
+    } catch {
+      return current;
+    }
+  }
+
+  return current;
+}
+
 export async function fetchTemplateSkills(params: {
   q: string;
   category?: TemplateCategory;
@@ -740,19 +771,25 @@ export async function fetchTemplateSkills(params: {
     { timeoutMs: 20000 },
   );
 
-  const rawPayload = (await response.json()) as
+  const rawText = await response.text();
+  console.log("云端 API 原始返回文本:", rawText);
+
+  const payload = parseTemplateSkillsPayload(rawText) as
     | TemplateSkillsApiResponse
     | {
         templates?: TemplateSkillsApiResponse["items"];
         items?: TemplateSkillsApiResponse["items"];
-        data?: {
-          templates?: TemplateSkillsApiResponse["items"];
-          items?: TemplateSkillsApiResponse["items"];
-          data?: TemplateSkillsApiResponse["items"];
-        };
+        data?:
+          | {
+              templates?: TemplateSkillsApiResponse["items"];
+              items?: TemplateSkillsApiResponse["items"];
+              data?: TemplateSkillsApiResponse["items"];
+            }
+          | TemplateSkillsApiResponse["items"]
+          | string;
       }
-    | TemplateSkillsApiResponse["items"];
-  const payload = JSON.parse(JSON.stringify(rawPayload)) as typeof rawPayload;
+    | TemplateSkillsApiResponse["items"]
+    | string;
 
   console.log("前端收到的云端原始数据:", payload);
   const extractedItems = extractTemplateSkillsArray(payload);
@@ -771,29 +808,43 @@ export async function fetchTemplateSkills(params: {
     };
   }
 
+  if (!payload || typeof payload !== "object") {
+    return {
+      query: params.q,
+      category: params.category ?? null,
+      items: extractedItems,
+      templates: extractedItems,
+      total: extractedItems.length,
+      data_mode: "mock",
+      fallback_reason: null,
+    };
+  }
+
+  const payloadRecord = payload as Record<string, unknown>;
+
   return {
-    query: "query" in payload && typeof payload.query === "string" ? payload.query : params.q,
+    query:
+      typeof payloadRecord.query === "string" ? payloadRecord.query : params.q,
     category:
-      "category" in payload
-        ? (payload.category as TemplateSkillsApiResponse["category"])
+      "category" in payloadRecord
+        ? (payloadRecord.category as TemplateSkillsApiResponse["category"])
         : (params.category ?? null),
     items: extractedItems,
     templates: extractedItems,
     total:
-      "total" in payload && typeof payload.total === "number"
-        ? payload.total
+      typeof payloadRecord.total === "number"
+        ? payloadRecord.total
         : extractedItems.length,
     data_mode:
-      "data_mode" in payload &&
-      (payload.data_mode === "mock" ||
-        payload.data_mode === "mock_fallback" ||
-        payload.data_mode === "live_tavily" ||
-        payload.data_mode === "llm_fallback")
-        ? payload.data_mode
+      payloadRecord.data_mode === "mock" ||
+      payloadRecord.data_mode === "mock_fallback" ||
+      payloadRecord.data_mode === "live_tavily" ||
+      payloadRecord.data_mode === "llm_fallback"
+        ? payloadRecord.data_mode
         : "mock",
     fallback_reason:
-      "fallback_reason" in payload && typeof payload.fallback_reason === "string"
-        ? payload.fallback_reason
+      typeof payloadRecord.fallback_reason === "string"
+        ? payloadRecord.fallback_reason
         : null,
   };
 }

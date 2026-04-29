@@ -8,7 +8,7 @@ import os
 import traceback
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -89,13 +89,26 @@ DRAFT_FINAL_RESPONSE_INSTRUCTION = (
     "请直接基于上述上下文和用户的具体要求输出最终的新媒体文案或回答，"
     "不要在开头做任何解释或说明。"
 )
-ROUTER_DECISION_SYSTEM_PROMPT = (
-    "你是 LangGraph 工作流中的联网路由器。"
-    "你的任务是判断当前用户请求是否需要额外获取最新资讯、全网热点、近期案例、新闻动态或实时趋势。"
-    "只有当外部搜索能显著提升答案时效性和准确性时，才将 needs_search 设为 true。"
-    "如果不需要联网搜索，search_query 必须返回空字符串。"
-    "请始终只返回 JSON object，字段固定为 needs_search 和 search_query。"
-)
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def _build_router_decision_system_prompt() -> str:
+    current_datetime = datetime.now(BEIJING_TIMEZONE)
+    current_date = current_datetime.strftime("%Y年%m月%d日")
+    current_year = current_datetime.year
+    current_month = current_datetime.strftime("%Y年%m月")
+    return (
+        "你是一个高级的 AI 意图识别与搜索词规划专家。\n"
+        f"【系统时间】：今天是 {current_date}（北京时间）。\n"
+        "【核心任务】：请根据用户的输入，判断是否需要进行全网搜索。"
+        "如果需要，请提取出最精准、最适合搜索引擎使用的 search_query。\n"
+        "【判断原则】：只有当外部搜索能显著提升答案的时效性、真实性、完整性或现实参考价值时，"
+        "才把 needs_search 设为 true；否则必须返回 false。\n"
+        "【时间强制约束】：如果用户任务具有明显时效性，例如最新资讯、爆款、趋势、探店、价格、"
+        f"近期案例、政策变化或年度对比，你生成的 search_query 必须主动带上当前年份 {current_year} "
+        f"或具体年月（例如 {current_month}）。\n"
+        "【输出要求】：无论是否需要搜索，你都只能返回一个 JSON object，字段固定为 needs_search 和 search_query。"
+    )
 
 
 def _resolve_vision_model(explicit_model: str | None) -> str:
@@ -944,7 +957,7 @@ class LangGraphProvider(BaseLLMProvider):
             return _build_heuristic_search_route_decision(request)
 
         messages = [
-            {"role": "system", "content": ROUTER_DECISION_SYSTEM_PROMPT},
+            {"role": "system", "content": _build_router_decision_system_prompt()},
             {
                 "role": "user",
                 "content": (
@@ -1633,13 +1646,21 @@ def _remove_image_materials(request: MediaChatRequest) -> list[MaterialInput]:
 
 
 def _build_default_search_query(request: MediaChatRequest) -> str:
+    current_datetime = datetime.now(BEIJING_TIMEZONE)
+    current_year = current_datetime.year
+    current_month = current_datetime.strftime("%Y年%m月")
     task_hint = {
         TaskType.TOPIC_PLANNING: "请检索最新行业趋势、用户讨论和高热选题方向",
         TaskType.HOT_POST_ANALYSIS: "请检索最新热点内容、爆款案例和传播讨论",
         TaskType.CONTENT_GENERATION: "请检索最新热点话题、观点切口和用户讨论",
         TaskType.COMMENT_REPLY: "请检索相关热点背景和近期舆情讨论",
     }.get(request.task_type, "请检索相关外部信息")
-    return f"{request.message}\n{task_hint}\n目标平台：{request.platform.value}"
+    return (
+        f"{request.message}\n"
+        f"{task_hint}\n"
+        f"目标平台：{request.platform.value}\n"
+        f"优先检索时间范围：{current_year} 年最新信息，必要时带上 {current_month}"
+    )
 
 
 def _build_heuristic_search_route_decision(
@@ -1759,7 +1780,7 @@ def _build_mock_search_results(
     request: MediaChatRequest,
     search_query: str,
 ) -> str:
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(BEIJING_TIMEZONE).date().isoformat()
     platform_label = request.platform.value
 
     topic_map = {

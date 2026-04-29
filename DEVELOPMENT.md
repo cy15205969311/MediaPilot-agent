@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.16`
-- Updated on: `2026-04-28`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, 20+ industry presets, knowledge-base-scoped templates, conversation-to-template capture, skills discovery search, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Current version: `v1.13.17`
+- Updated on: `2026-04-29`
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, LangGraph vision-aware orchestration, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, conversation-to-template capture, and new-thread cascade prefill, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -1289,19 +1289,18 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.16
+### 16.1 Completed in v1.13.17
 
 This version adds or solidifies:
 
-1. `Template` now persists `knowledge_base_scope`, backed by Alembic migration `20260428_02_template_growth_ecosystem.py`, so template records can declare a downstream RAG/knowledge linkage without coupling template creation to runtime retrieval.
-2. `app/services/template_library.py` now seeds and runtime-syncs more than 20 preset templates across 文旅、美妆、职场、数码、闲鱼、教育等主流行业, while preserving deterministic preset ordering and idempotent upgrades for existing deployments.
-3. `GET /api/v1/media/skills/search` now exposes an authenticated Skills discovery surface powered by Tavily live search when configured, with safe mock or mock-fallback cards when no upstream search is available.
-4. `frontend/src/app/components/views/TemplatesView.tsx` now upgrades into a four-lane template ecosystem workspace with 推荐 / 行业 / 我的 / Skills filters, knowledge-base fields, searchable discovery cards, and import-to-template modal reuse.
-5. `frontend/src/app/App.tsx` and `frontend/src/app/components/ChatFeed.tsx` now support conversation-to-template capture, so the latest artifact in chat can jump directly into a prefilled template draft carrying title, description, inferred category, knowledge-base scope, and current `system_prompt`.
-6. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now cover expanded preset inventory, skills discovery, skill import, and artifact-to-template capture, while `python -m pytest` plus Playwright browser coverage remain green.
-7. `app/services/knowledge_base.py` now introduces a lightweight retrieval layer that prefers Chroma when installed, falls back to a deterministic local JSON plus hashing retriever in bare development environments, and seeds scope-specific mock knowledge for repeatable RAG verification.
-8. `Thread` plus the chat/history contracts now persist `knowledge_base_scope`, backed by Alembic migration `20260429_01_thread_knowledge_base_scope.py`, so a template-bound knowledge scope survives from first message creation through replay, follow-up turns, and thread settings updates.
-9. LangGraph `generate_draft_node` now performs a real retrieval hop for template-bound scopes before final generation, appending the retrieved knowledge context into the effective draft prompt instead of treating `knowledge_base_scope` as metadata-only decoration.
+1. `Template` plus `Thread` now persist `knowledge_base_scope`, backed by Alembic migrations `20260428_02_template_growth_ecosystem.py` and `20260429_01_thread_knowledge_base_scope.py`, so template-bound knowledge scopes survive from template selection through thread creation, replay, follow-up turns, and final generation.
+2. `app/services/template_library.py` now generates and runtime-syncs `100+` preset templates across 美妆护肤、美食文旅、职场金融、数码科技、电商/闲鱼、教育/干货、房产/家居、汽车/出行、母婴/宠物、情感/心理 10 大行业, while preserving deterministic legacy ids for key cards and pruning stale preset rows from older seed sets.
+3. `frontend/src/app/components/views/TemplatesView.tsx` now returns to a local-first template center, hiding the main Skills discovery UI and surfacing a simpler workspace with keyword search, 10 category pills, local card-grid browsing, preset/custom badges, batch selection, batch deletion, and one-click apply.
+4. `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `app/models/schemas.py` now expand template platform/category contracts to include `双平台` plus the new 10-category taxonomy, while keeping template-to-chat prefill, artifact-to-template capture, and `knowledge_base_scope` cascade behavior aligned.
+5. `app/services/knowledge_base.py` now introduces a lightweight retrieval layer that prefers Chroma when installed, falls back to a deterministic local JSON plus hashing retriever in bare development environments, and seeds additional scope-specific mock knowledge for repeatable RAG verification across the expanded preset library.
+6. LangGraph `generate_draft_node` now performs a real retrieval hop for template-bound scopes before final generation, appending retrieved knowledge context into the effective draft prompt, while `app/services/graph/provider.py` also injects a current-date time anchor into routing/search planning prompts so time-sensitive query extraction stops defaulting to stale years.
+7. `GET /api/v1/media/skills/search` remains available as a backend-only future extension surface powered by Tavily live search when configured, but the primary production workflow now emphasizes fast local presets instead of cloud-side discovery UI.
+8. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now cover the larger preset inventory, hidden Skills entry, new category tabs, local-first template-center behavior, and artifact-to-template capture, while `python -m pytest` plus Playwright browser coverage remain green.
 
 ### 16.2 Completed in v1.13.15
 
@@ -1437,8 +1436,8 @@ The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
 3. upload cleanup now covers avatars plus local and OSS-backed material retention, OSS delivery now uses signed URLs with lifecycle-ready prefixes, lifecycle rollout can be automated, and users can inspect retention summaries, but the project still lacks CDN invalidation, multi-bucket governance, and a full admin retention console
-4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a template center that can persist knowledge-base scopes plus discover external prompt Skills, but the project still lacks user-managed document ingestion, richer first-party knowledge execution, product/CRM integrations, and broader live business-system connectivity
-5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, artifact-side follow-up actions, template skill import, and artifact-to-template capture, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
+4. LangGraph now has branching, real vision integration, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a local-first template center that can persist knowledge-base scopes while keeping the Skills backend surface reserved for future re-entry, but the project still lacks user-managed document ingestion, richer first-party knowledge execution, product/CRM integrations, and broader live business-system connectivity
+5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, artifact-side follow-up actions, local-first template-center management, and artifact-to-template capture, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
 
 ## 17. Recommended Next Steps
 

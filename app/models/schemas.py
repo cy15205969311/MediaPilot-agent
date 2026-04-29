@@ -44,6 +44,7 @@ class Platform(str, Enum):
 class TemplatePlatform(str, Enum):
     XIAOHONGSHU = "小红书"
     DOUYIN = "抖音"
+    BOTH = "双平台"
     XIANYU = "闲鱼"
     TECH_BLOG = "技术博客"
 
@@ -55,6 +56,10 @@ class TemplateCategory(str, Enum):
     TECH = "数码科技"
     XIANYU = "电商/闲鱼"
     EDUCATION = "教育/干货"
+    HOUSING = "房产/家居"
+    AUTOMOTIVE = "汽车/出行"
+    FAMILY = "母婴/宠物"
+    EMOTION = "情感/心理"
 
 
 class TaskType(str, Enum):
