@@ -196,6 +196,34 @@ export type KnowledgeScopeDeleteApiResponse = {
   deleted_count: number;
   deleted: boolean;
 };
+export type KnowledgeScopeRenamePayload = {
+  new_name: string;
+};
+
+export type KnowledgeScopeRenameApiResponse = {
+  previous_scope: string;
+  scope: string;
+  renamed_count: number;
+  renamed: boolean;
+};
+
+export type KnowledgeScopeSourceItem = {
+  filename: string;
+  chunk_count: number;
+};
+
+export type KnowledgeScopeSourcesApiResponse = {
+  scope: string;
+  items: KnowledgeScopeSourceItem[];
+  total: number;
+};
+
+export type KnowledgeSourceDeleteApiResponse = {
+  scope: string;
+  source: string;
+  deleted_count: number;
+  deleted: boolean;
+};
 
 export type TemplatePlatform = "小红书" | "抖音" | "双平台" | "闲鱼" | "技术博客";
 

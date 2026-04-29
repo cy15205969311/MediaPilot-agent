@@ -192,6 +192,12 @@ class KnowledgeScopeSummary:
     updated_at: str | None
 
 
+@dataclass(frozen=True)
+class KnowledgeScopeSourceSummary:
+    filename: str
+    chunk_count: int
+
+
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -277,11 +283,19 @@ class _HashingEmbeddingFunction:
         self._config = {"name": "omnimedia_hashing_embedding", "dimensions": EMBEDDING_DIMENSIONS}
 
     def __call__(self, input: Any) -> list[list[float]]:
-        if isinstance(input, str):
-            texts = [input]
-        else:
-            texts = [str(item) for item in input]
+        return self.embed_documents(self._coerce_texts(input))
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [_embed_text(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return _embed_text(text)
+
+    @staticmethod
+    def _coerce_texts(input: Any) -> list[str]:
+        if isinstance(input, str):
+            return [input]
+        return [str(item) for item in input]
 
     @staticmethod
     def name() -> str:
@@ -457,6 +471,89 @@ class KnowledgeBaseService:
             reverse=True,
         )
 
+    def rename_scope(self, user_id: str, old_scope: str, new_scope: str) -> int:
+        normalized_user_id = (user_id or "").strip()
+        normalized_old_scope = normalize_knowledge_base_scope(old_scope)
+        normalized_new_scope = normalize_knowledge_base_scope(new_scope)
+        if (
+            not normalized_user_id
+            or normalized_old_scope is None
+            or normalized_new_scope is None
+        ):
+            return 0
+
+        if normalized_old_scope == normalized_new_scope:
+            return self._count_documents(normalized_user_id, normalized_old_scope)
+
+        renamed_documents = self._rename_scope_in_local_store(
+            user_id=normalized_user_id,
+            old_scope=normalized_old_scope,
+            new_scope=normalized_new_scope,
+        )
+        if not renamed_documents:
+            return 0
+
+        if self._using_chroma:
+            try:  # pragma: no cover - exercised only when chromadb is installed
+                collection = self._get_collection()
+                collection.delete(
+                    where={
+                        "$and": [
+                            {"user_id": normalized_user_id},
+                            {"scope": normalized_old_scope},
+                        ]
+                    },
+                )
+
+                collection.upsert(
+                    ids=[document.document_id for document in renamed_documents],
+                    documents=[document.text for document in renamed_documents],
+                    metadatas=[
+                        {
+                            "user_id": document.user_id,
+                            "scope": document.scope,
+                            "source": document.source,
+                            "created_at": document.created_at,
+                        }
+                        for document in renamed_documents
+                    ],
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning(
+                    "Knowledge base Chroma rename failed user_id=%s old_scope=%s new_scope=%s: %s",
+                    normalized_user_id,
+                    normalized_old_scope,
+                    normalized_new_scope,
+                    exc,
+                )
+
+        return len(renamed_documents)
+
+    def list_scope_sources(
+        self,
+        user_id: str,
+        scope: str,
+    ) -> list[KnowledgeScopeSourceSummary]:
+        normalized_user_id = (user_id or "").strip()
+        normalized_scope = normalize_knowledge_base_scope(scope)
+        if not normalized_user_id or normalized_scope is None:
+            return []
+
+        buckets: dict[str, int] = {}
+        for document in self._iter_documents():
+            if document.user_id != normalized_user_id or document.scope != normalized_scope:
+                continue
+            buckets[document.source] = buckets.get(document.source, 0) + 1
+
+        items = [
+            KnowledgeScopeSourceSummary(
+                filename=filename,
+                chunk_count=chunk_count,
+            )
+            for filename, chunk_count in buckets.items()
+        ]
+        return sorted(items, key=lambda item: (-item.chunk_count, item.filename.lower()))
+
     def delete_scope(self, user_id: str, scope: str) -> int:
         normalized_user_id = (user_id or "").strip()
         normalized_scope = normalize_knowledge_base_scope(scope)
@@ -484,6 +581,42 @@ class KnowledgeBaseService:
                     "Knowledge base Chroma delete failed user_id=%s scope=%s: %s",
                     normalized_user_id,
                     normalized_scope,
+                    exc,
+                )
+
+        return len(deleted_ids)
+
+    def delete_source(self, user_id: str, scope: str, source: str) -> int:
+        normalized_user_id = (user_id or "").strip()
+        normalized_scope = normalize_knowledge_base_scope(scope)
+        normalized_source = normalize_knowledge_source(source)
+        if not normalized_user_id or normalized_scope is None:
+            return 0
+
+        deleted_ids = self._delete_source_from_local_store(
+            user_id=normalized_user_id,
+            scope=normalized_scope,
+            source=normalized_source,
+        )
+
+        if deleted_ids and self._using_chroma:
+            try:  # pragma: no cover - exercised only when chromadb is installed
+                collection = self._get_collection()
+                collection.delete(
+                    where={
+                        "$and": [
+                            {"user_id": normalized_user_id},
+                            {"scope": normalized_scope},
+                            {"source": normalized_source},
+                        ]
+                    },
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning(
+                    "Knowledge base Chroma source delete failed user_id=%s scope=%s source=%s: %s",
+                    normalized_user_id,
+                    normalized_scope,
+                    normalized_source,
                     exc,
                 )
 
@@ -673,6 +806,80 @@ class KnowledgeBaseService:
                 existing_documents.pop(document_id, None)
             self._write_local_store(existing_documents)
             return deleted_ids
+
+    def _delete_source_from_local_store(
+        self,
+        *,
+        user_id: str,
+        scope: str,
+        source: str,
+    ) -> list[str]:
+        with self._lock:
+            existing_documents = self._deserialize_local_store(
+                json.loads(self._fallback_store_path.read_text(encoding="utf-8"))
+                if self._fallback_store_path.exists()
+                else {}
+            )
+            deleted_ids = [
+                document_id
+                for document_id, document in existing_documents.items()
+                if (
+                    document.user_id == user_id
+                    and document.scope == scope
+                    and document.source == source
+                )
+            ]
+            if not deleted_ids:
+                return []
+            for document_id in deleted_ids:
+                existing_documents.pop(document_id, None)
+            self._write_local_store(existing_documents)
+            return deleted_ids
+
+    def _rename_scope_in_local_store(
+        self,
+        *,
+        user_id: str,
+        old_scope: str,
+        new_scope: str,
+    ) -> list[KnowledgeDocument]:
+        with self._lock:
+            existing_documents = self._deserialize_local_store(
+                json.loads(self._fallback_store_path.read_text(encoding="utf-8"))
+                if self._fallback_store_path.exists()
+                else {}
+            )
+            target_documents = [
+                document
+                for document in existing_documents.values()
+                if document.user_id == user_id and document.scope == old_scope
+            ]
+            if not target_documents:
+                return []
+
+            renamed_documents: dict[str, KnowledgeDocument] = {}
+            removed_ids = {document.document_id for document in target_documents}
+            for document in target_documents:
+                renamed_document_id = self._build_document_id(
+                    user_id,
+                    new_scope,
+                    document.source,
+                    document.text,
+                )
+                renamed_documents[renamed_document_id] = KnowledgeDocument(
+                    document_id=renamed_document_id,
+                    user_id=document.user_id,
+                    scope=new_scope,
+                    source=document.source,
+                    text=document.text,
+                    created_at=document.created_at,
+                )
+
+            for document_id in removed_ids:
+                existing_documents.pop(document_id, None)
+            existing_documents.update(renamed_documents)
+            self._write_local_store(existing_documents)
+            return list(renamed_documents.values())
 
     def _query_documents(
         self,

@@ -1,6 +1,10 @@
+import type { KeyboardEvent } from "react";
+import { useEffect, useRef, useState } from "react";
+
 import {
   BarChart3,
   BookOpenText,
+  Check,
   ChevronLeft,
   Clock,
   FileText,
@@ -36,7 +40,7 @@ type LeftSidebarProps = {
   templateCount?: number;
   onCreateThread: () => void;
   onDeleteThread: (thread: ThreadItem) => void;
-  onRenameThread: (thread: ThreadItem) => void;
+  onRenameThread: (thread: ThreadItem, title: string) => boolean | Promise<boolean>;
   onSelectThread: (thread: ThreadItem) => void;
   onSelectView: (view: WorkspaceView) => void;
   onOpenProfile: () => void;
@@ -109,6 +113,58 @@ export function LeftSidebar({
 }: LeftSidebarProps) {
   const displayName = getDisplayName(currentUser);
   const avatarUrl = currentUser.avatar_url ? buildAbsoluteUrl(currentUser.avatar_url) : "";
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
+  const [draftRenameTitle, setDraftRenameTitle] = useState("");
+
+  useEffect(() => {
+    if (!editingThreadId) {
+      return;
+    }
+
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
+  }, [editingThreadId]);
+
+  const startRename = (thread: ThreadItem) => {
+    setEditingThreadId(thread.id);
+    setDraftRenameTitle(thread.title);
+  };
+
+  const cancelRename = () => {
+    setEditingThreadId(null);
+    setDraftRenameTitle("");
+  };
+
+  const submitRename = async (thread: ThreadItem) => {
+    const nextTitle = draftRenameTitle.trim();
+
+    if (!nextTitle || nextTitle === thread.title) {
+      cancelRename();
+      return;
+    }
+
+    const didRename = await onRenameThread(thread, nextTitle);
+    if (didRename) {
+      cancelRename();
+    }
+  };
+
+  const handleRenameKeyDown = (
+    event: KeyboardEvent<HTMLInputElement>,
+    thread: ThreadItem,
+  ) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void submitRename(thread);
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRename();
+    }
+  };
 
   return (
     <aside
@@ -227,6 +283,8 @@ export function LeftSidebar({
             {threads.map((thread) => {
               const isActive = activeView === "chat" && activeThreadId === thread.id;
               const isMutating = mutatingThreadId === thread.id;
+              const isEditing = editingThreadId === thread.id;
+              const canSubmitRename = draftRenameTitle.trim().length > 0 && !isMutating;
 
               return (
                 <div
@@ -235,51 +293,112 @@ export function LeftSidebar({
                     isActive ? "bg-secondary" : "hover:bg-muted"
                   }`}
                 >
-                  <button
-                    className="w-full rounded-xl px-3 py-3 text-left"
-                    data-testid={`sidebar-thread-${thread.id}`}
-                    disabled={isMutating}
-                    onClick={() => onSelectThread(thread)}
-                    type="button"
-                  >
-                    <div className="mb-1 flex items-start justify-between gap-3">
-                      <div className="truncate text-sm font-medium text-foreground">
-                        {thread.title}
-                      </div>
-                      {thread.platform ? (
-                        <span
-                          className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
-                            thread.platform === "xiaohongshu"
-                              ? "bg-brand"
-                              : "bg-secondary-foreground"
-                          }`}
+                  {isEditing ? (
+                    <div className="w-full rounded-xl px-3 py-3 text-left">
+                      <div className="mb-1 flex items-start justify-between gap-3">
+                        <input
+                          ref={renameInputRef}
+                          aria-label="编辑会话标题"
+                          className="min-w-0 flex-1 rounded-lg border border-brand/40 bg-card px-2 py-1 text-sm font-medium text-foreground outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:cursor-not-allowed disabled:opacity-60"
+                          data-testid={`sidebar-thread-rename-input-${thread.id}`}
+                          disabled={isMutating}
+                          maxLength={80}
+                          onChange={(event) => setDraftRenameTitle(event.target.value)}
+                          onKeyDown={(event) => handleRenameKeyDown(event, thread)}
+                          value={draftRenameTitle}
                         />
-                      ) : null}
+                        {thread.platform ? (
+                          <span
+                            className={`mt-2 h-2.5 w-2.5 shrink-0 rounded-full ${
+                              thread.platform === "xiaohongshu"
+                                ? "bg-brand"
+                                : "bg-secondary-foreground"
+                            }`}
+                          />
+                        ) : null}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Enter 保存，Esc 取消
+                      </div>
                     </div>
-                    <div className="text-xs text-muted-foreground">{thread.time}</div>
-                  </button>
+                  ) : (
+                    <button
+                      className="w-full rounded-xl px-3 py-3 text-left"
+                      data-testid={`sidebar-thread-${thread.id}`}
+                      disabled={isMutating}
+                      onClick={() => onSelectThread(thread)}
+                      type="button"
+                    >
+                      <div className="mb-1 flex items-start justify-between gap-3">
+                        <div className="truncate text-sm font-medium text-foreground">
+                          {thread.title}
+                        </div>
+                        {thread.platform ? (
+                          <span
+                            className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                              thread.platform === "xiaohongshu"
+                                ? "bg-brand"
+                                : "bg-secondary-foreground"
+                            }`}
+                          />
+                        ) : null}
+                      </div>
+                      <div className="text-xs text-muted-foreground">{thread.time}</div>
+                    </button>
+                  )}
 
-                  <div className="flex items-center gap-1 px-2 pb-2 opacity-0 transition group-hover:opacity-100">
-                    <button
-                      className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2 text-xs text-muted-foreground transition hover:bg-card hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                      data-testid={`sidebar-thread-rename-${thread.id}`}
-                      disabled={isMutating}
-                      onClick={() => onRenameThread(thread)}
-                      type="button"
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                      重命名
-                    </button>
-                    <button
-                      className="inline-flex h-8 items-center gap-1 rounded-lg border border-danger-foreground/20 px-2 text-xs text-danger-foreground transition hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-50"
-                      data-testid={`sidebar-thread-delete-${thread.id}`}
-                      disabled={isMutating}
-                      onClick={() => onDeleteThread(thread)}
-                      type="button"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      删除
-                    </button>
+                  <div
+                    className={`flex items-center gap-1 px-2 pb-2 transition ${
+                      isEditing ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                    }`}
+                  >
+                    {isEditing ? (
+                      <>
+                        <button
+                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-brand/30 px-2 text-xs text-brand transition hover:bg-card disabled:cursor-not-allowed disabled:opacity-50"
+                          data-testid={`sidebar-thread-rename-save-${thread.id}`}
+                          disabled={!canSubmitRename}
+                          onClick={() => void submitRename(thread)}
+                          type="button"
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                          保存
+                        </button>
+                        <button
+                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2 text-xs text-muted-foreground transition hover:bg-card hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                          data-testid={`sidebar-thread-rename-cancel-${thread.id}`}
+                          disabled={isMutating}
+                          onClick={cancelRename}
+                          type="button"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                          取消
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2 text-xs text-muted-foreground transition hover:bg-card hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                          data-testid={`sidebar-thread-rename-${thread.id}`}
+                          disabled={isMutating}
+                          onClick={() => startRename(thread)}
+                          type="button"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          重命名
+                        </button>
+                        <button
+                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-danger-foreground/20 px-2 text-xs text-danger-foreground transition hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-50"
+                          data-testid={`sidebar-thread-delete-${thread.id}`}
+                          disabled={isMutating}
+                          onClick={() => onDeleteThread(thread)}
+                          type="button"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          删除
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               );

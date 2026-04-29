@@ -1658,6 +1658,178 @@ def test_system_seeded_knowledge_still_available_after_tenant_filtering(
 
     assert "price and regional contrast" in context
 
+
+def test_knowledge_scope_source_management_and_rename_are_user_scoped(
+    client: TestClient,
+    isolated_knowledge_base: Path,
+):
+    _ = isolated_knowledge_base
+    alice_auth = register_auth_response(client, username="alice-knowledge-manage")
+    bob_auth = register_auth_response(client, username="bob-knowledge-manage")
+    alice_headers = {"Authorization": f"Bearer {alice_auth['access_token']}"}
+    bob_headers = {"Authorization": f"Bearer {bob_auth['access_token']}"}
+    alice_user_id = str(alice_auth["user"]["id"])
+
+    first_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=alice_headers,
+        data={"scope": "brand_guide_2026"},
+        files={
+            "file": (
+                "voice-guide.md",
+                "# Voice guide\nUse a calm, premium, reassuring tone in every opening sentence.",
+                "text/markdown",
+            )
+        },
+    )
+    assert first_upload.status_code == 201
+
+    second_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=alice_headers,
+        data={"scope": "brand_guide_2026"},
+        files={
+            "file": (
+                "faq.md",
+                "# FAQ\nAnswer objections with plain language, examples, and confident structure.",
+                "text/markdown",
+            )
+        },
+    )
+    assert second_upload.status_code == 201
+
+    bob_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=bob_headers,
+        data={"scope": "brand_guide_2026"},
+        files={
+            "file": (
+                "voice-guide.md",
+                "# Bob guide\nUse urgency and short conversion pushes instead of a premium tone.",
+                "text/markdown",
+            )
+        },
+    )
+    assert bob_upload.status_code == 201
+
+    alice_sources = client.get(
+        "/api/v1/media/knowledge/scopes/brand_guide_2026/sources",
+        headers=alice_headers,
+    )
+    assert alice_sources.status_code == 200
+    assert alice_sources.json()["scope"] == "brand_guide_2026"
+    assert alice_sources.json()["total"] == 2
+    assert {
+        (item["filename"], item["chunk_count"])
+        for item in alice_sources.json()["items"]
+    } == {
+        ("faq.md", 1),
+        ("voice-guide.md", 1),
+    }
+
+    bob_sources = client.get(
+        "/api/v1/media/knowledge/scopes/brand_guide_2026/sources",
+        headers=bob_headers,
+    )
+    assert bob_sources.status_code == 200
+    assert bob_sources.json()["total"] == 1
+    assert bob_sources.json()["items"][0]["filename"] == "voice-guide.md"
+
+    existing_scope_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=alice_headers,
+        data={"scope": "existing_scope"},
+        files={
+            "file": (
+                "conflict.md",
+                "# Existing scope\nReserved for conflict checks.",
+                "text/markdown",
+            )
+        },
+    )
+    assert existing_scope_upload.status_code == 201
+
+    rename_conflict = client.patch(
+        "/api/v1/media/knowledge/scopes/brand_guide_2026",
+        headers=alice_headers,
+        json={"new_name": "existing_scope"},
+    )
+    assert rename_conflict.status_code == 409
+
+    rename_response = client.patch(
+        "/api/v1/media/knowledge/scopes/brand_guide_2026",
+        headers=alice_headers,
+        json={"new_name": "brand_manual_q3"},
+    )
+    assert rename_response.status_code == 200
+    assert rename_response.json() == {
+        "previous_scope": "brand_guide_2026",
+        "scope": "brand_manual_q3",
+        "renamed_count": 2,
+        "renamed": True,
+    }
+
+    service = knowledge_base_module.get_knowledge_base_service()
+    renamed_context = service.retrieve_context(
+        alice_user_id,
+        "brand_manual_q3",
+        "calm premium reassuring tone",
+    )
+    old_scope_context = service.retrieve_context(
+        alice_user_id,
+        "brand_guide_2026",
+        "calm premium reassuring tone",
+    )
+    assert "calm, premium, reassuring tone" in renamed_context
+    assert old_scope_context == ""
+
+    alice_scopes_after_rename = client.get(
+        "/api/v1/media/knowledge/scopes",
+        headers=alice_headers,
+    )
+    assert alice_scopes_after_rename.status_code == 200
+    assert {item["scope"] for item in alice_scopes_after_rename.json()["items"]} == {
+        "brand_manual_q3",
+        "existing_scope",
+    }
+
+    bob_scopes_after_rename = client.get(
+        "/api/v1/media/knowledge/scopes",
+        headers=bob_headers,
+    )
+    assert bob_scopes_after_rename.status_code == 200
+    assert {item["scope"] for item in bob_scopes_after_rename.json()["items"]} == {
+        "brand_guide_2026",
+    }
+
+    delete_source_response = client.delete(
+        "/api/v1/media/knowledge/scopes/brand_manual_q3/sources/voice-guide.md",
+        headers=alice_headers,
+    )
+    assert delete_source_response.status_code == 200
+    assert delete_source_response.json() == {
+        "scope": "brand_manual_q3",
+        "source": "voice-guide.md",
+        "deleted_count": 1,
+        "deleted": True,
+    }
+
+    alice_sources_after_delete = client.get(
+        "/api/v1/media/knowledge/scopes/brand_manual_q3/sources",
+        headers=alice_headers,
+    )
+    assert alice_sources_after_delete.status_code == 200
+    assert alice_sources_after_delete.json()["items"] == [
+        {"filename": "faq.md", "chunk_count": 1}
+    ]
+
+    deleted_context = service.retrieve_context(
+        alice_user_id,
+        "brand_manual_q3",
+        "calm premium reassuring tone",
+    )
+    assert "calm, premium, reassuring tone" not in deleted_context
+
 def test_artifact_delete_endpoint_removes_only_owned_draft(client: TestClient):
     alice_headers = register_user(client, username="alice-delete-single")
     bob_headers = register_user(client, username="bob-delete-single")

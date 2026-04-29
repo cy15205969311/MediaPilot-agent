@@ -21,6 +21,7 @@ import {
   clearStoredUser,
   completePasswordReset,
   createChatStream,
+  deleteKnowledgeSource,
   deleteKnowledgeScope,
   createTopic,
   createTemplate,
@@ -31,6 +32,7 @@ import {
   deleteTemplates,
   deleteThread,
   fetchArtifacts,
+  fetchKnowledgeScopeSources,
   fetchKnowledgeScopes,
   fetchTopics,
   fetchTemplateSkills,
@@ -49,6 +51,7 @@ import {
   revokeSession,
   resetPassword,
   setStoredUser,
+  renameKnowledgeScope,
   updateTopic,
   updateThread,
   uploadKnowledgeDocument,
@@ -78,6 +81,7 @@ import type {
   DraftSummaryItem,
   HistoryMessageItem,
   KnowledgeScopeItem,
+  KnowledgeScopeSourceItem,
   MediaChatMaterialPayload,
   MediaChatRequestPayload,
   ResetPasswordResponse,
@@ -1250,7 +1254,7 @@ function App() {
     }
   };
 
-  const loadKnowledgeScopes = async () => {
+  const loadKnowledgeScopes = async (): Promise<KnowledgeScopeItem[]> => {
     setIsLoadingKnowledgeScopes(true);
 
     try {
@@ -1259,10 +1263,11 @@ function App() {
       setStatusText(
         payload.total > 0 ? `已载入 ${payload.total} 个知识库 Scope` : "知识库还是空的",
       );
+      return payload.items;
     } catch (error) {
       if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
-        return;
+        return [];
       }
 
       const errorMessage =
@@ -1279,6 +1284,7 @@ function App() {
         title: "知识库加载失败",
         content: errorMessage,
       });
+      return [];
     } finally {
       setIsLoadingKnowledgeScopes(false);
     }
@@ -1481,6 +1487,130 @@ function App() {
         id: createId("knowledge-delete-error"),
         role: "error",
         title: "删除知识库 Scope 失败",
+        content: errorMessage,
+      });
+      return false;
+    } finally {
+      setIsMutatingKnowledgeScopes(false);
+      setMutatingKnowledgeScope(null);
+    }
+  };
+
+  const handleRenameKnowledgeScope = async (
+    scope: string,
+    nextScopeName: string,
+  ): Promise<string | null> => {
+    setIsMutatingKnowledgeScopes(true);
+    setMutatingKnowledgeScope(scope);
+
+    try {
+      const response = await renameKnowledgeScope(scope, {
+        new_name: nextScopeName,
+      });
+      await loadKnowledgeScopes();
+      setActiveKnowledgeBaseScope((current) =>
+        current.trim() === response.previous_scope ? response.scope : current,
+      );
+      setDraftKnowledgeBaseScope((current) =>
+        current.trim() === response.previous_scope ? response.scope : current,
+      );
+      setStatusText(
+        response.renamed
+          ? `知识库 Scope 已重命名：${response.previous_scope} -> ${response.scope}`
+          : `Scope 名称未变化：${response.scope}`,
+      );
+      return response.scope;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return null;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "重命名知识库 Scope 失败，请稍后重试。";
+
+      setStatusText("知识库 Scope 重命名失败");
+      appendSystemMessage({
+        id: createId("knowledge-rename-error"),
+        role: "error",
+        title: "知识库 Scope 重命名失败",
+        content: errorMessage,
+      });
+      return null;
+    } finally {
+      setIsMutatingKnowledgeScopes(false);
+      setMutatingKnowledgeScope(null);
+    }
+  };
+
+  const handleLoadKnowledgeScopeSources = async (
+    scope: string,
+  ): Promise<KnowledgeScopeSourceItem[] | null> => {
+    try {
+      const response = await fetchKnowledgeScopeSources(scope);
+      return response.items;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return null;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载知识库文件明细失败，请稍后重试。";
+
+      setStatusText("知识库文件明细加载失败");
+      appendSystemMessage({
+        id: createId("knowledge-sources-error"),
+        role: "error",
+        title: "知识库文件明细加载失败",
+        content: errorMessage,
+      });
+      return null;
+    }
+  };
+
+  const handleDeleteKnowledgeSource = async (
+    scope: string,
+    source: string,
+  ): Promise<boolean> => {
+    setIsMutatingKnowledgeScopes(true);
+    setMutatingKnowledgeScope(scope);
+
+    try {
+      const response = await deleteKnowledgeSource(scope, source);
+      await loadKnowledgeScopes();
+      setStatusText(
+        response.deleted
+          ? `已从 ${response.scope} 移除文件：${response.source}`
+          : `文件 ${response.source} 当前没有可删除的知识切片`,
+      );
+      return response.deleted;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return false;
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "删除知识库文件失败，请稍后重试。";
+
+      setStatusText("知识库文件删除失败");
+      appendSystemMessage({
+        id: createId("knowledge-source-delete-error"),
+        role: "error",
+        title: "知识库文件删除失败",
         content: errorMessage,
       });
       return false;
@@ -2343,25 +2473,25 @@ function App() {
     closeNewThreadModal();
   };
 
-  const handleRenameThread = async (thread: ThreadItem) => {
-    const nextTitle = window.prompt("请输入新的会话标题", thread.title)?.trim();
-    if (!nextTitle || nextTitle === thread.title) {
-      return;
+  const handleRenameThread = async (thread: ThreadItem, nextTitle: string) => {
+    const normalizedTitle = nextTitle.trim();
+    if (!normalizedTitle || normalizedTitle === thread.title) {
+      return false;
     }
 
     setMutatingThreadId(thread.id);
     try {
-      const summary = await updateThread(thread.id, { title: nextTitle });
+      const summary = await updateThread(thread.id, { title: normalizedTitle });
       setStatusText("会话标题已更新");
       upsertThreadInList(toThreadItemFromSummary(summary));
 
       if (activeThreadId === thread.id) {
-        setActiveThreadTitle(summary.title || nextTitle);
+        setActiveThreadTitle(summary.title || normalizedTitle);
       }
     } catch (error) {
       if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
-        return;
+        return false;
       }
 
       const errorMessage =
@@ -2377,9 +2507,12 @@ function App() {
         title: "重命名失败",
         content: errorMessage,
       });
+      return false;
     } finally {
       setMutatingThreadId(null);
     }
+
+    return true;
   };
 
   const handleDeleteThread = async (thread: ThreadItem) => {
@@ -3180,6 +3313,11 @@ function App() {
                 isMutating={isMutatingKnowledgeScopes}
                 mutatingScope={mutatingKnowledgeScope}
                 onDeleteScope={(scope) => handleDeleteKnowledgeScope(scope)}
+                onDeleteSource={(scope, source) => handleDeleteKnowledgeSource(scope, source)}
+                onLoadScopeSources={(scope) => handleLoadKnowledgeScopeSources(scope)}
+                onRenameScope={(scope, nextScopeName) =>
+                  handleRenameKnowledgeScope(scope, nextScopeName)
+                }
                 onUploadFiles={(scope, files) => handleUploadKnowledgeFiles(scope, files)}
                 scopes={knowledgeScopes}
               />
@@ -3278,3 +3416,4 @@ function App() {
 }
 
 export default App;
+

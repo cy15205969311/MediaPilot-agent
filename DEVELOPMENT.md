@@ -416,7 +416,10 @@ alembic upgrade head
 | `GET` | `/api/v1/media/artifacts` | authenticated artifact aggregation for drafts workspace |
 | `GET` | `/api/v1/media/knowledge/scopes` | list owned knowledge scopes with chunk and source counts |
 | `POST` | `/api/v1/media/knowledge/upload` | upload txt/md knowledge content into an owned scope |
+| `PATCH` | `/api/v1/media/knowledge/scopes/{scope}` | rename one owned knowledge scope and sync bound thread/template references |
 | `DELETE` | `/api/v1/media/knowledge/scopes/{scope}` | delete all owned chunks for one knowledge scope |
+| `GET` | `/api/v1/media/knowledge/scopes/{scope}/sources` | list distinct uploaded sources inside one owned knowledge scope |
+| `DELETE` | `/api/v1/media/knowledge/scopes/{scope}/sources/{source}` | delete one uploaded source and all of its owned chunks |
 | `GET` | `/api/v1/media/topics` | authenticated topic-pool list with optional status filter |
 | `POST` | `/api/v1/media/topics` | create a new owned topic idea |
 | `PATCH` | `/api/v1/media/topics/{topic_id}` | update owned topic content or lifecycle status |
@@ -1304,11 +1307,12 @@ This version adds or solidifies:
 
 - `app/services/knowledge_base.py` now provides a multi-tenant knowledge service keyed by `user_id + scope + source`, with normalized scope handling, text chunking, Chroma persistence, and a JSON fallback store.
 - the knowledge service preserves built-in seed scopes as system-owned documents while keeping uploaded user documents tenant-isolated.
-- `app/api/v1/knowledge.py` now exposes authenticated scope listing, txt/md upload ingestion, and per-scope deletion routes.
+- `app/api/v1/knowledge.py` now exposes authenticated scope listing, txt/md upload ingestion, scope rename, grouped source inspection, single-source deletion, and per-scope deletion routes.
 - upload ingestion now decodes `utf-8-sig`, `utf-8`, and `gb18030`, then chunks content before persistence and reports normalized scope plus chunk counts back to the frontend.
 - `app/services/graph/provider.py` now injects tenant-scoped knowledge retrieval before final generation and logs `RAG Activated for user ...` when matching chunks are found.
-- `frontend/src/app/components/views/KnowledgeView.tsx`, `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `frontend/src/app/components/LeftSidebar.tsx` now deliver a dedicated knowledge workspace with upload, list, and delete interactions.
-- `tests/test_chat.py` now covers user-scoped upload/list/delete flows plus seeded-knowledge fallback, and the current repository baseline is verified by `97 passed` backend tests plus a passing frontend production build.
+- `frontend/src/app/components/views/KnowledgeView.tsx`, `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, `frontend/src/app/types.ts`, and `frontend/src/app/components/LeftSidebar.tsx` now deliver a dedicated knowledge workspace with upload, scope rename, grouped source preview, single-file deletion, and whole-scope deletion interactions.
+- scope rename now also rewrites current-user `Thread.knowledge_base_scope` and `Template.knowledge_base_scope` references so existing bindings continue to resolve after the rename.
+- `tests/test_chat.py` now covers user-scoped upload/list/delete flows, grouped source management, scope rename conflict handling, and seeded-knowledge fallback, and the current repository baseline is verified by backend tests plus a passing frontend production build.
 
 1. `TopicRecord` now persists an optional `thread_id`, backed by Alembic migration `20260429_03_topic_thread_binding.py`, so every topic can bind to a single drafting conversation and avoid spawning duplicate chat threads.
 2. `app/api/v1/topics.py`, `app/models/schemas.py`, and `frontend/src/app/types.ts` now expose `thread_id` across topic read/write contracts, allowing topic cards to distinguish first-time drafting from resume-drafting flows.

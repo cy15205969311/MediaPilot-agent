@@ -12,7 +12,11 @@ import type {
   DraftsDeletePayload,
   DraftsApiResponse,
   KnowledgeScopeDeleteApiResponse,
+  KnowledgeScopeRenameApiResponse,
+  KnowledgeScopeRenamePayload,
+  KnowledgeScopeSourcesApiResponse,
   KnowledgeScopesApiResponse,
+  KnowledgeSourceDeleteApiResponse,
   KnowledgeUploadApiResponse,
   LogoutResponse,
   MediaChatRequestPayload,
@@ -771,6 +775,25 @@ export async function uploadKnowledgeDocument(
   return (await response.json()) as KnowledgeUploadApiResponse;
 }
 
+export async function renameKnowledgeScope(
+  scope: string,
+  payload: KnowledgeScopeRenamePayload,
+): Promise<KnowledgeScopeRenameApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/knowledge/scopes/${encodeURIComponent(scope)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as KnowledgeScopeRenameApiResponse;
+}
+
 export async function deleteKnowledgeScope(
   scope: string,
 ): Promise<KnowledgeScopeDeleteApiResponse> {
@@ -783,6 +806,35 @@ export async function deleteKnowledgeScope(
   );
 
   return (await response.json()) as KnowledgeScopeDeleteApiResponse;
+}
+
+export async function fetchKnowledgeScopeSources(
+  scope: string,
+): Promise<KnowledgeScopeSourcesApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/knowledge/scopes/${encodeURIComponent(scope)}/sources`,
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as KnowledgeScopeSourcesApiResponse;
+}
+
+export async function deleteKnowledgeSource(
+  scope: string,
+  source: string,
+): Promise<KnowledgeSourceDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/media/knowledge/scopes/${encodeURIComponent(scope)}/sources/${encodeURIComponent(source)}`,
+    {
+      method: "DELETE",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as KnowledgeSourceDeleteApiResponse;
 }
 
 export async function fetchTemplates(): Promise<TemplatesApiResponse> {

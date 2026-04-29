@@ -611,10 +611,47 @@ class KnowledgeUploadResponse(SchemaModel):
     chunk_count: int = Field(..., description="Number of text chunks ingested from the upload.")
 
 
+class KnowledgeScopeRenameRequest(SchemaModel):
+    new_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=120,
+        description="Requested new scope key before normalization.",
+    )
+
+
+class KnowledgeScopeRenameResponse(SchemaModel):
+    previous_scope: str = Field(..., description="Previous normalized scope key.")
+    scope: str = Field(..., description="Current normalized scope key after rename.")
+    renamed_count: int = Field(..., description="Number of chunks moved to the new scope key.")
+    renamed: bool = Field(default=True, description="Whether the scope key changed.")
+
+
 class KnowledgeScopeDeleteResponse(SchemaModel):
     scope: str = Field(..., description="Deleted scope key.")
     deleted_count: int = Field(..., description="Number of removed chunks.")
     deleted: bool = Field(default=True, description="Whether any knowledge chunks were deleted.")
+
+
+class KnowledgeScopeSourceItem(SchemaModel):
+    filename: str = Field(..., description="Uploaded source filename inside the scope.")
+    chunk_count: int = Field(..., description="Stored chunk count contributed by this source.")
+
+
+class KnowledgeScopeSourceListResponse(SchemaModel):
+    scope: str = Field(..., description="Normalized scope key that owns these sources.")
+    items: list[KnowledgeScopeSourceItem] = Field(
+        default_factory=list,
+        description="Distinct uploaded sources grouped inside the scope.",
+    )
+    total: int = Field(..., description="Returned source count.")
+
+
+class KnowledgeSourceDeleteResponse(SchemaModel):
+    scope: str = Field(..., description="Normalized scope key that owned the source.")
+    source: str = Field(..., description="Deleted source filename.")
+    deleted_count: int = Field(..., description="Number of removed chunks for the source.")
+    deleted: bool = Field(default=True, description="Whether any chunks were deleted.")
 
 
 class TemplateSkillDiscoveryItem(SchemaModel):
