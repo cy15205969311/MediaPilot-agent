@@ -64,6 +64,58 @@ def test_parse_document_supports_local_upload_text_file(
     assert "second line" in result
 
 
+def test_parse_document_supports_local_upload_docx_file(
+    tmp_path: Path,
+    monkeypatch,
+):
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    document_path = uploads_dir / "alice" / "brief.docx"
+    document_path.parent.mkdir(parents=True, exist_ok=True)
+    document_path.write_bytes(b"fake-docx")
+    monkeypatch.setattr(media_parser_module, "LOCAL_UPLOADS_DIR", uploads_dir)
+
+    class FakeParagraph:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeCell:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeRow:
+        def __init__(self, cells: list[str]) -> None:
+            self.cells = [FakeCell(text) for text in cells]
+
+    class FakeTable:
+        def __init__(self, rows: list[list[str]]) -> None:
+            self.rows = [FakeRow(row) for row in rows]
+
+    class FakeDocument:
+        paragraphs = [
+            FakeParagraph("执行摘要"),
+            FakeParagraph("面向 2026 Q2 的咖啡新品传播计划"),
+        ]
+        tables = [
+            FakeTable(
+                [
+                    ["渠道", "主话题"],
+                    ["小红书", "咖啡液测评"],
+                    ["抖音", "门店开箱"],
+                ]
+            )
+        ]
+
+    monkeypatch.setattr(media_parser_module, "Document", lambda _: FakeDocument())
+
+    result = asyncio.run(media_parser_module.parse_document("/uploads/alice/brief.docx"))
+
+    assert "执行摘要" in result
+    assert "面向 2026 Q2 的咖啡新品传播计划" in result
+    assert "渠道 | 主话题" in result
+    assert "小红书 | 咖啡液测评" in result
+
+
 def test_request_audio_transcription_uses_dashscope_chat_path_when_only_llm_gateway_is_configured(
     tmp_path: Path,
     monkeypatch,

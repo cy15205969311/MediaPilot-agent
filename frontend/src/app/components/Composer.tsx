@@ -246,7 +246,7 @@ export function Composer({
         type="file"
       />
       <input
-        accept=".txt,.pdf,.md"
+        accept=".txt,.pdf,.md,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         className="hidden"
         data-testid="composer-text-input"
         multiple

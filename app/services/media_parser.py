@@ -48,12 +48,18 @@ try:  # pragma: no cover - import guarded for environments missing optional deps
 except ImportError:  # pragma: no cover - surfaced later as a user-facing error
     PdfReader = None  # type: ignore[assignment]
 
+try:  # pragma: no cover - import guarded for environments missing optional deps
+    from docx import Document
+except ImportError:  # pragma: no cover - surfaced later as a user-facing error
+    Document = None  # type: ignore[assignment]
+
 load_environment()
 
 logger = logging.getLogger(__name__)
 
 TEXT_EXTENSIONS = {".txt", ".md"}
 PDF_EXTENSIONS = {".pdf"}
+DOCX_EXTENSIONS = {".docx"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 DEFAULT_TEXT_CHAR_LIMIT = 12000
 DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "whisper-1"
@@ -114,6 +120,8 @@ async def parse_document(file_path_or_url: str) -> str:
                 extracted = await run_in_threadpool(_read_text_document, resolved.local_path)
             elif suffix in PDF_EXTENSIONS:
                 extracted = await run_in_threadpool(_extract_pdf_text, resolved.local_path)
+            elif suffix in DOCX_EXTENSIONS:
+                extracted = await run_in_threadpool(_extract_docx_text, resolved.local_path)
             else:
                 raise MediaParserError(f"Unsupported document format: {suffix or 'unknown'}")
 
@@ -286,6 +294,43 @@ def _extract_pdf_text(path: Path) -> str:
             pages.append(page_text)
 
     return "\n\n".join(pages)
+
+
+def _extract_docx_text(path: Path) -> str:
+    if Document is None:
+        raise MediaParserError(
+            "python-docx is not installed. Run `pip install -r requirements.txt` first.",
+        )
+
+    document = Document(str(path))
+    sections: list[str] = []
+
+    paragraphs = [
+        paragraph.text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.text.strip()
+    ]
+    if paragraphs:
+        sections.append("\n".join(paragraphs))
+
+    table_blocks: list[str] = []
+    for table in document.tables:
+        rows: list[str] = []
+        for row in table.rows:
+            cells = [
+                re.sub(r"\s*\n\s*", " / ", cell.text).strip()
+                for cell in row.cells
+            ]
+            normalized_cells = [cell for cell in cells if cell]
+            if normalized_cells:
+                rows.append(" | ".join(normalized_cells))
+        if rows:
+            table_blocks.append("\n".join(rows))
+
+    if table_blocks:
+        sections.append("\n\n".join(table_blocks))
+
+    return "\n\n".join(section for section in sections if section.strip())
 
 
 def _extract_audio_track(source_path: Path, audio_path: Path) -> None:
@@ -562,6 +607,6 @@ def _emit_dependency_install_hint() -> None:
         return
 
     logger.warning(
-        "Media parser reminder: run `pip install moviepy PyPDF2 openai` and ensure ffmpeg is available before debugging long-form document or video parsing.",
+        "Media parser reminder: run `pip install moviepy PyPDF2 python-docx openai` and ensure ffmpeg is available before debugging long-form document or video parsing.",
     )
     _dependency_hint_emitted = True

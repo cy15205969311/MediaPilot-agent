@@ -56,7 +56,8 @@ test("loads existing thread history and replays persisted messages on startup", 
     id: "history-assistant-1",
     thread_id: threadId,
     role: "assistant",
-    content: "Here is the saved planning summary from yesterday.",
+    content:
+      "## Yesterday recap\n\n- Core takeaway: **lead with the differentiator**\n- Follow-up: add stronger CTA",
     created_at: "2026-04-28T08:11:00Z",
   });
 
@@ -64,6 +65,24 @@ test("loads existing thread history and replays persisted messages on startup", 
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
+        write: async (items: ClipboardItem[]) => {
+          const firstItem = items[0];
+          if (!firstItem) {
+            return;
+          }
+
+          if (firstItem.types.includes("text/plain")) {
+            const plainBlob = await firstItem.getType("text/plain");
+            (window as Window & { __copiedText?: string }).__copiedText =
+              await plainBlob.text();
+          }
+
+          if (firstItem.types.includes("text/html")) {
+            const htmlBlob = await firstItem.getType("text/html");
+            (window as Window & { __copiedHtml?: string }).__copiedHtml =
+              await htmlBlob.text();
+          }
+        },
         writeText: async (text: string) => {
           (window as Window & { __copiedText?: string }).__copiedText = text;
         },
@@ -94,11 +113,13 @@ test("loads existing thread history and replays persisted messages on startup", 
     page.getByTestId("chat-message-user").filter({ hasText: userMessage.content }),
   ).toBeVisible();
   await expect(
-    page.getByTestId("chat-message-assistant").filter({ hasText: assistantMessage.content }),
+    page
+      .getByTestId("chat-message-assistant")
+      .filter({ hasText: "Yesterday recap" }),
   ).toBeVisible();
   const assistantBubble = page
     .getByTestId("chat-message-assistant")
-    .filter({ hasText: assistantMessage.content });
+    .filter({ hasText: "Yesterday recap" });
   await expect(
     assistantBubble.getByRole("button", { name: "复制这条 AI 回复" }),
   ).toBeVisible();
@@ -110,6 +131,20 @@ test("loads existing thread history and replays persisted messages on startup", 
       ),
     )
     .toBe(assistantMessage.content);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as Window & { __copiedHtml?: string }).__copiedHtml ?? "",
+      ),
+    )
+    .toContain("<h2>Yesterday recap</h2>");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as Window & { __copiedHtml?: string }).__copiedHtml ?? "",
+      ),
+    )
+    .toContain("<strong>lead with the differentiator</strong>");
   await expect(page.getByTestId("workspace-persona-badge")).toContainText(
     "Replay persona: focused planning copilot",
   );

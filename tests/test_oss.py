@@ -273,6 +273,28 @@ def test_upload_media_persists_thread_id_when_provided(
     assert record.thread_id == "thread-upload-binding"
 
 
+def test_upload_media_accepts_docx_documents(client: TestClient):
+    headers, _ = register_user(client, username="alice-upload-docx")
+
+    response = client.post(
+        "/api/v1/media/upload",
+        headers=headers,
+        files={
+            "file": (
+                "brief.docx",
+                BytesIO(b"fake-docx-bytes"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_type"] == "document"
+    assert payload["original_filename"] == "brief.docx"
+    assert payload["filename"].endswith(".docx")
+
+
 def test_upload_media_uses_oss_storage_backend_when_configured(
     client: TestClient,
     session_factory,

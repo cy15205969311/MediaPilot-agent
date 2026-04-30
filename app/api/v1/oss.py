@@ -40,6 +40,7 @@ ALLOWED_EXTENSIONS = {
     ".txt": "document",
     ".pdf": "document",
     ".md": "document",
+    ".docx": "document",
 }
 
 
@@ -79,7 +80,7 @@ async def upload_media(
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="仅支持上传 jpg、jpeg、png、webp、mp4、mov、txt、pdf、md 文件。",
+            detail="仅支持上传 jpg、jpeg、png、webp、mp4、mov、txt、pdf、md、docx 文件。",
         )
 
     resolved_thread_id: str | None = None
