@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.26`
+- Current version: `v1.13.27`
 - Updated on: `2026-04-30`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, and chunk preview, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level copy interactions, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, and chunk preview, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level and chat-bubble copy interactions, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -81,6 +81,7 @@ The current baseline includes:
 39. Dedicated `QwenLLMProvider` with three-tier fallback (`qwen-max -> qwen-plus -> qwen-turbo`), per-request `model_override`, and a frontend model selector persisted in local storage.
 40. Backend-driven model registry delivery through `GET /api/v1/models/available`, seeded with an Aliyun DashScope model catalog and consumed by a searchable grouped frontend selector with provider status awareness.
 41. Frontend artifact delivery now supports per-block clipboard copy with success-state feedback plus full Markdown export downloads from both header and right-panel actions, covering content-generation, topic-planning, hot-post-analysis, and comment-reply artifacts.
+42. Assistant chat bubbles now reuse the shared frontend copy control so plain conversational replies can be copied directly from the main chat feed with the same success-state feedback used by artifact panels.
 
 ### 3.2 Out of Scope
 
@@ -1335,7 +1336,7 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.26
+### 16.1 Completed in v1.13.27
 
 This version adds or solidifies:
 
@@ -1343,6 +1344,8 @@ This version adds or solidifies:
 - `frontend/src/app/artifactMarkdown.ts` now centralizes Markdown export assembly for all structured artifact types, formatting content-generation drafts, topic-planning lists, hot-post analysis, and comment-reply suggestions into stable `.md` downloads through the browser Blob API.
 - `frontend/src/app/App.tsx` now replaces the previous export placeholder with a real `handleExportMarkdown(...)` workflow, wiring both the workspace header button and the right-panel artifact action to the same download logic and surfacing a user-facing status update after export.
 - `frontend/src/app/components/artifacts/ContentGenerationArtifact.tsx`, `TopicPlanningArtifact.tsx`, `HotPostAnalysisArtifact.tsx`, and `CommentReplyArtifact.tsx` now expose copy affordances for individual artifact blocks such as title candidates, body copy, CTA copy, topic angles, goals, analysis insights, reusable templates, reply suggestions, and compliance notes.
+- `frontend/src/app/components/ChatFeed.tsx` now reuses the shared `CopyButton` inside assistant message action bars, so operators can copy ordinary AI replies directly from the conversation stream instead of only from structured artifact panels.
+- `frontend/e2e/chat.spec.ts` now verifies that assistant replay bubbles expose the new copy action and that clicking it writes the full assistant message into the mocked browser clipboard.
 - the content-delivery loop is now materially complete inside the frontend workspace: operators can copy polished text blocks directly into publishing back offices or export the full structured artifact as Markdown for review, archiving, and downstream editing.
 
 ### 16.2 Completed in v1.13.25

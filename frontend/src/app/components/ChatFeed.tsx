@@ -20,6 +20,7 @@ import type {
   MediaChatMaterialPayload,
   ToolCallTraceItem,
 } from "../types";
+import { CopyButton } from "./CopyButton";
 import { buildAbsoluteUrl, formatChatTimestamp, getDisplayName } from "../utils";
 
 type ChatFeedProps = {
@@ -382,6 +383,15 @@ export function ChatFeed({
           item.role === "assistant" &&
           item.id === latestAssistantMessageId &&
           toolCallTimeline.length > 0;
+        const canCopyAssistantMessage =
+          item.role === "assistant" && item.content.trim().length > 0;
+        const canSaveArtifactAsTemplate =
+          item.role === "assistant" &&
+          Boolean(artifact) &&
+          Boolean(onSaveArtifactAsTemplate) &&
+          item.id === latestAssistantMessageId;
+        const shouldRenderAssistantActions =
+          canCopyAssistantMessage || canSaveArtifactAsTemplate;
 
         return (
           <div key={item.id} className="space-y-3">
@@ -429,6 +439,29 @@ export function ChatFeed({
                     </span>
                   )}
                 </div>
+                {shouldRenderAssistantActions ? (
+                  <div className="mt-3 flex items-center justify-end gap-2 border-t border-border/50 pt-2">
+                    {canCopyAssistantMessage ? (
+                      <div data-testid="chat-message-assistant-copy">
+                        <CopyButton
+                          ariaLabel="复制这条 AI 回复"
+                          text={item.content}
+                        />
+                      </div>
+                    ) : null}
+                    {canSaveArtifactAsTemplate && onSaveArtifactAsTemplate ? (
+                      <button
+                        className="inline-flex items-center gap-2 rounded-full border border-brand/20 bg-brand-soft px-3.5 py-2 text-xs font-medium text-brand transition hover:opacity-90"
+                        data-testid="chat-save-template"
+                        onClick={onSaveArtifactAsTemplate}
+                        type="button"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        存为模板
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
                 {timestamp ? (
                   <div
                     className={`mt-3 text-xs ${
@@ -438,22 +471,6 @@ export function ChatFeed({
                     }`}
                   >
                     {timestamp}
-                  </div>
-                ) : null}
-                {item.role === "assistant" &&
-                artifact &&
-                onSaveArtifactAsTemplate &&
-                item.id === latestAssistantMessageId ? (
-                  <div className="mt-4 flex justify-end">
-                    <button
-                      className="inline-flex items-center gap-2 rounded-full border border-brand/20 bg-brand-soft px-3.5 py-2 text-xs font-medium text-brand transition hover:opacity-90"
-                      data-testid="chat-save-template"
-                      onClick={onSaveArtifactAsTemplate}
-                      type="button"
-                    >
-                      <Sparkles className="h-3.5 w-3.5" />
-                      存为模板
-                    </button>
                   </div>
                 ) : null}
               </div>

@@ -60,6 +60,17 @@ test("loads existing thread history and replays persisted messages on startup", 
     created_at: "2026-04-28T08:11:00Z",
   });
 
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          (window as Window & { __copiedText?: string }).__copiedText = text;
+        },
+      },
+    });
+  });
+
   await openWorkspace(page, {
     threads: [
       createMockThreadSummary({
@@ -85,6 +96,20 @@ test("loads existing thread history and replays persisted messages on startup", 
   await expect(
     page.getByTestId("chat-message-assistant").filter({ hasText: assistantMessage.content }),
   ).toBeVisible();
+  const assistantBubble = page
+    .getByTestId("chat-message-assistant")
+    .filter({ hasText: assistantMessage.content });
+  await expect(
+    assistantBubble.getByRole("button", { name: "复制这条 AI 回复" }),
+  ).toBeVisible();
+  await assistantBubble.getByRole("button", { name: "复制这条 AI 回复" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as Window & { __copiedText?: string }).__copiedText ?? "",
+      ),
+    )
+    .toBe(assistantMessage.content);
   await expect(page.getByTestId("workspace-persona-badge")).toContainText(
     "Replay persona: focused planning copilot",
   );
