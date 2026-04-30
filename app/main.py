@@ -17,6 +17,7 @@ from app.api.v1.chat import router as media_chat_router
 from app.api.v1.dashboard import router as media_dashboard_router
 from app.api.v1.history import router as media_history_router
 from app.api.v1.knowledge import router as media_knowledge_router
+from app.api.v1.models import router as model_registry_router
 from app.api.v1.oss import UPLOADS_DIR, router as media_upload_router
 from app.api.v1.templates import router as media_templates_router
 from app.api.v1.topics import router as media_topics_router
@@ -164,6 +165,7 @@ app.include_router(media_chat_router)
 app.include_router(media_dashboard_router)
 app.include_router(media_history_router)
 app.include_router(media_knowledge_router)
+app.include_router(model_registry_router)
 app.include_router(media_upload_router)
 app.include_router(media_templates_router)
 app.include_router(media_topics_router)

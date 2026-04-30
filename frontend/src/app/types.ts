@@ -87,6 +87,32 @@ export type MediaChatRequestPayload = {
   system_prompt?: string;
   knowledge_base_scope?: string | null;
   thread_title?: string;
+  model_override?: string | null;
+};
+
+export type ModelProviderStatus = "configured" | "unconfigured";
+
+export type ModelDetail = {
+  id: string;
+  model: string;
+  name: string;
+  group: string;
+  tags: string[];
+  is_default: boolean;
+};
+
+export type ModelProvider = {
+  provider_key: string;
+  provider: string;
+  status: ModelProviderStatus;
+  status_label: string;
+  models: ModelDetail[];
+};
+
+export type AvailableModelsApiResponse = {
+  items: ModelProvider[];
+  total_providers: number;
+  total_models: number;
 };
 
 export type HistoryThreadSummary = {

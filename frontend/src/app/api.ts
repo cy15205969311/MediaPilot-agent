@@ -1,4 +1,5 @@
 import type {
+  AvailableModelsApiResponse,
   AuthSessionsResponse,
   AuthenticatedUser,
   AuthResponse,
@@ -697,6 +698,18 @@ export async function fetchDashboardSummary(): Promise<DashboardSummary> {
   );
 
   return (await response.json()) as DashboardSummary;
+}
+
+export async function fetchAvailableModels(): Promise<AvailableModelsApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/models/available",
+    {
+      method: "GET",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AvailableModelsApiResponse;
 }
 
 export async function fetchTopics(status?: TopicStatus): Promise<TopicsApiResponse> {

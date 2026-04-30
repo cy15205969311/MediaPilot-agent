@@ -134,6 +134,9 @@ type TemplateCreationRequest = {
   payload: TemplateCreatePayload;
 };
 
+const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
+const LEGACY_QWEN_MODEL_STORAGE_KEY = "omnimedia_qwen_model_override";
+
 function createConversationMessage(
   message: ConversationMessageDraft,
 ): ConversationMessage {
@@ -798,6 +801,16 @@ function App() {
   const [activeView, setActiveView] = useState<WorkspaceView>("chat");
   const [platform, setPlatform] = useState<UiPlatform>("xiaohongshu");
   const [taskType, setTaskType] = useState<UiTaskType>("content_generation");
+  const [modelOverride, setModelOverride] = useState<string>(() => {
+    if (typeof window === "undefined") {
+      return "dashscope:qwen-max";
+    }
+    const storedValue =
+      window.localStorage.getItem(MODEL_OVERRIDE_STORAGE_KEY) ??
+      window.localStorage.getItem(LEGACY_QWEN_MODEL_STORAGE_KEY) ??
+      "";
+    return storedValue.trim() || "dashscope:qwen-max";
+  });
   const [message, setMessage] = useState(
     "请帮我策划一篇关于年度资产配置复盘的小红书笔记",
   );
@@ -853,6 +866,10 @@ function App() {
   const [authSessions, setAuthSessions] = useState<AuthSessionItem[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    window.localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, modelOverride);
+  }, [modelOverride]);
 
   const abortRef = useRef<AbortController | null>(null);
   const assistantMessageIdRef = useRef<string | null>(null);
@@ -2809,6 +2826,7 @@ function App() {
       task_type: backendTaskType,
       message: trimmedMessage,
       materials: requestMaterials,
+      model_override: modelOverride,
       ...(activeSystemPrompt.trim() ? { system_prompt: activeSystemPrompt.trim() } : {}),
       ...(activeKnowledgeBaseScope.trim()
         ? { knowledge_base_scope: activeKnowledgeBaseScope.trim() }
@@ -3186,6 +3204,8 @@ function App() {
       >
         <AppHeader
           currentDisplayName={currentDisplayName}
+          modelOverride={modelOverride}
+          onModelOverrideChange={setModelOverride}
           onOpenLeftSidebar={() => {
             setIsLeftSidebarCollapsed(false);
             setLeftSidebarOpen(true);
@@ -3243,7 +3263,7 @@ function App() {
             />
           ) : null}
 
-          <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <main className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden">
             {activeView === "chat" ? (
               <>
                 <div className="border-b border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">

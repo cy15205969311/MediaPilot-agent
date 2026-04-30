@@ -8,6 +8,7 @@ import {
   Zap,
 } from "lucide-react";
 
+import { ModelSelector } from "./ModelSelector";
 import { useTheme } from "../ThemeContext";
 import { taskOptions } from "../data";
 import type { UiPlatform, UiTaskType } from "../types";
@@ -15,9 +16,11 @@ import type { UiPlatform, UiTaskType } from "../types";
 type AppHeaderProps = {
   platform: UiPlatform;
   taskType: UiTaskType;
+  modelOverride: string | null;
   currentDisplayName: string;
   onPlatformChange: (platform: UiPlatform) => void;
   onTaskTypeChange: (taskType: UiTaskType) => void;
+  onModelOverrideChange: (model: string) => void;
   onOpenLeftSidebar: () => void;
   onOpenRightPanel: () => void;
 };
@@ -39,9 +42,11 @@ function getPlatformButtonClass(id: UiPlatform, activePlatform: UiPlatform) {
 export function AppHeader({
   platform,
   taskType,
+  modelOverride,
   currentDisplayName,
   onPlatformChange,
   onTaskTypeChange,
+  onModelOverrideChange,
   onOpenLeftSidebar,
   onOpenRightPanel,
 }: AppHeaderProps) {
@@ -49,10 +54,12 @@ export function AppHeader({
   const isLightTheme = theme === "light";
   const ThemeIcon = isLightTheme ? Moon : Sun;
   const themeButtonLabel = isLightTheme ? "夜间" : "日间";
-  const themeButtonAriaLabel = isLightTheme ? "切换到夜间模式" : "切换到日间模式";
+  const themeButtonAriaLabel = isLightTheme
+    ? "切换到夜间模式"
+    : "切换到日间模式";
 
   return (
-    <header className="flex h-16 items-center border-b border-border bg-surface-elevated px-4 backdrop-blur-md lg:px-6">
+    <header className="relative z-50 flex h-16 shrink-0 items-center overflow-visible border-b border-border bg-surface-elevated px-4 backdrop-blur-md lg:px-6">
       <button
         aria-label="打开左侧边栏"
         className="mr-3 rounded-lg p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground lg:hidden"
@@ -81,7 +88,7 @@ export function AppHeader({
           <button
             aria-pressed={platform === option.id}
             key={option.id}
-            className={`relative inline-flex items-center justify-center rounded-full px-4 py-1.5 text-sm font-medium transition-all duration-200 ease-out cursor-pointer select-none ${getPlatformButtonClass(
+            className={`relative inline-flex cursor-pointer select-none items-center justify-center rounded-full px-4 py-1.5 text-sm font-medium transition-all duration-200 ease-out ${getPlatformButtonClass(
               option.id,
               platform,
             )}`}
@@ -110,6 +117,8 @@ export function AppHeader({
         </div>
       </div>
 
+      <ModelSelector onChange={onModelOverrideChange} value={modelOverride} />
+
       <div className="ml-auto flex items-center gap-3">
         <button
           className="hidden items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition hover:bg-muted sm:flex"
@@ -137,7 +146,9 @@ export function AppHeader({
         </button>
         <div className="flex items-center gap-2 rounded-xl bg-secondary px-3 py-2 text-sm text-secondary-foreground">
           <User className="h-4 w-4" />
-          <span className="hidden max-w-32 truncate sm:inline">{currentDisplayName}</span>
+          <span className="hidden max-w-32 truncate sm:inline">
+            {currentDisplayName}
+          </span>
         </div>
       </div>
     </header>

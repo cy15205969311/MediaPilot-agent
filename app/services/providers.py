@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = "你是一个通用型的智能助手，请始终使用简体中文回答。"
 MAX_CONTEXT_MESSAGES = 12
+DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_QWEN_PRIMARY_MODEL = "qwen-max"
+DEFAULT_QWEN_FALLBACK_MODELS = ("qwen-plus", "qwen-turbo")
+DEFAULT_QWEN_RETRY_ATTEMPTS = 3
+DEFAULT_QWEN_RETRY_BASE_DELAY_SECONDS = 1.0
 
 ArtifactSchemaType = (
     type[TopicPlanningArtifactPayload]
@@ -55,6 +60,50 @@ ArtifactSchemaType = (
     | type[HotPostAnalysisArtifactPayload]
     | type[CommentReplyArtifactPayload]
 )
+
+
+class QwenProviderFallbackError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        attempted_models: Sequence[str],
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.attempted_models = list(attempted_models)
+
+
+def _env_flag_enabled(env_name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(env_name, "").strip().lower()
+    if not raw_value:
+        return default
+    return raw_value in {"1", "true", "yes", "on"}
+
+
+def _is_dashscope_compatible_base_url(base_url: str | None) -> bool:
+    normalized = (base_url or "").strip().lower()
+    return "dashscope" in normalized and "/compatible-mode/" in normalized
+
+
+def _normalize_provider_scoped_model_override(
+    model_override: str | None,
+    *,
+    accepted_provider_keys: Sequence[str],
+) -> str:
+    normalized = (model_override or "").strip()
+    if not normalized:
+        return ""
+
+    if ":" not in normalized:
+        return normalized
+
+    provider_key, _, model_name = normalized.partition(":")
+    if provider_key.strip().lower() not in {item.strip().lower() for item in accepted_provider_keys}:
+        return ""
+    return model_name.strip()
 
 
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
@@ -242,6 +291,9 @@ class BaseLLMProvider(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support LangChain tool binding.",
         )
+
+    def clone_with_model_override(self, model_override: str | None) -> "BaseLLMProvider":
+        return self
 
 
 class MockLLMProvider(BaseLLMProvider):
@@ -558,6 +610,9 @@ class OpenAIProvider(BaseLLMProvider):
             **kwargs,
         )
 
+    def clone_with_model_override(self, model_override: str | None) -> BaseLLMProvider:
+        return self
+
     async def _build_structured_artifact(
         self,
         request: MediaChatRequest,
@@ -777,6 +832,9 @@ class CompatibleLLMProvider(BaseLLMProvider):
             **kwargs,
         )
 
+    def clone_with_model_override(self, model_override: str | None) -> BaseLLMProvider:
+        return self
+
     async def _build_structured_artifact(
         self,
         request: MediaChatRequest,
@@ -828,6 +886,524 @@ class CompatibleLLMProvider(BaseLLMProvider):
 
         content = response.choices[0].message.content or ""
         return content.strip()
+
+
+class QwenLLMProvider(CompatibleLLMProvider):
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        artifact_model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_seconds: float | None = None,
+        fallback_models: Sequence[str] | None = None,
+        enable_tool_binding: bool | None = None,
+        retry_attempts: int | None = None,
+        retry_base_delay_seconds: float | None = None,
+    ) -> None:
+        resolved_model = (
+            (model or "").strip()
+            or os.getenv("QWEN_PRIMARY_MODEL", "").strip()
+            or os.getenv("QWEN_MODEL", "").strip()
+            or os.getenv("LLM_MODEL", "").strip()
+            or DEFAULT_QWEN_PRIMARY_MODEL
+        )
+        resolved_artifact_model = (
+            (artifact_model or "").strip()
+            or os.getenv("QWEN_ARTIFACT_MODEL", "").strip()
+            or os.getenv("LLM_ARTIFACT_MODEL", "").strip()
+            or resolved_model
+        )
+        resolved_api_key = (
+            (api_key or "").strip()
+            or os.getenv("QWEN_API_KEY", "").strip()
+            or os.getenv("LLM_API_KEY", "").strip()
+            or None
+        )
+        resolved_base_url = (
+            (base_url or "").strip()
+            or os.getenv("QWEN_BASE_URL", "").strip()
+            or os.getenv("LLM_BASE_URL", "").strip()
+            or DEFAULT_QWEN_BASE_URL
+        )
+        resolved_timeout_seconds = timeout_seconds or float(
+            os.getenv(
+                "QWEN_TIMEOUT_SECONDS",
+                os.getenv("LLM_TIMEOUT_SECONDS", os.getenv("OPENAI_TIMEOUT_SECONDS", "60")),
+            ),
+        )
+        super().__init__(
+            model=resolved_model,
+            artifact_model=resolved_artifact_model,
+            api_key=resolved_api_key,
+            base_url=resolved_base_url,
+            timeout_seconds=resolved_timeout_seconds,
+        )
+        configured_fallback_models = (
+            list(fallback_models)
+            if fallback_models is not None
+            else [
+                item.strip()
+                for item in os.getenv(
+                    "QWEN_FALLBACK_MODELS",
+                    ",".join(DEFAULT_QWEN_FALLBACK_MODELS),
+                ).split(",")
+            ]
+        )
+        self.fallback_models = tuple(self._normalize_model_pool(configured_fallback_models))
+        self.enable_tool_binding = (
+            enable_tool_binding
+            if enable_tool_binding is not None
+            else _env_flag_enabled("QWEN_ENABLE_TOOL_BINDING", default=False)
+        )
+        self.retry_attempts = max(
+            1,
+            retry_attempts
+            or int(os.getenv("QWEN_RETRY_ATTEMPTS", str(DEFAULT_QWEN_RETRY_ATTEMPTS))),
+        )
+        self.retry_base_delay_seconds = max(
+            0.0,
+            retry_base_delay_seconds
+            or float(
+                os.getenv(
+                    "QWEN_RETRY_BASE_DELAY_SECONDS",
+                    str(DEFAULT_QWEN_RETRY_BASE_DELAY_SECONDS),
+                ),
+            ),
+        )
+
+    async def generate_stream(
+        self,
+        request: MediaChatRequest,
+        *,
+        db: Session | None = None,
+        thread: Thread | None = None,
+        user_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, object], None]:
+        yield _start_event(request)
+
+        if not self.api_key:
+            yield _error_event(
+                code="QWEN_API_KEY_MISSING",
+                message="未检测到 QWEN_API_KEY 或 LLM_API_KEY，无法启用 QwenLLMProvider。",
+            )
+            yield {"event": "done", "thread_id": request.thread_id}
+            return
+
+        if not self.base_url:
+            yield _error_event(
+                code="QWEN_BASE_URL_MISSING",
+                message="未检测到 QWEN_BASE_URL，无法连接阿里云百炼兼容端点。",
+            )
+            yield {"event": "done", "thread_id": request.thread_id}
+            return
+
+        streamed_text = ""
+        message_index = 0
+
+        try:
+            messages = _build_conversation_messages(
+                request,
+                db=db,
+                thread=thread,
+                user_id=user_id,
+            )
+            async for delta in self._stream_text_with_fallback(
+                messages=messages,
+                temperature=0.7,
+            ):
+                streamed_text += delta
+                yield {
+                    "event": "message",
+                    "delta": delta,
+                    "index": message_index,
+                }
+                message_index += 1
+
+            yield {
+                "event": "tool_call",
+                "name": "artifact_structuring",
+                "status": "processing",
+            }
+
+            artifact = await self._build_structured_artifact(
+                request,
+                streamed_text=streamed_text,
+                db=db,
+                thread=thread,
+                user_id=user_id,
+            )
+            yield {
+                "event": "artifact",
+                "artifact": artifact.model_dump(mode="json"),
+            }
+        except JSONDecodeError:
+            yield _error_event(
+                code="QWEN_JSON_DECODE_ERROR",
+                message="Qwen 返回的结构化结果无法解析，请稍后重试。",
+            )
+        except ValidationError:
+            yield _error_event(
+                code="QWEN_ARTIFACT_VALIDATION_ERROR",
+                message="Qwen 返回的结构化结果不符合契约，请稍后重试。",
+            )
+        except AuthenticationError:
+            yield _error_event(
+                code="QWEN_AUTH_ERROR",
+                message="Qwen 鉴权失败，请检查百炼密钥或网关配置。",
+            )
+        except QwenProviderFallbackError as exc:
+            logger.warning(
+                "Qwen provider exhausted fallbacks model=%s attempted_models=%s message=%s",
+                self.model,
+                ",".join(exc.attempted_models),
+                exc.message,
+            )
+            yield _error_event(code=exc.code, message=exc.message)
+        except RateLimitError:
+            yield _error_event(
+                code="QWEN_RATE_LIMIT",
+                message="Qwen 请求触发限流，请稍后重试。",
+            )
+        except APITimeoutError:
+            yield _error_event(
+                code="QWEN_TIMEOUT",
+                message="Qwen 请求超时，请稍后重试。",
+            )
+        except APIConnectionError:
+            yield _error_event(
+                code="QWEN_CONNECTION_ERROR",
+                message="无法连接 Qwen 服务，请检查网络或百炼兼容网关地址。",
+            )
+        except (APIError, OpenAIError) as exc:
+            logger.exception("Qwen provider request failed: %s", exc)
+            yield _error_event(
+                code="QWEN_API_ERROR",
+                message="Qwen 服务调用失败，请稍后重试。",
+            )
+        except Exception as exc:  # pragma: no cover - defensive boundary
+            logger.exception("Unexpected Qwen provider failure: %s", exc)
+            yield _error_event(
+                code="PROVIDER_INTERNAL_ERROR",
+                message="模型提供者执行失败，请稍后重试。",
+            )
+        finally:
+            yield {"event": "done", "thread_id": request.thread_id}
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        if not self.enable_tool_binding:
+            raise NotImplementedError(
+                "QwenLLMProvider disabled bind_tools by default to keep LangGraph on heuristic fallback routing.",
+            )
+        return super().bind_tools(
+            tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        )
+
+    def clone_with_model_override(self, model_override: str | None) -> BaseLLMProvider:
+        normalized_model = _normalize_provider_scoped_model_override(
+            model_override,
+            accepted_provider_keys=("dashscope", "qwen"),
+        )
+        if not normalized_model or normalized_model == self.model:
+            return self
+
+        return type(self)(
+            model=normalized_model,
+            artifact_model=normalized_model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            fallback_models=self.fallback_models,
+            enable_tool_binding=self.enable_tool_binding,
+            retry_attempts=self.retry_attempts,
+            retry_base_delay_seconds=self.retry_base_delay_seconds,
+        )
+
+    async def _request_json_artifact(
+        self,
+        request: MediaChatRequest,
+        *,
+        streamed_text: str,
+        db: Session | None,
+        thread: Thread | None,
+        user_id: str | None,
+    ) -> str:
+        request_kwargs = {
+            "messages": _build_artifact_messages(
+                request,
+                streamed_text=streamed_text,
+                db=db,
+                thread=thread,
+                user_id=user_id,
+            ),
+            "temperature": 0.2,
+            "timeout": self.request_timeout,
+        }
+
+        async def _request_model_response(model_name: str):
+            try:
+                return await self._get_client().chat.completions.create(
+                    model=model_name,
+                    response_format={"type": "json_object"},
+                    **request_kwargs,
+                )
+            except BadRequestError:
+                return await self._get_client().chat.completions.create(
+                    model=model_name,
+                    **request_kwargs,
+                )
+
+        response = await self._execute_with_fallback(
+            initial_model=self.artifact_model,
+            operation_name="artifact_json",
+            request_factory=_request_model_response,
+        )
+        content = response.choices[0].message.content or ""
+        return content.strip()
+
+    async def _stream_text_with_fallback(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float,
+    ) -> AsyncGenerator[str, None]:
+        attempted_models: list[str] = []
+        model_order = self._build_model_fallback_order(self.model)
+
+        for model_name in model_order:
+            partial_output_started = False
+
+            for attempt in range(1, self.retry_attempts + 1):
+                try:
+                    stream = await self._get_client().chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=temperature,
+                        stream=True,
+                        timeout=self.request_timeout,
+                    )
+
+                    async for chunk in stream:
+                        for choice in chunk.choices:
+                            delta = choice.delta.content or ""
+                            if not delta:
+                                continue
+                            partial_output_started = True
+                            yield delta
+                    return
+                except Exception as exc:
+                    if partial_output_started:
+                        raise QwenProviderFallbackError(
+                            code="QWEN_STREAM_INTERRUPTED",
+                            message=(
+                                "Qwen 在生成过程中中断，已有部分内容输出。"
+                                "为避免重复内容，本次已停止自动切换，请稍后重试。"
+                            ),
+                            attempted_models=attempted_models + [model_name],
+                        ) from exc
+
+                    if self._should_retry_same_model(exc) and attempt < self.retry_attempts:
+                        await self._sleep_before_retry(
+                            model_name=model_name,
+                            attempt=attempt,
+                            operation_name="stream",
+                            exc=exc,
+                        )
+                        continue
+
+                    if self._should_fallback_to_next_model(exc) or self._should_retry_same_model(exc):
+                        logger.warning(
+                            "Qwen stream fallback model=%s attempt=%s error=%s",
+                            model_name,
+                            attempt,
+                            exc,
+                        )
+                        break
+
+                    raise
+
+            attempted_models.append(model_name)
+
+        raise QwenProviderFallbackError(
+            code="QWEN_ALL_MODELS_UNAVAILABLE",
+            message="Qwen 当前梯队模型均不可用，系统已自动降级仍失败，请稍后重试。",
+            attempted_models=attempted_models or model_order,
+        )
+
+    async def _execute_with_fallback(
+        self,
+        *,
+        initial_model: str,
+        operation_name: str,
+        request_factory: Callable[[str], Any],
+    ) -> Any:
+        attempted_models: list[str] = []
+        model_order = self._build_model_fallback_order(initial_model)
+
+        for model_name in model_order:
+            for attempt in range(1, self.retry_attempts + 1):
+                try:
+                    return await request_factory(model_name)
+                except Exception as exc:
+                    if self._should_retry_same_model(exc) and attempt < self.retry_attempts:
+                        await self._sleep_before_retry(
+                            model_name=model_name,
+                            attempt=attempt,
+                            operation_name=operation_name,
+                            exc=exc,
+                        )
+                        continue
+
+                    if self._should_fallback_to_next_model(exc) or self._should_retry_same_model(exc):
+                        logger.warning(
+                            "Qwen fallback operation=%s model=%s attempt=%s error=%s",
+                            operation_name,
+                            model_name,
+                            attempt,
+                            exc,
+                        )
+                        break
+
+                    raise
+
+            attempted_models.append(model_name)
+
+        raise QwenProviderFallbackError(
+            code="QWEN_ALL_MODELS_UNAVAILABLE",
+            message="Qwen 当前梯队模型均不可用，系统已自动降级仍失败，请稍后重试。",
+            attempted_models=attempted_models or model_order,
+        )
+
+    async def _sleep_before_retry(
+        self,
+        *,
+        model_name: str,
+        attempt: int,
+        operation_name: str,
+        exc: Exception,
+    ) -> None:
+        delay_seconds = self.retry_base_delay_seconds * (2 ** max(0, attempt - 1))
+        logger.info(
+            "Qwen retry scheduled operation=%s model=%s attempt=%s delay_seconds=%.2f error=%s",
+            operation_name,
+            model_name,
+            attempt,
+            delay_seconds,
+            exc,
+        )
+        await asyncio.sleep(delay_seconds)
+
+    def _build_model_fallback_order(self, initial_model: str) -> list[str]:
+        return self._normalize_model_pool([initial_model, *self.fallback_models])
+
+    @staticmethod
+    def _normalize_model_pool(models: Sequence[str]) -> list[str]:
+        normalized_models: list[str] = []
+        seen: set[str] = set()
+        for item in models:
+            model_name = str(item).strip()
+            if not model_name or model_name in seen:
+                continue
+            normalized_models.append(model_name)
+            seen.add(model_name)
+        return normalized_models
+
+    @staticmethod
+    def _extract_error_status(exc: Exception) -> int | None:
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+
+        response = getattr(exc, "response", None)
+        if response is not None:
+            nested_status_code = getattr(response, "status_code", None)
+            if isinstance(nested_status_code, int):
+                return nested_status_code
+        return None
+
+    @staticmethod
+    def _extract_error_text(exc: Exception) -> str:
+        parts: list[str] = [str(exc)]
+        body = getattr(exc, "body", None)
+        if body:
+            if isinstance(body, (dict, list)):
+                parts.append(json.dumps(body, ensure_ascii=False))
+            else:
+                parts.append(str(body))
+        message = getattr(exc, "message", None)
+        if isinstance(message, str) and message.strip():
+            parts.append(message)
+        return " ".join(part for part in parts if part).lower()
+
+    def _should_retry_same_model(self, exc: Exception) -> bool:
+        if isinstance(exc, (RateLimitError, APITimeoutError, APIConnectionError)):
+            return True
+
+        status_code = self._extract_error_status(exc)
+        if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+            return True
+
+        error_text = self._extract_error_text(exc)
+        retry_keywords = (
+            "rate limit",
+            "too many requests",
+            "timeout",
+            "temporarily unavailable",
+            "connection reset",
+            "try again later",
+            "engine overloaded",
+            "upstream request timeout",
+        )
+        return any(keyword in error_text for keyword in retry_keywords)
+
+    def _should_fallback_to_next_model(self, exc: Exception) -> bool:
+        if isinstance(exc, RateLimitError):
+            return True
+
+        status_code = self._extract_error_status(exc)
+        error_text = self._extract_error_text(exc)
+
+        quota_keywords = (
+            "insufficient balance",
+            "insufficient quota",
+            "quota exceeded",
+            "quota is exhausted",
+            "余额不足",
+            "欠费",
+            "用量耗尽",
+            "account balance",
+        )
+        model_keywords = (
+            "model not found",
+            "model does not exist",
+            "unsupported model",
+            "invalid model",
+            "no permission",
+            "模型不存在",
+            "模型无权限",
+            "模型不可用",
+        )
+
+        if status_code == 402:
+            return True
+        if status_code == 403 and any(keyword in error_text for keyword in quota_keywords):
+            return True
+        if status_code == 404:
+            return True
+        if isinstance(exc, BadRequestError) and any(keyword in error_text for keyword in model_keywords):
+            return True
+        if any(keyword in error_text for keyword in quota_keywords):
+            return True
+        return False
 
 
 def _start_event(request: MediaChatRequest) -> dict[str, object]:
@@ -1108,8 +1684,10 @@ def create_provider_from_env() -> BaseLLMProvider:
 
     if provider_name == "openai":
         return OpenAIProvider()
-    if provider_name in {"compatible", "qwen", "dashscope"}:
+    if provider_name == "compatible":
         return CompatibleLLMProvider()
+    if provider_name in {"qwen", "dashscope"}:
+        return QwenLLMProvider()
     if provider_name in {"langgraph", "graph"}:
         from app.services.graph import LangGraphProvider
 
@@ -1117,7 +1695,11 @@ def create_provider_from_env() -> BaseLLMProvider:
     if provider_name == "auto":
         if os.getenv("OPENAI_API_KEY"):
             return OpenAIProvider()
+        if os.getenv("QWEN_API_KEY") or os.getenv("QWEN_BASE_URL"):
+            return QwenLLMProvider()
         if os.getenv("LLM_API_KEY") and os.getenv("LLM_BASE_URL"):
+            if _is_dashscope_compatible_base_url(os.getenv("LLM_BASE_URL")):
+                return QwenLLMProvider()
             return CompatibleLLMProvider()
         return MockLLMProvider()
     if provider_name != "mock":

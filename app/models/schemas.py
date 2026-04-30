@@ -124,6 +124,11 @@ class MediaChatRequest(SchemaModel):
         default=None,
         description="Optional explicit thread title.",
     )
+    model_override: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Optional runtime model override for the active provider.",
+    )
 
 
 class UploadMediaResponse(SchemaModel):
@@ -472,6 +477,41 @@ class ArtifactDeleteResponse(SchemaModel):
         default=False,
         description="Whether the request cleared all drafts for the current user.",
     )
+
+
+class AvailableModelItem(SchemaModel):
+    id: str = Field(..., description="Frontend-safe model registry identifier.")
+    model: str = Field(..., description="Raw provider model name used for runtime invocation.")
+    name: str = Field(..., description="Display name shown in the selector.")
+    group: str = Field(..., description="Capability group label used for subsection rendering.")
+    tags: list[str] = Field(default_factory=list, description="Small display tags for the model.")
+    is_default: bool = Field(
+        default=False,
+        description="Whether this model matches the current backend default.",
+    )
+
+
+class AvailableModelProviderItem(SchemaModel):
+    provider_key: str = Field(..., description="Stable provider key.")
+    provider: str = Field(..., description="Human-readable provider name.")
+    status: Literal["configured", "unconfigured"] = Field(
+        ...,
+        description="Whether this provider is configured for the current deployment.",
+    )
+    status_label: str = Field(..., description="Localized provider status label.")
+    models: list[AvailableModelItem] = Field(
+        default_factory=list,
+        description="Provider-owned models exposed to the frontend registry.",
+    )
+
+
+class AvailableModelsResponse(SchemaModel):
+    items: list[AvailableModelProviderItem] = Field(
+        default_factory=list,
+        description="Provider-grouped model registry entries available to the frontend.",
+    )
+    total_providers: int = Field(..., description="Returned provider group count.")
+    total_models: int = Field(..., description="Returned model count across all providers.")
 
 
 class TemplateListItem(SchemaModel):

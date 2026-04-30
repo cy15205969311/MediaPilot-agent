@@ -61,6 +61,8 @@ from app.services.providers import (
     CompatibleLLMProvider,
     MockLLMProvider,
     OpenAIProvider,
+    QwenLLMProvider,
+    _is_dashscope_compatible_base_url,
 )
 from app.services.tools import execute_business_tool, get_business_tools
 
@@ -173,10 +175,21 @@ def create_langgraph_inner_provider() -> BaseLLMProvider:
         return MockLLMProvider()
     if provider_name == "openai" and os.getenv("OPENAI_API_KEY"):
         return OpenAIProvider()
-    if provider_name in {"compatible", "qwen", "dashscope"}:
+    if provider_name == "compatible":
         if os.getenv("LLM_API_KEY") and os.getenv("LLM_BASE_URL"):
             return CompatibleLLMProvider()
+    if provider_name in {"qwen", "dashscope"}:
+        if (
+            os.getenv("QWEN_API_KEY")
+            or os.getenv("QWEN_BASE_URL")
+            or _is_dashscope_compatible_base_url(os.getenv("LLM_BASE_URL"))
+        ):
+            return QwenLLMProvider()
 
+    if os.getenv("QWEN_API_KEY") or os.getenv("QWEN_BASE_URL"):
+        return QwenLLMProvider()
+    if _is_dashscope_compatible_base_url(os.getenv("LLM_BASE_URL")) and os.getenv("LLM_API_KEY"):
+        return QwenLLMProvider()
     if os.getenv("LLM_API_KEY") and os.getenv("LLM_BASE_URL"):
         return CompatibleLLMProvider()
     if os.getenv("OPENAI_API_KEY"):
@@ -226,6 +239,26 @@ class LangGraphProvider(BaseLLMProvider):
         )
         self.graph = self._build_graph()
 
+    def clone_with_model_override(self, model_override: str | None) -> BaseLLMProvider:
+        normalized_model = (model_override or "").strip()
+        if not normalized_model:
+            return self
+
+        next_inner_provider = self.inner_provider.clone_with_model_override(normalized_model)
+        if next_inner_provider is self.inner_provider:
+            return self
+
+        return type(self)(
+            inner_provider=next_inner_provider,
+            route_analyzer=self.route_analyzer,
+            vision_analyzer=self.vision_analyzer,
+            search_analyzer=self.search_analyzer,
+            vision_model=self.vision_model,
+            vision_timeout_seconds=self.vision_timeout_seconds,
+            search_timeout_seconds=self.search_timeout_seconds,
+            business_tool_max_iterations=self.business_tool_max_iterations,
+        )
+
     def _bind_business_tool_llm(self):
         if not self.business_tools:
             return None
@@ -253,12 +286,14 @@ class LangGraphProvider(BaseLLMProvider):
         thread: Thread | None = None,
         user_id: str | None = None,
     ) -> AsyncGenerator[dict[str, object], None]:
+        inner_model_name = getattr(self.inner_provider, "model", "") or "<unset>"
         logger.info(
-            "langgraph.stream start thread_id=%s task_type=%s materials=%s inner_provider=%s",
+            "langgraph.stream start thread_id=%s task_type=%s materials=%s inner_provider=%s (model=%s)",
             request.thread_id,
             request.task_type.value,
             len(request.materials),
             type(self.inner_provider).__name__,
+            inner_model_name,
         )
         yield {
             "event": "start",

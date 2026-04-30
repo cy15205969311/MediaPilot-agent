@@ -11,6 +11,7 @@ MediaPilot Agent 是一个面向新媒体内容运营场景的智能工作台，
 - Light / Dark 双主题切换
 - Playwright 端到端浏览器自动化测试基线
 - LangGraph ReAct 业务工具调用、顺序多工具规划与可扩展业务工具节点
+- 独立 `QwenLLMProvider`、三级模型降级 (`qwen-max -> qwen-plus -> qwen-turbo`)、后端驱动的模型注册表接口，以及支持搜索/分组/状态感知并可按 `provider:model` 真正切换后端引擎的前端模型选择器
 
 这套主题系统基于 CSS 变量和 `ThemeProvider` 实现，支持在工作台顶部一键切换 Light / Dark，并会将用户偏好保存到本地 `localStorage`。
 
@@ -90,6 +91,7 @@ copy .env.example .env
 然后按实际环境补充以下配置：
 
 - 大模型提供者配置
+- `QWEN_*` 独立提供者与降级策略配置
 - 视觉模型配置
 - 可选联网搜索配置（如 `TAVILY_API_KEY`，同时为 LangGraph 搜索节点与市场趋势业务工具提供实时检索）
 - 可选对象存储配置（如 `OMNIMEDIA_STORAGE_BACKEND`、`OSS_*`）
@@ -202,10 +204,10 @@ pip install -r requirements.txt
 ```bash
 python -m pytest -q
 ```
-Current backend regression baseline: `97 passed`.
+Current backend regression baseline: `114 passed`.
 
 默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
-当前后端回归基线为 `97 passed`。
+当前后端回归基线为 `114 passed`。
 
 执行前端构建：
 

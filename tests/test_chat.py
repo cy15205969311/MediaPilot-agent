@@ -2186,6 +2186,35 @@ def test_artifact_clear_all_endpoint_removes_all_current_user_drafts(
     assert bob_after_response.json()["total"] == 1
 
 
+def test_available_models_endpoint_requires_authentication(client: TestClient):
+    response = client.get("/api/v1/models/available")
+
+    assert response.status_code == 401
+
+
+def test_available_models_endpoint_returns_dashscope_registry(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("QWEN_API_KEY", "dashscope-test-key")
+    headers = register_user(client, username="alice-model-registry")
+
+    response = client.get("/api/v1/models/available", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_providers"] >= 1
+    assert payload["total_models"] >= 1
+
+    dashscope_provider = next(
+        item for item in payload["items"] if item["provider_key"] == "dashscope"
+    )
+    assert dashscope_provider["provider"] == "阿里百炼 (DashScope)"
+    assert dashscope_provider["status"] == "configured"
+    assert any(model["model"] == "qwen-max" for model in dashscope_provider["models"])
+    assert any(model["group"] == "大语言模型" for model in dashscope_provider["models"])
+
+
 def test_thread_history_returns_user_message_image_material(client: TestClient):
     headers = register_user(client, username="alice-image-history")
     image_url = "https://media-bucket.oss-cn-hangzhou.aliyuncs.com/uploads/alice/sample.jpg"
