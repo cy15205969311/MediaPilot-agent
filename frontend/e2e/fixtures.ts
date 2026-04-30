@@ -1077,6 +1077,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
     if (path === "/api/v1/media/chat/stream" && request.method() === "POST") {
       const body = parseJsonBody<MediaChatRequestPayload>(route);
       const events = resolveStreamEvents(options, body);
+      const hasStreamError = events.some((event) => event.event === "error");
       const assistantContent = events
         .filter(
           (
@@ -1122,14 +1123,16 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         created_at: createdAt,
         materials: requestMaterials,
       });
-      const assistantMessage = createMockHistoryMessage({
-        id: `message-assistant-${body.thread_id}-${Date.now()}`,
-        thread_id: body.thread_id,
-        role: "assistant",
-        message_type: "text",
-        content: assistantContent || "Playwright 自动化回复",
-        created_at: createdAt,
-      });
+      const assistantMessage = hasStreamError
+        ? null
+        : createMockHistoryMessage({
+            id: `message-assistant-${body.thread_id}-${Date.now()}`,
+            thread_id: body.thread_id,
+            role: "assistant",
+            message_type: "text",
+            content: assistantContent || "Playwright 自动化回复",
+            created_at: createdAt,
+          });
 
       state.threadMessagesById[body.thread_id] = {
         thread_id: body.thread_id,
@@ -1144,7 +1147,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         messages: [
           ...existingThreadMessages.messages,
           userMessage,
-          assistantMessage,
+          ...(assistantMessage ? [assistantMessage] : []),
         ],
         materials: [...existingThreadMessages.materials, ...requestMaterials],
       };
@@ -1156,14 +1159,15 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
           existingThreadMessages.title ??
           state.threads.find((thread) => thread.id === body.thread_id)?.title ??
           "Untitled thread",
-        latest_message_excerpt: assistantContent || body.message,
+        latest_message_excerpt:
+          (!hasStreamError && assistantContent) || body.message,
         is_archived: false,
         knowledge_base_scope:
           body.knowledge_base_scope ?? existingThreadMessages.knowledge_base_scope ?? null,
         updated_at: createdAt,
       });
 
-      if (artifactEvent) {
+      if (artifactEvent && assistantMessage) {
         state.drafts = [
           createMockDraftSummary({
             id: `draft-${body.thread_id}-${Date.now()}`,

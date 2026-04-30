@@ -3,7 +3,7 @@ import json
 
 import app.services.graph.provider as graph_provider_module
 from app.db.models import Thread
-from app.models.schemas import MediaChatRequest
+from app.models.schemas import ContentGenerationArtifactPayload, MediaChatRequest
 from app.services import tools as business_tools
 from app.services.graph import LangGraphProvider
 from app.services.knowledge_base import KnowledgeDocument
@@ -46,6 +46,28 @@ class BusinessToolRecordingProvider(BaseLLMProvider):
         yield {"event": "done", "thread_id": request.thread_id}
 
 
+class StructuringFailureProvider(BaseLLMProvider):
+    async def generate_stream(self, request, **kwargs):
+        yield {
+            "event": "start",
+            "thread_id": request.thread_id,
+            "platform": request.platform.value,
+            "task_type": request.task_type.value,
+            "materials_count": len(request.materials),
+        }
+        yield {
+            "event": "message",
+            "delta": "这是一段已经生成完成的改写正文，会在结构化失败时被保留下来继续交付给用户。",
+            "index": 0,
+        }
+        yield {
+            "event": "error",
+            "code": "QWEN_ARTIFACT_VALIDATION_ERROR",
+            "message": "Qwen 返回的结构化结果不符合契约，请稍后重试。",
+        }
+        yield {"event": "done", "thread_id": request.thread_id}
+
+
 async def collect_events(
     provider: LangGraphProvider,
     request: MediaChatRequest,
@@ -56,6 +78,40 @@ async def collect_events(
     async for event in provider.generate_stream(request, thread=thread):
         events.append(event)
     return events
+
+
+def test_langgraph_gracefully_degrades_when_inner_provider_artifact_validation_fails():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-graceful-degradation",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请基于当前结果改写到另一平台，并保留核心卖点。",
+            "materials": [],
+        }
+    )
+    provider = LangGraphProvider(inner_provider=StructuringFailureProvider())
+
+    events = asyncio.run(collect_events(provider, request))
+
+    error_events = [event for event in events if event["event"] == "error"]
+    assert error_events == []
+
+    message_text = "".join(
+        str(event["delta"]) for event in events if event["event"] == "message"
+    )
+    assert "这是一段已经生成完成的改写正文" in message_text
+
+    review_events = [
+        event for event in events if event["event"] == "tool_call" and event["name"] == "review_draft"
+    ]
+    assert review_events[-1]["status"] == "fallback"
+
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    assert artifact.artifact_type == "content_draft"
+    assert artifact.title == "内容改写（格式降级）"
+    assert "这是一段已经生成完成的改写正文" in artifact.body
 
 
 def test_business_tool_registry_exports_openai_function_schema():

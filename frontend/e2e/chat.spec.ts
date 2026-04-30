@@ -1071,6 +1071,38 @@ test("sends a streamed chat message and renders user thinking progress and AI fe
   ).toBeVisible();
 });
 
+test("surfaces SSE errors and removes empty assistant placeholders", async ({ page }) => {
+  await openWorkspace(page, {
+    streamEvents: (payload) => [
+      {
+        event: "start",
+        thread_id: payload.thread_id,
+        platform: payload.platform,
+        task_type: payload.task_type,
+        materials_count: payload.materials.length,
+      },
+      {
+        event: "error",
+        code: "QWEN_ARTIFACT_VALIDATION_ERROR",
+        message: "Qwen 返回的结构化结果不符合契约，请稍后重试。",
+      },
+      { event: "done", thread_id: payload.thread_id },
+    ],
+  });
+
+  const composer = page.getByTestId("composer-textarea");
+  await composer.fill("请把这版内容改写到另一平台。");
+  await page.getByTestId("composer-send-button").click();
+
+  await expect(page.getByTestId("chat-message-error")).toContainText(
+    "模型结构化结果生成失败，请尝试切换更高级模型（如 Qwen-Max）后重试。",
+  );
+  await expect(page.getByTestId("chat-message-error")).toContainText(
+    "错误代码：QWEN_ARTIFACT_VALIDATION_ERROR",
+  );
+  await expect(page.getByTestId("chat-message-assistant")).toHaveCount(0);
+});
+
 test("uses artifact actions to queue follow-up prompts and flip the workspace platform", async ({
   page,
 }) => {

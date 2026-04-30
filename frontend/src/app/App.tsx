@@ -1193,6 +1193,39 @@ function App() {
     );
   };
 
+  const removeAssistantPlaceholderIfEmpty = () => {
+    const assistantId = assistantMessageIdRef.current;
+    if (!assistantId) {
+      return;
+    }
+
+    setMessages((current) => {
+      const target = current.find((item) => item.id === assistantId);
+      if (!target || target.role !== "assistant" || target.content.trim().length > 0) {
+        return current;
+      }
+      return current.filter((item) => item.id !== assistantId);
+    });
+  };
+
+  const getFriendlyStreamErrorMessage = (
+    event: Extract<ChatStreamEvent, { event: "error" }>,
+  ): string => {
+    const code = event.code.trim().toUpperCase();
+    if (
+      code === "QWEN_ARTIFACT_VALIDATION_ERROR" ||
+      code === "QWEN_JSON_DECODE_ERROR" ||
+      code === "COMPATIBLE_ARTIFACT_VALIDATION_ERROR" ||
+      code === "COMPATIBLE_JSON_DECODE_ERROR" ||
+      code === "OPENAI_ARTIFACT_VALIDATION_ERROR" ||
+      code === "OPENAI_JSON_DECODE_ERROR"
+    ) {
+      return "模型结构化结果生成失败，请尝试切换更高级模型（如 Qwen-Max）后重试。";
+    }
+
+    return event.message.trim() || "模型调用异常，请检查配置后重试。";
+  };
+
   const updateUploadedMaterial = (materialId: string, patch: Partial<UploadedMaterial>) => {
     setUploadedMaterials((current) =>
       current.map((item) => {
@@ -2427,18 +2460,27 @@ function App() {
         setStatusText("结构化结果已更新，可在右侧继续编辑或导出");
         break;
       case "error":
+        {
+          const friendlyMessage = getFriendlyStreamErrorMessage(event);
+          const detailText =
+            event.message.trim() && event.message.trim() !== friendlyMessage
+              ? `\n\n原始错误：${event.message.trim()}`
+              : "";
+
         streamErrorRef.current = true;
-        setStatusText("模型调用异常，请检查配置后重试");
+        setStatusText(friendlyMessage);
+        removeAssistantPlaceholderIfEmpty();
         appendSystemMessage({
           id: createId("provider-error"),
           role: "error",
           title: "模型服务异常",
-          content: `${event.code}: ${event.message}`,
+          content: `${friendlyMessage}${detailText}\n\n错误代码：${event.code}`,
           createdAt: new Date().toISOString(),
         });
         setIsStreaming(false);
         assistantMessageIdRef.current = null;
         break;
+        }
       case "done":
         if (streamErrorRef.current) {
           streamErrorRef.current = false;

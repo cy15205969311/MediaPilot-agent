@@ -162,6 +162,7 @@ class GraphState(TypedDict, total=False):
     business_tool_iteration: int
     knowledge_base_scope: str
     knowledge_base_context: str
+    artifact_fallback_reason: str | None
 
 
 class SearchRouteDecision(BaseModel):
@@ -329,6 +330,7 @@ class LangGraphProvider(BaseLLMProvider):
             "business_tool_iteration": 0,
             "knowledge_base_scope": "",
             "knowledge_base_context": "",
+            "artifact_fallback_reason": None,
         }
 
         try:
@@ -803,6 +805,7 @@ class LangGraphProvider(BaseLLMProvider):
         draft_parts: list[str] = []
         latest_artifact: dict[str, object] | None = None
         latest_error: dict[str, object] | None = None
+        artifact_fallback_reason: str | None = None
 
         async for event in self.inner_provider.generate_stream(
             adapted_request,
@@ -827,7 +830,19 @@ class LangGraphProvider(BaseLLMProvider):
 
             if event_name == "error":
                 latest_error = event
-                writer({"payload": event})
+                if _should_gracefully_degrade_provider_error(
+                    event,
+                    current_draft="".join(draft_parts),
+                    artifact_candidate=latest_artifact,
+                ):
+                    artifact_fallback_reason = "provider_structuring_error"
+                    logger.warning(
+                        "langgraph provider structuring error degraded thread_id=%s code=%s",
+                        state["request"].thread_id,
+                        event.get("code"),
+                    )
+                else:
+                    writer({"payload": event})
 
         return {
             "current_draft": "".join(draft_parts),
@@ -836,6 +851,7 @@ class LangGraphProvider(BaseLLMProvider):
             "messages": updated_messages,
             "knowledge_base_scope": knowledge_base_scope,
             "knowledge_base_context": knowledge_base_context,
+            "artifact_fallback_reason": artifact_fallback_reason,
             "current_step": "generate_draft:completed",
         }
 
@@ -935,6 +951,32 @@ class LangGraphProvider(BaseLLMProvider):
         )
 
         if state.get("error") is not None:
+            if _should_gracefully_degrade_provider_error(
+                state.get("error"),
+                current_draft=state.get("current_draft", ""),
+                artifact_candidate=state.get("artifact_candidate"),
+            ):
+                provider_error_text = _format_provider_error_for_validation(state.get("error"))
+                merged_issues = _merge_validation_errors(
+                    state.get("validation_errors", []),
+                    [provider_error_text] if provider_error_text else [],
+                )
+                _emit_tool_call(
+                    writer,
+                    name="review_draft",
+                    status="fallback",
+                    message="结构化结果校验失败，已保留正文并降级为基础产物。",
+                )
+                _stream_message_chunks(writer, state.get("current_draft", ""))
+                return {
+                    "validation_errors": merged_issues,
+                    "error": None,
+                    "next_route": "format_artifact_node",
+                    "artifact_fallback_reason": state.get("artifact_fallback_reason")
+                    or "provider_structuring_error",
+                    "current_step": "review:provider_error_fallback",
+                }
+
             _emit_tool_call(writer, name="review_draft", status="skipped")
             return {
                 "next_route": "format_artifact_node",
@@ -1002,6 +1044,7 @@ class LangGraphProvider(BaseLLMProvider):
         request = state["request"]
         validation_errors = list(state.get("validation_errors", []))
         artifact_payload: dict[str, object] | None = None
+        artifact_fallback_reason = str(state.get("artifact_fallback_reason") or "").strip()
 
         candidate = state.get("artifact_candidate")
         if isinstance(candidate, dict):
@@ -1013,10 +1056,18 @@ class LangGraphProvider(BaseLLMProvider):
                 _emit_tool_call(writer, name="format_artifact", status="fallback")
 
         if artifact_payload is None:
+            if artifact_fallback_reason:
+                _emit_tool_call(
+                    writer,
+                    name="format_artifact",
+                    status="fallback",
+                    message="结构化结果不可用，已保留原始正文并降级渲染。",
+                )
             artifact = _build_fallback_artifact(
                 request=request,
                 draft=state.get("current_draft", ""),
                 materials_parsed=state.get("materials_parsed", []),
+                degraded_from_provider_error=bool(artifact_fallback_reason),
             )
             artifact_payload = artifact.model_dump(mode="json")
 
@@ -2207,12 +2258,13 @@ def _build_fallback_artifact(
     request: MediaChatRequest,
     draft: str,
     materials_parsed: list[str],
+    degraded_from_provider_error: bool = False,
 ) -> BaseModel:
     supporting_context = "；".join(materials_parsed[:2]) if materials_parsed else "无补充素材"
 
     if request.task_type == TaskType.TOPIC_PLANNING:
         return TopicPlanningArtifactPayload(
-            title="内容选题池",
+            title="内容选题池（格式降级）" if degraded_from_provider_error else "内容选题池",
             topics=[
                 TopicPlanningItem(
                     title="从一次复盘里提炼出 3 个长期可复用的方法论",
@@ -2240,19 +2292,29 @@ def _build_fallback_artifact(
             "建议先交代问题，再给出拆解框架，最后补上可执行动作，这样更容易被记住和收藏。"
         )
         return ContentGenerationArtifactPayload(
-            title="结构化内容草稿",
+            title=(
+                "内容改写（格式降级）"
+                if degraded_from_provider_error and "改写" in request.message
+                else "内容草稿（格式降级）"
+                if degraded_from_provider_error
+                else "结构化内容草稿"
+            ),
             title_candidates=[
                 "别再把复盘写成流水账，读者真正想看到的是这 3 个结论",
                 "同样是内容总结，为什么有的人能写出高收藏笔记",
                 "一篇高质量复盘，关键不在文笔，而在结构有没有帮人做决定",
             ],
             body=body,
-            platform_cta="如果你愿意，我可以继续把这版草稿改写成小红书图文版或抖音口播版。",
+            platform_cta=(
+                "当前结果来自格式降级兜底，如需更完整的结构化产物，建议切换更高级模型后重试。"
+                if degraded_from_provider_error
+                else "如果你愿意，我可以继续把这版草稿改写成小红书图文版或抖音口播版。"
+            ),
         )
 
     if request.task_type == TaskType.HOT_POST_ANALYSIS:
         return HotPostAnalysisArtifactPayload(
-            title="爆款内容拆解卡",
+            title="爆款内容拆解卡（格式降级）" if degraded_from_provider_error else "爆款内容拆解卡",
             analysis_dimensions=[
                 HotPostAnalysisDimension(
                     dimension="标题钩子机制",
@@ -2275,7 +2337,7 @@ def _build_fallback_artifact(
         )
 
     return CommentReplyArtifactPayload(
-        title="评论回复建议",
+        title="评论回复建议（格式降级）" if degraded_from_provider_error else "评论回复建议",
         suggestions=[
             CommentReplySuggestion(
                 comment_type="咨询类",
@@ -2306,6 +2368,46 @@ def _build_fallback_artifact(
             ),
         ],
     )
+
+
+GRACEFUL_ARTIFACT_ERROR_CODES = {
+    "OPENAI_JSON_DECODE_ERROR",
+    "OPENAI_ARTIFACT_VALIDATION_ERROR",
+    "COMPATIBLE_JSON_DECODE_ERROR",
+    "COMPATIBLE_ARTIFACT_VALIDATION_ERROR",
+    "QWEN_JSON_DECODE_ERROR",
+    "QWEN_ARTIFACT_VALIDATION_ERROR",
+}
+
+
+def _should_gracefully_degrade_provider_error(
+    error: dict[str, object] | None,
+    *,
+    current_draft: str,
+    artifact_candidate: dict[str, object] | None,
+) -> bool:
+    if not isinstance(error, dict):
+        return False
+
+    error_code = str(error.get("code", "")).strip().upper()
+    if error_code not in GRACEFUL_ARTIFACT_ERROR_CODES:
+        return False
+
+    if current_draft.strip():
+        return True
+
+    return isinstance(artifact_candidate, dict)
+
+
+def _format_provider_error_for_validation(error: dict[str, object] | None) -> str:
+    if not isinstance(error, dict):
+        return ""
+
+    error_code = str(error.get("code", "")).strip()
+    error_message = str(error.get("message", "")).strip()
+    if error_code and error_message:
+        return f"{error_code}: {error_message}"
+    return error_code or error_message
 
 
 def _build_data_image_url_part(*, mime_type: str, image_bytes: bytes) -> dict[str, object]:

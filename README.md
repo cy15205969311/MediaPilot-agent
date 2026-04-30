@@ -211,6 +211,7 @@ Current backend regression baseline: `114 passed`.
 - Chat attachment parsing now accepts `.docx` uploads in addition to txt, md, and pdf, allowing Word documents to flow into the existing document-context extraction pipeline.
 - Knowledge-base-backed RAG replies now support citation numbering such as `[1]`, and the chat UI renders those references as superscript markers with hoverable source hints to reduce enterprise trust black boxes.
 - The knowledge workspace now blocks unsupported upload formats before they leave the browser and shows inline error feedback inside the uploader, reducing silent failures when operators accidentally choose files outside the supported txt/md/markdown set.
+- When structured artifact generation collapses after the model has already produced usable raw text, LangGraph now preserves that draft and degrades into a fallback artifact instead of dropping the response; true SSE failures are also surfaced explicitly in the chat UI without leaving empty assistant bubbles behind.
 
 默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
 当前后端回归基线为 `114 passed`。
