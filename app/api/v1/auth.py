@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -28,9 +28,12 @@ from app.models.schemas import (
 )
 from app.services.auth import (
     DecodedToken,
+    JWT_ACCESS_EXPIRE_MINUTES,
     JWT_PASSWORD_RESET_EXPIRE_MINUTES,
     REFRESH_TOKEN_TYPE,
     authenticate_user,
+    blacklist_access_token_jti,
+    blacklist_access_token_payload,
     create_password_reset_token,
     decode_token_payload,
     extract_client_ip,
@@ -41,6 +44,7 @@ from app.services.auth import (
     hash_password,
     issue_token_pair,
     list_active_refresh_sessions,
+    mark_user_password_changed,
     normalize_username,
     revoke_other_refresh_sessions,
     revoke_refresh_session,
@@ -230,10 +234,12 @@ async def refresh_auth_token(
 @router.post("/logout", response_model=LogoutResponse)
 async def logout(
     payload: LogoutRequest,
+    token_payload: DecodedToken = Depends(get_current_access_token),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> LogoutResponse:
     try:
+        blacklist_access_token_payload(db, token_payload=token_payload)
         revoke_refresh_session(
             db,
             user_id=current_user.id,
@@ -303,6 +309,7 @@ async def password_reset_by_token(
     user.hashed_password = hash_password(payload.new_password)
 
     try:
+        mark_user_password_changed(user)
         revoked_sessions = revoke_other_refresh_sessions(
             db,
             user_id=user.id,
@@ -343,6 +350,8 @@ async def reset_password(
     current_user.hashed_password = hash_password(new_password)
 
     try:
+        mark_user_password_changed(current_user)
+        blacklist_access_token_payload(db, token_payload=token_payload)
         revoked_sessions = revoke_other_refresh_sessions(
             db,
             user_id=current_user.id,
@@ -385,6 +394,12 @@ async def revoke_session(
             db,
             user_id=current_user.id,
             session_id=session_id,
+        )
+        blacklist_access_token_jti(
+            db,
+            jti=session.latest_access_jti,
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
         )
         db.commit()
     except SQLAlchemyError as exc:

@@ -72,6 +72,11 @@ class User(Base):
     nickname: Mapped[str | None] = mapped_column(String(64), nullable=True)
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        default=utcnow,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         default=utcnow,
@@ -355,6 +360,10 @@ class RefreshSession(Base):
         index=True,
         nullable=False,
     )
+    latest_access_jti: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
     device_info: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(
@@ -378,3 +387,19 @@ class RefreshSession(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="refresh_sessions")
+
+
+class AccessTokenBlacklist(Base):
+    __tablename__ = "access_token_blacklist"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    jti: Mapped[str] = mapped_column(
+        String(32),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+    )

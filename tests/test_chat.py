@@ -7,13 +7,14 @@ from asyncio import tasks as asyncio_tasks
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 import app.services.agent as agent_module
 import app.services.knowledge_base as knowledge_base_module
 import app.services.providers as providers_module
 from app.db.database import Base, get_db
+from app.db.models import AccessTokenBlacklist, User
 from app.main import app
 from app.models.schemas import (
     CommentReplyArtifactPayload,
@@ -21,6 +22,7 @@ from app.models.schemas import (
     HotPostAnalysisArtifactPayload,
     TopicPlanningArtifactPayload,
 )
+from app.services.auth import ACCESS_TOKEN_TYPE, create_access_token, decode_token_payload
 from app.services.graph import LangGraphProvider
 from app.services.tools import get_business_tools
 
@@ -90,6 +92,10 @@ def login_user(
     assert response.status_code == 200
     token = response.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+def decode_access_token(token: str):
+    return decode_token_payload(token=token, expected_token_type=ACCESS_TOKEN_TYPE)
 
 
 def collect_stream_events(
@@ -215,6 +221,7 @@ def client(tmp_path: Path, no_sleep: None):
 
     try:
         with TestClient(app) as test_client:
+            test_client.app.state.testing_session_local = testing_session_local
             yield test_client
     finally:
         agent_module.media_agent_workflow.provider = original_provider
@@ -309,6 +316,7 @@ def test_refresh_token_rotation_revokes_previous_session(client: TestClient):
 
 def test_logout_revokes_refresh_session(client: TestClient):
     register_payload = register_auth_response(client, username="alice-logout")
+    access_token_payload = decode_access_token(register_payload["access_token"])
 
     logout_response = client.post(
         "/api/v1/auth/logout",
@@ -324,6 +332,20 @@ def test_logout_revokes_refresh_session(client: TestClient):
         json={"refresh_token": register_payload["refresh_token"]},
     )
     assert refresh_response.status_code == 401
+
+    access_response = client.get(
+        "/api/v1/media/threads",
+        headers={"Authorization": f"Bearer {register_payload['access_token']}"},
+    )
+    assert access_response.status_code == 401
+
+    with client.app.state.testing_session_local() as db:
+        blacklist_entry = db.scalar(
+            select(AccessTokenBlacklist).where(
+                AccessTokenBlacklist.jti == access_token_payload.jti
+            )
+        )
+        assert blacklist_entry is not None
 
 
 def test_session_listing_marks_current_device_and_supports_targeted_revoke(
@@ -400,6 +422,15 @@ def test_session_listing_marks_current_device_and_supports_targeted_revoke(
     )
     assert revoked_session_response.status_code == 401
 
+    revoked_access_payload = decode_access_token(first_access_token)
+    with client.app.state.testing_session_local() as db:
+        blacklist_entry = db.scalar(
+            select(AccessTokenBlacklist).where(
+                AccessTokenBlacklist.jti == revoked_access_payload.jti
+            )
+        )
+        assert blacklist_entry is not None
+
 
 def test_reset_password_revokes_other_sessions_and_rotates_login_secret(
     client: TestClient,
@@ -428,6 +459,7 @@ def test_reset_password_revokes_other_sessions_and_rotates_login_secret(
     assert login_response.status_code == 200
     second_payload = login_response.json()
     second_access_token = second_payload["access_token"]
+    second_access_token_payload = decode_access_token(second_access_token)
 
     reset_response = client.post(
         "/api/v1/auth/reset-password",
@@ -443,9 +475,22 @@ def test_reset_password_revokes_other_sessions_and_rotates_login_secret(
         "revoked_sessions": 1,
     }
 
+    current_access_response = client.get(
+        "/api/v1/media/threads",
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert current_access_response.status_code == 401
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": second_payload["refresh_token"]},
+    )
+    assert refresh_response.status_code == 200
+    refreshed_access_token = refresh_response.json()["access_token"]
+
     sessions_response = client.get(
         "/api/v1/auth/sessions",
-        headers={"Authorization": f"Bearer {second_access_token}"},
+        headers={"Authorization": f"Bearer {refreshed_access_token}"},
     )
     assert sessions_response.status_code == 200
     sessions_payload = sessions_response.json()
@@ -471,6 +516,18 @@ def test_reset_password_revokes_other_sessions_and_rotates_login_secret(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     assert new_password_login.status_code == 200
+
+    with client.app.state.testing_session_local() as db:
+        blacklist_entry = db.scalar(
+            select(AccessTokenBlacklist).where(
+                AccessTokenBlacklist.jti == second_access_token_payload.jti
+            )
+        )
+        user = db.scalar(select(User).where(User.username == "alice-password-reset"))
+        assert blacklist_entry is not None
+        assert user is not None
+        assert user.password_changed_at is not None
+        assert user.password_changed_at > second_access_token_payload.issued_at
 
 
 def test_reset_password_rejects_wrong_current_password(client: TestClient):
@@ -513,7 +570,10 @@ def test_password_reset_request_and_token_reset_revoke_all_sessions(
         },
     )
     assert register_response.status_code == 200
+    user_id = register_response.json()["user"]["id"]
     first_access_token = register_response.json()["access_token"]
+    detached_access_token = create_access_token(subject=user_id).token
+    detached_access_token_payload = decode_access_token(detached_access_token)
 
     login_response = client.post(
         "/api/v1/auth/login",
@@ -571,6 +631,12 @@ def test_password_reset_request_and_token_reset_revoke_all_sessions(
     )
     assert second_device_response.status_code == 401
 
+    detached_token_response = client.get(
+        "/api/v1/media/threads",
+        headers={"Authorization": f"Bearer {detached_access_token}"},
+    )
+    assert detached_token_response.status_code == 401
+
     old_password_login = client.post(
         "/api/v1/auth/login",
         data={"username": "alice-password-forgot", "password": "super-secret-123"},
@@ -584,6 +650,12 @@ def test_password_reset_request_and_token_reset_revoke_all_sessions(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     assert new_password_login.status_code == 200
+
+    with client.app.state.testing_session_local() as db:
+        user = db.scalar(select(User).where(User.username == "alice-password-forgot"))
+        assert user is not None
+        assert user.password_changed_at is not None
+        assert user.password_changed_at > detached_access_token_payload.issued_at
 
 
 def test_password_reset_request_for_unknown_user_is_still_accepted(

@@ -17,11 +17,11 @@ MediaPilot Agent 是一个面向新媒体内容运营场景的智能工作台，
 
 ## 2. 当前核心能力
 
-- 用户注册、登录、刷新令牌、退出登录
-- 忘记密码、密码重置与重置后全局设备强制下线
+- 用户注册、登录、刷新令牌、退出登录，以及当前访问令牌的即时吊销
+- 忘记密码、密码重置、按密码变更时间全局失效旧 access token，以及重置后的设备强制下线
 - 线程会话创建、历史回放、重命名、删除
 - 用户资料编辑，包括昵称、简介与头像上传
-- 设备会话查看与定向下线
+- 设备会话查看、定向下线与基于 JTI 的 access token 黑名单拦截
 - 素材上传、持久化跟踪、本地 / OSS 双后端存储与 Signed URL 安全交付
 - LangGraph 多模态工作流、联网热点检索与 ReAct 业务工具调用
 - LangGraph 业务工具节点，可通过 `bind_tools` 顺序调用本地 Python 工具，优先拉取 Tavily 实时类目热词情报并结合本地大纲工具后再生成最终草稿，未配置时安全回退 mock 数据
@@ -204,7 +204,7 @@ pip install -r requirements.txt
 ```bash
 python -m pytest -q
 ```
-Current backend regression baseline: `114 passed`.
+Current backend regression baseline: `117 passed`.
 
 - Artifact delivery now supports per-block clipboard copy with success feedback and full Markdown export downloads from both the workspace header and the right-side artifact panel, assistant chat bubbles now expose one-click copy actions for plain conversational replies, and clipboard writes now include both plain text and rich HTML so paste targets such as Word or Feishu can preserve basic formatting.
 - Streamed `tool_call` progress now appears in the chat workspace as a collapsible "AI thinking" panel, so users can see attachment parsing, search, and review steps while long-running jobs are still in flight.
@@ -214,7 +214,7 @@ Current backend regression baseline: `114 passed`.
 - When structured artifact generation collapses after the model has already produced usable raw text, LangGraph now preserves that draft and degrades into a fallback artifact instead of dropping the response; true SSE failures are also surfaced explicitly in the chat UI without leaving empty assistant bubbles behind.
 
 默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
-当前后端回归基线为 `114 passed`。
+当前后端回归基线为 `117 passed`。
 
 执行前端构建：
 

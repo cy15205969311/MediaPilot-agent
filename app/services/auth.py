@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 
 from app.config import load_environment
 from app.db.database import get_db
-from app.db.models import RefreshSession, User
+from app.db.models import (
+    AccessTokenBlacklist,
+    RefreshSession,
+    User,
+    utcnow,
+)
 
 load_environment()
 
@@ -35,6 +40,7 @@ REFRESH_TOKEN_TYPE = "refresh"
 PASSWORD_RESET_TOKEN_TYPE = "reset"
 SESSION_LAST_SEEN_UPDATE_WINDOW = timedelta(minutes=1)
 logger = logging.getLogger(__name__)
+PRECISE_ISSUED_AT_CLAIM = "iat_exact"
 
 
 @dataclass(frozen=True)
@@ -42,8 +48,17 @@ class DecodedToken:
     subject: str
     token_type: str
     jti: str
+    issued_at: datetime
     expires_at: datetime
     session_jti: str | None = None
+
+
+@dataclass(frozen=True)
+class IssuedToken:
+    token: str
+    jti: str
+    issued_at: datetime
+    expires_at: datetime
 
 
 def _credentials_exception(message: str = "当前登录状态已失效，请重新登录。") -> HTTPException:
@@ -72,22 +87,29 @@ def _create_token(
     token_type: str,
     expires_delta: timedelta,
     session_jti: str | None = None,
-) -> str:
+) -> IssuedToken:
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + expires_delta
+    jti = uuid4().hex
     payload: dict[str, object] = {
         "sub": subject,
         "type": token_type,
         "iat": issued_at,
+        PRECISE_ISSUED_AT_CLAIM: issued_at.isoformat(),
         "exp": expires_at,
-        "jti": uuid4().hex,
+        "jti": jti,
     }
     if session_jti:
         payload["session_jti"] = session_jti
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return IssuedToken(
+        token=jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM),
+        jti=jti,
+        issued_at=issued_at,
+        expires_at=expires_at,
+    )
 
 
-def create_access_token(*, subject: str, session_jti: str | None = None) -> str:
+def create_access_token(*, subject: str, session_jti: str | None = None) -> IssuedToken:
     return _create_token(
         subject=subject,
         token_type=ACCESS_TOKEN_TYPE,
@@ -96,7 +118,7 @@ def create_access_token(*, subject: str, session_jti: str | None = None) -> str:
     )
 
 
-def create_refresh_token(*, subject: str) -> str:
+def create_refresh_token(*, subject: str) -> IssuedToken:
     return _create_token(
         subject=subject,
         token_type=REFRESH_TOKEN_TYPE,
@@ -110,7 +132,7 @@ def create_password_reset_token(username: str) -> str:
         subject=normalized_username,
         token_type=PASSWORD_RESET_TOKEN_TYPE,
         expires_delta=timedelta(minutes=JWT_PASSWORD_RESET_EXPIRE_MINUTES),
-    )
+    ).token
 
 
 def verify_password_reset_token(token: str) -> str | None:
@@ -135,6 +157,20 @@ def _parse_expiration(raw_expiration: object) -> datetime:
     raise _credentials_exception()
 
 
+def _parse_precise_issued_at(raw_precise_issued_at: object) -> datetime | None:
+    if not isinstance(raw_precise_issued_at, str) or not raw_precise_issued_at.strip():
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(raw_precise_issued_at)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def decode_token_payload(
     *,
     token: str,
@@ -148,6 +184,9 @@ def decode_token_payload(
     subject = payload.get("sub")
     token_type = payload.get("type")
     jti = payload.get("jti")
+    issued_at = _parse_precise_issued_at(payload.get(PRECISE_ISSUED_AT_CLAIM))
+    if issued_at is None:
+        issued_at = _parse_expiration(payload.get("iat"))
     expires_at = _parse_expiration(payload.get("exp"))
     session_jti = payload.get("session_jti")
 
@@ -166,6 +205,7 @@ def decode_token_payload(
         subject=subject,
         token_type=token_type,
         jti=jti,
+        issued_at=issued_at,
         expires_at=expires_at,
         session_jti=session_jti,
     )
@@ -257,28 +297,24 @@ def issue_token_pair(
     ip_address: str | None = None,
 ) -> tuple[str, str]:
     refresh_token = create_refresh_token(subject=user_id)
-    refresh_payload = decode_token_payload(
-        token=refresh_token,
-        expected_token_type=REFRESH_TOKEN_TYPE,
-    )
     access_token = create_access_token(
         subject=user_id,
-        session_jti=refresh_payload.jti,
+        session_jti=refresh_token.jti,
     )
 
-    db.add(
-        RefreshSession(
-            user_id=user_id,
-            refresh_token_jti=refresh_payload.jti,
-            device_info=device_info,
-            ip_address=ip_address,
-            expires_at=refresh_payload.expires_at,
-            last_seen_at=datetime.now(timezone.utc),
-        )
+    refresh_session = RefreshSession(
+        user_id=user_id,
+        refresh_token_jti=refresh_token.jti,
+        latest_access_jti=access_token.jti,
+        device_info=device_info,
+        ip_address=ip_address,
+        expires_at=refresh_token.expires_at,
+        last_seen_at=datetime.now(timezone.utc),
     )
+    db.add(refresh_session)
     db.flush()
 
-    return access_token, refresh_token
+    return access_token.token, refresh_token.token
 
 
 def validate_refresh_session(
@@ -364,6 +400,69 @@ def revoke_refresh_session_by_id(
         db.flush()
 
     return session
+
+
+def blacklist_access_token_jti(
+    db: Session,
+    *,
+    jti: str | None,
+    expires_at: datetime | None,
+) -> bool:
+    normalized_jti = (jti or "").strip()
+    if not normalized_jti or expires_at is None:
+        return False
+
+    existing_entry = db.scalar(
+        select(AccessTokenBlacklist).where(AccessTokenBlacklist.jti == normalized_jti)
+    )
+    if existing_entry is not None:
+        if expires_at > existing_entry.expires_at:
+            existing_entry.expires_at = expires_at
+            db.flush()
+        return False
+
+    db.add(
+        AccessTokenBlacklist(
+            jti=normalized_jti,
+            expires_at=expires_at,
+        )
+    )
+    db.flush()
+    return True
+
+
+def blacklist_access_token_payload(
+    db: Session,
+    *,
+    token_payload: DecodedToken | None,
+) -> bool:
+    if token_payload is None:
+        return False
+    return blacklist_access_token_jti(
+        db,
+        jti=token_payload.jti,
+        expires_at=token_payload.expires_at,
+    )
+
+
+def is_access_token_blacklisted(
+    db: Session,
+    *,
+    jti: str,
+) -> bool:
+    now = datetime.now(timezone.utc)
+    entry = db.scalar(
+        select(AccessTokenBlacklist).where(AccessTokenBlacklist.jti == jti)
+    )
+    if entry is None:
+        return False
+    return entry.expires_at > now
+
+
+def mark_user_password_changed(user: User) -> datetime:
+    changed_at = utcnow()
+    user.password_changed_at = changed_at
+    return changed_at
 
 
 def revoke_other_refresh_sessions(
@@ -462,15 +561,24 @@ def get_current_user(
         token_payload.subject,
         token_payload.session_jti is not None,
     )
+    user = db.get(User, token_payload.subject)
+    if user is None:
+        raise _credentials_exception()
+
+    if (
+        user.password_changed_at is not None
+        and token_payload.issued_at < user.password_changed_at
+    ):
+        raise _credentials_exception("当前凭证已全局失效，请重新登录。")
+
+    if is_access_token_blacklisted(db, jti=token_payload.jti):
+        raise _credentials_exception("当前访问令牌已被吊销，请重新登录。")
+
     _resolve_active_refresh_session(
         db,
         user_id=token_payload.subject,
         session_jti=token_payload.session_jti,
     )
-
-    user = db.get(User, token_payload.subject)
-    if user is None:
-        raise _credentials_exception()
 
     logger.info("auth.get_current_user resolved user_id=%s", user.id)
     return user

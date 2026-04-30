@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.31`
+- Current version: `v1.13.32`
 - Updated on: `2026-04-30`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, docx document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, chunk preview, citation-aware RAG prompt injection, citation-rendered chat replies, artifact graceful degradation on structure failure, SSE error surfacing, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level and chat-bubble copy interactions, rich-text clipboard delivery, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, access-token JTI blacklisting, password-reset recovery flows, password-change-based global access-token revocation, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, docx document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, chunk preview, citation-aware RAG prompt injection, citation-rendered chat replies, artifact graceful degradation on structure failure, SSE error surfacing, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level and chat-bubble copy interactions, rich-text clipboard delivery, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -42,7 +42,7 @@ The current baseline includes:
 
 1. `FastAPI` backend with `Pydantic v2` contracts.
 2. `React + Vite + TypeScript + Tailwind CSS` frontend workspace.
-3. JWT-based authentication with access token, refresh token, registration, login, password-reset request/completion, and server-side refresh-session revocation.
+3. JWT-based authentication with access token, refresh token, registration, login, password-reset request/completion, server-side refresh-session revocation, per-token JTI blacklisting, and password-change-based global access-token invalidation.
 4. Per-user thread ownership and tenant isolation.
 5. Per-thread dynamic `system_prompt` persistence.
 6. Provider-based SSE streaming chat flow.
@@ -61,7 +61,7 @@ The current baseline includes:
 19. Frontend avatar upload and profile-preview sync.
 20. LangGraph branching orchestration with real vision-model OCR, structured search routing, mock-or-live web search support, safe degradation, and review/retry control.
 21. Thread-linked material upload tracking, backfill, and cleanup on thread deletion.
-22. Active session visibility, targeted device revocation, and password-reset-triggered global session invalidation.
+22. Active session visibility, targeted device revocation with access-token blacklisting, logout-triggered current-token invalidation, and password-reset-triggered global access-token invalidation.
 23. Hourly scheduled abandoned-material cleanup via APScheduler across the active storage backend.
 24. Frontend material attachments are preserved from upload completion through optimistic chat bubbles and `/chat/stream` payloads.
 25. Automated backend tests for auth-protected SSE, history isolation, thread prompt updates, profile updates, avatar persistence, upload tracking, cleanup, upload retention, refresh rotation, logout revocation, password-reset recovery, session management, scheduler behavior, and LangGraph branching/search behavior.
@@ -94,7 +94,7 @@ The current baseline includes:
 The following capabilities are intentionally not production-complete yet:
 
 1. third-party SSO or enterprise identity providers
-2. access-token revocation lists, device fingerprints, or organization-wide session-management dashboards
+2. device fingerprints, scheduled blacklist-compaction controls, or organization-wide session-management dashboards
 3. production observability, rate limiting, or audit logging
 4. deeper external business integrations beyond the current Tavily-backed Business Tools baseline
 5. CDN invalidation, multi-bucket governance, or a full operator-facing retention control plane beyond the current authenticated retention summary endpoint
@@ -1320,18 +1320,19 @@ The Playwright config starts the Vite dev server automatically with `npm run dev
 
 ### 15.3 Latest Verification Result
 
-The following checks were executed for the current knowledge-workspace change set on `2026-04-29` and passed:
+The following checks were executed for the current token-revocation hardening change set on `2026-04-30` and passed:
 
-```bash
+```powershell
+$env:DATABASE_URL = "sqlite:///E:/omnimedia-agent/.codex_tmp/alembic_revocation_test.db"
+alembic upgrade head
 python -m pytest -q
-cd frontend
-npm run build
 ```
 
 Observed result baseline:
 
-- full backend test suite: 114 passed
-- frontend production build: passed
+- Alembic upgrade smoke test against a temporary SQLite database: passed
+- full backend test suite: 117 passed
+- frontend production build: last verified as passed on the previous frontend-focused change set
 - frontend Playwright E2E suite: last verified at 21 passed on the previous frontend-focused change set
 - covered browser flows: auth bootstrap, password-reset request UX, logout cleanup, protected-route refresh retry, thread creation/replay/settings/rename/delete, drafts empty-state/reopen/single-delete/bulk-delete/clear-all flow, template-center render/use-template cascade flow, preset/custom template creation plus batch deletion, profile avatar/nickname/bio updates, active-session refresh and revoke, in-session password change, upload plus tool-call streaming feedback, and right-panel artifact follow-up actions
 - existing auth, scheduler, upload-retention, OSS signed-delivery, LangGraph search/tool, Tavily-backed business-tool live/fallback, and multimodal OCR regression suites remain green under the expanded browser baseline
@@ -1342,7 +1343,17 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.1 Completed in v1.13.31
+### 16.1 Completed in v1.13.32
+
+This version adds or solidifies:
+
+- `app/db/models.py` now persists `User.password_changed_at`, `RefreshSession.latest_access_jti`, and a dedicated `AccessTokenBlacklist` table so access-token revocation can be expressed both globally and per device.
+- `app/services/auth.py` now stamps access tokens with a unique `jti` plus a precise issuance timestamp claim, records the latest issued access-token JTI on each refresh session, rejects blacklisted JTIs inside `get_current_user()`, and enforces password-change cutoffs through `password_changed_at`.
+- `app/api/v1/auth.py` now blacklists the current access token during logout, blacklists the most recent access token when a specific device session is revoked, and updates `password_changed_at` during both token-based password recovery and in-session password changes so zombie access tokens cannot survive a credential reset.
+- Alembic migration `20260430_01_access_token_blacklist_and_password_revocation.py` extends the auth schema safely for SQLite deployments, while `alembic/env.py` can now infer this revision for bootstrap scenarios where the new auth tables or columns already exist.
+- `tests/test_chat.py` now verifies logout blacklisting, targeted device blacklist persistence, immediate invalidation of the old current-device access token after `reset-password`, detached-token invalidation after `password-reset`, and continued refresh-token usability for the kept current session after an in-session password change.
+
+### 16.2 Completed in v1.13.31
 
 This version adds or solidifies:
 
@@ -1352,7 +1363,7 @@ This version adds or solidifies:
 - `frontend/src/app/App.tsx` now maps streamed provider errors to clearer user-facing guidance, removes empty assistant placeholders when the stream fails before any visible content is delivered, and appends an explicit error card with the translated message plus the original error code.
 - `tests/test_graph_tools.py` now verifies that a structuring failure inside the inner provider still yields a streamed draft plus a valid fallback artifact, while `frontend/e2e/chat.spec.ts` now verifies that SSE errors surface visibly and do not leave behind an empty assistant bubble.
 
-### 16.2 Completed in v1.13.30
+### 16.3 Completed in v1.13.30
 
 This version adds or solidifies:
 
@@ -1365,7 +1376,7 @@ This version adds or solidifies:
 - `frontend/src/app/components/ChatFeed.tsx` now parses assistant message references, renders inline `[n]` markers as superscript citations, and surfaces the resolved source filename through a hover hint, making private-knowledge answers easier to trust without leaving the chat flow.
 - `tests/test_graph_tools.py` now verifies the knowledge-base prompt includes citation instructions plus a deduplicated source registry, while `frontend/e2e/chat.spec.ts` now verifies that rendered assistant citations expose the expected hover hint in the chat UI.
 
-### 16.3 Completed in v1.13.28
+### 16.4 Completed in v1.13.28
 
 This version adds or solidifies:
 
@@ -1375,7 +1386,7 @@ This version adds or solidifies:
 - `app/api/v1/oss.py`, `frontend/src/app/components/Composer.tsx`, and `requirements.txt` now allow `.docx` uploads as document materials and declare the new parser dependency explicitly.
 - `tests/test_media_parser.py`, `tests/test_oss.py`, and `frontend/e2e/chat.spec.ts` now verify docx parsing/upload acceptance plus rich clipboard writes for both plain text and HTML clipboard targets.
 
-### 16.4 Completed in v1.13.27
+### 16.5 Completed in v1.13.27
 
 This version adds or solidifies:
 
@@ -1387,7 +1398,7 @@ This version adds or solidifies:
 - `frontend/e2e/chat.spec.ts` now verifies that assistant replay bubbles expose the new copy action and that clicking it writes the full assistant message into the mocked browser clipboard.
 - the content-delivery loop is now materially complete inside the frontend workspace: operators can copy polished text blocks directly into publishing back offices or export the full structured artifact as Markdown for review, archiving, and downstream editing.
 
-### 16.5 Completed in v1.13.25
+### 16.6 Completed in v1.13.25
 
 This version adds or solidifies:
 
@@ -1398,7 +1409,7 @@ This version adds or solidifies:
 - `tests/test_qwen_provider.py` now includes a regression that starts from a `LangGraphProvider(inner_provider=CompatibleLLMProvider(...))` baseline and verifies that `dashscope:qwen2.5` is routed into a fresh `QwenLLMProvider` at runtime instead of silently staying on the compatible default path.
 - the committed `.env.example` already points `LANGGRAPH_INNER_PROVIDER=qwen`; local private `.env` files SHOULD follow the same default when DashScope/Qwen is intended to be the normal inner engine, while request-time overrides still take precedence.
 
-### 16.6 Completed in v1.13.24
+### 16.7 Completed in v1.13.24
 
 This version adds or solidifies:
 
@@ -1415,7 +1426,7 @@ This version adds or solidifies:
 - `tests/test_media_parser.py` now verifies local document parsing, `<document_context>` / `<video_transcript>` injection into LangGraph draft requests, and graceful attachment-parse degradation without collapsing the chat flow.
 - `tests/test_chat.py` now covers user-scoped upload/list/delete flows, grouped source management, scope rename conflict handling, and seeded-knowledge fallback, and the current repository baseline is verified by backend tests plus a passing frontend production build.
 
-### 16.7 Completed in v1.13.23
+### 16.8 Completed in v1.13.23
 
 This version adds or solidifies:
 
@@ -1432,7 +1443,7 @@ This version adds or solidifies:
 11. `frontend/src/app/components/views/TemplatesView.tsx` remains a local-first template center with hidden Skills UI, keyword search, 10 category pills, preset/custom badges, batch selection, batch deletion, and one-click apply.
 12. `python -m pytest` plus Playwright browser coverage remain green for topic thread binding, resume drafting, topic CRUD, the larger preset inventory, hidden Skills entry, new category tabs, and artifact-to-template capture.
 
-### 16.8 Completed in v1.13.15
+### 16.9 Completed in v1.13.15
 
 This version adds or solidifies:
 
@@ -1442,7 +1453,7 @@ This version adds or solidifies:
 4. `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, and `frontend/src/app/types.ts` now own template mutation state, Chinese template contracts, and the preset/custom cascade back into the new-thread modal.
 5. `frontend/e2e/fixtures.ts`, `frontend/e2e/chat.spec.ts`, and `tests/test_chat.py` now cover preset listing, custom creation, protected deletion, batch cleanup, and browser-level template management regressions.
 
-### 16.9 Completed in v1.13.14
+### 16.10 Completed in v1.13.14
 
 This version adds or solidifies:
 
@@ -1452,7 +1463,7 @@ This version adds or solidifies:
 4. `frontend/e2e/fixtures.ts` and `frontend/e2e/chat.spec.ts` now cover template-center rendering and the template-to-modal prefill flow without requiring a live backend.
 5. `tests/test_chat.py`, `README.md`, and `DEVELOPMENT.md` now lock the built-in template API baseline and the updated verification counts.
 
-### 16.10 Completed in v1.13.13
+### 16.11 Completed in v1.13.13
 
 This version adds or solidifies:
 
@@ -1462,7 +1473,7 @@ This version adds or solidifies:
 4. `frontend/src/app/components/views/DraftsView.tsx` now adds selection state, card-level delete actions, a bulk action bar, and a clear-all affordance while preserving search, filters, detail preview, and thread handoff.
 5. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now lock backend ownership-safe draft deletion plus browser coverage for single delete, bulk delete, and clear-all flows.
 
-### 16.11 Completed in v1.13.12
+### 16.12 Completed in v1.13.12
 
 This version adds or solidifies:
 
@@ -1472,7 +1483,7 @@ This version adds or solidifies:
 4. `frontend/src/app/components/LeftSidebar.tsx` now upgrades the business-module area from static placeholders into real workspace navigation, while cleaning up the current Chinese labels and wiring "我的草稿" to the new view.
 5. `frontend/e2e/fixtures.ts`, `frontend/e2e/chat.spec.ts`, and `tests/test_chat.py` now lock the drafts aggregation API plus end-to-end browser behavior for empty-state rendering and draft-to-thread reopen flows.
 
-### 16.12 Completed in v1.13.11
+### 16.13 Completed in v1.13.11
 
 This version adds or solidifies:
 
@@ -1482,7 +1493,7 @@ This version adds or solidifies:
 4. `.env.example` now documents that `TAVILY_API_KEY` powers both LangGraph search retrieval and the market-intelligence business tool path.
 5. `README.md` and `DEVELOPMENT.md` now document the live-or-fallback Business Tool baseline so the roadmap no longer treats all market-trend tooling as purely mock data.
 
-### 16.13 Completed in v1.13.10
+### 16.14 Completed in v1.13.10
 
 This version adds or solidifies:
 
@@ -1493,7 +1504,7 @@ This version adds or solidifies:
 5. Playwright browser coverage now spans the full high-frequency authenticated workspace lifecycle except archive-specific and live-backend delivery paths, reducing regression risk across the operator journey.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded `14 passed` browser baseline and the narrowed remaining E2E gaps.
 
-### 16.14 Completed in v1.13.9
+### 16.15 Completed in v1.13.9
 
 This version adds or solidifies:
 
@@ -1504,7 +1515,7 @@ This version adds or solidifies:
 5. Playwright coverage now exercises much more of the authenticated workspace lifecycle without requiring a live backend, reducing regression risk across the highest-frequency operator flows.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded browser verification baseline and the increased E2E surface area.
 
-### 16.15 Completed in v1.13.8
+### 16.16 Completed in v1.13.8
 
 This version adds or solidifies:
 
@@ -1515,7 +1526,7 @@ This version adds or solidifies:
 5. LangGraph OCR image resolution can now consume OSS-managed image materials by converting normalized stored paths into signed delivery URLs before remote download.
 6. `tests/test_oss.py`, `tests/test_oss_client.py`, `README.md`, `.env.example`, and `DEVELOPMENT.md` now lock the signed delivery, lifecycle, promotion, and normalization baseline.
 
-### 16.16 Completed in v1.13.7
+### 16.17 Completed in v1.13.7
 
 This version adds or solidifies:
 
@@ -1526,7 +1537,7 @@ This version adds or solidifies:
 5. `pytest.ini` constrains default discovery to `tests/`, so `python -m pytest -q` no longer walks transient `uploads/` directories during collection.
 6. `tests/test_graph_tools.py`, `README.md`, and `DEVELOPMENT.md` now lock the sequential Business Tools baseline, title-only single-tool fallback, and the updated verification entrypoint.
 
-### 16.17 Completed in v1.13.6
+### 16.18 Completed in v1.13.6
 
 This version adds or solidifies:
 
@@ -1537,7 +1548,7 @@ This version adds or solidifies:
 5. `tests/test_graph_tools.py` locks the tool schema export, mock tool output, and ReAct loopback behavior without requiring live model credentials.
 6. `README.md` and `DEVELOPMENT.md` now document the Business Tools architecture and preserve the mandatory documentation-update rule.
 
-### 16.18 Completed in v1.13.5
+### 16.19 Completed in v1.13.5
 
 This version adds or solidifies:
 
@@ -1548,7 +1559,7 @@ This version adds or solidifies:
 5. frontend components now expose stable accessibility labels and `data-testid` anchors for critical auth, workspace, composer, and chat-bubble assertions.
 6. `README.md` and `DEVELOPMENT.md` now document E2E setup, commands, coverage scope, and the mandatory documentation-update rule for future changes.
 
-### 16.19 Completed in v1.13.4
+### 16.20 Completed in v1.13.4
 
 This version adds or solidifies:
 
@@ -1559,11 +1570,11 @@ This version adds or solidifies:
 5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the password-reset capability, reset-token lifetime, and global forced sign-out behavior
 6. regression coverage and frontend production build validation now explicitly include account-recovery and password-reset compatibility
 
-### 16.20 Current Non-Blocking Gaps
+### 16.21 Current Non-Blocking Gaps
 
 The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 
-1. access tokens are now tied to the refresh-session chain, but there is still no separate global access-token blacklist or organization-wide forced-revocation control plane
+1. access tokens now support user-scoped JTI blacklisting and password-change cutoffs, but the project still lacks scheduled blacklist cleanup, device-fingerprint enrichment, and organization-wide forced-revocation dashboards
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
 3. upload cleanup now covers avatars plus local and OSS-backed material retention, OSS delivery now uses signed URLs with lifecycle-ready prefixes, lifecycle rollout can be automated, and users can inspect retention summaries, but the project still lacks CDN invalidation, multi-bucket governance, and a full admin retention console
 4. LangGraph now has branching, real vision integration, txt/md/pdf/docx attachment parsing, video transcription, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, citation surfacing in the chat UI, and a user-managed multi-tenant knowledge workspace, but the project still lacks advanced vector backends, stronger retrieval observability, product/CRM integrations, and broader live business-system connectivity
@@ -1576,7 +1587,7 @@ The next engineering steps SHOULD prioritize:
 1. evolve the current tenant-scoped RAG ingestion baseline into a richer document pipeline with Docx and spreadsheet loaders, citation surfacing, chunk inspection, stronger embeddings or vector backends, and broader internal or external business-system integrations such as product, competitor, CRM, or private knowledge sources
 2. harden OSS governance further with CDN invalidation, multi-bucket policy rollout, admin retention analytics, and richer signed-download policy controls on top of the current lifecycle rollout and retention-summary baseline
 3. expand browser coverage further into archive controls and live backend/OSS delivery flows beyond the current mocked regression baseline
-4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain
+4. add real email/SMS recovery delivery, one-time reset-link UX, and a richer operator-facing security control plane on top of the current per-user JTI blacklist and `password_changed_at` safeguards
 
 ## 18. Change Control Principle
 

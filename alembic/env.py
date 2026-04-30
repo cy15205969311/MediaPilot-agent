@@ -26,6 +26,17 @@ def _infer_existing_revision(connection) -> str | None:
     if not user_tables:
         return None
 
+    if "access_token_blacklist" in existing_tables:
+        return "20260430_01"
+
+    if {"users", "refresh_sessions"}.issubset(existing_tables):
+        user_columns = _get_table_columns(inspector, "users")
+        refresh_columns = _get_table_columns(inspector, "refresh_sessions")
+        if {
+            "password_changed_at",
+        }.issubset(user_columns) and {"latest_access_jti"}.issubset(refresh_columns):
+            return "20260430_01"
+
     if "templates" in existing_tables:
         template_columns = _get_table_columns(inspector, "templates")
         if "knowledge_base_scope" in template_columns:
