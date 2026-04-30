@@ -24,7 +24,17 @@ export function HotPostAnalysisArtifact({
   return (
     <div className="space-y-4">
       <ArtifactSection
-        action={<LineChart className="h-4 w-4 text-brand" />}
+        action={
+          <div className="flex items-center gap-2">
+            <LineChart className="h-4 w-4 text-brand" />
+            <CopyButton
+              ariaLabel="复制全部分析维度"
+              text={artifact.analysis_dimensions
+                .map((item) => `${item.dimension}\n${item.insight}`)
+                .join("\n\n")}
+            />
+          </div>
+        }
         title={artifact.title}
       >
         <div className="space-y-3">
@@ -33,9 +43,15 @@ export function HotPostAnalysisArtifact({
               key={item.dimension}
               className="rounded-2xl border border-border bg-muted p-4"
             >
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand">
-                <BadgeAlert className="h-3.5 w-3.5" />
-                {item.dimension}
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand">
+                  <BadgeAlert className="h-3.5 w-3.5" />
+                  {item.dimension}
+                </div>
+                <CopyButton
+                  ariaLabel={`复制${item.dimension}分析`}
+                  text={`${item.dimension}\n${item.insight}`}
+                />
               </div>
               <div className="text-sm leading-6 text-card-foreground">{item.insight}</div>
             </div>
@@ -43,7 +59,15 @@ export function HotPostAnalysisArtifact({
         </div>
       </ArtifactSection>
 
-      <ArtifactSection title="可复用表达模板">
+      <ArtifactSection
+        action={
+          <CopyButton
+            ariaLabel="复制全部可复用模板"
+            text={artifact.reusable_templates.join("\n")}
+          />
+        }
+        title="可复用表达模板"
+      >
         <div className="space-y-3">
           {artifact.reusable_templates.map((template) => (
             <div
@@ -52,7 +76,7 @@ export function HotPostAnalysisArtifact({
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="text-sm leading-6 text-card-foreground">{template}</div>
-                <CopyButton text={template} />
+                <CopyButton ariaLabel="复制表达模板" text={template} />
               </div>
             </div>
           ))}

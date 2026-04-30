@@ -21,7 +21,26 @@ export function CommentReplyArtifact({ artifact }: CommentReplyArtifactProps) {
 
   return (
     <ArtifactSection
-      action={<MessageCircleMore className="h-4 w-4 text-brand" />}
+      action={
+        <div className="flex items-center gap-2">
+          <MessageCircleMore className="h-4 w-4 text-brand" />
+          <CopyButton
+            ariaLabel="复制全部评论回复建议"
+            text={artifact.suggestions
+              .map((item) =>
+                [
+                  item.comment_type,
+                  `场景：${item.scenario}`,
+                  `回复：${item.reply}`,
+                  item.compliance_note ? `合规提醒：${item.compliance_note}` : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+              )
+              .join("\n\n")}
+          />
+        </div>
+      }
       title={artifact.title}
     >
       <div className="space-y-3">
@@ -34,7 +53,7 @@ export function CommentReplyArtifact({ artifact }: CommentReplyArtifactProps) {
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">
                 {item.comment_type}
               </div>
-              <CopyButton text={item.reply} />
+              <CopyButton ariaLabel="复制回复建议" text={item.reply} />
             </div>
 
             <div className="mb-2 text-sm font-medium leading-6 text-foreground">
@@ -44,9 +63,12 @@ export function CommentReplyArtifact({ artifact }: CommentReplyArtifactProps) {
 
             {item.compliance_note ? (
               <div className="mt-3 rounded-xl border border-success-foreground/20 bg-card px-3 py-2 text-xs leading-5 text-muted-foreground">
-                <div className="mb-1 flex items-center gap-2 font-semibold text-success-foreground">
-                  <ShieldCheck className="h-3.5 w-3.5" />
-                  合规提醒
+                <div className="mb-1 flex items-center justify-between gap-2 font-semibold text-success-foreground">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    合规提醒
+                  </div>
+                  <CopyButton ariaLabel="复制合规提醒" text={item.compliance_note} />
                 </div>
                 {item.compliance_note}
               </div>

@@ -21,7 +21,20 @@ export function TopicPlanningArtifact({ artifact }: TopicPlanningArtifactProps) 
 
   return (
     <div className="space-y-4">
-      <ArtifactSection title={artifact.title}>
+      <ArtifactSection
+        action={
+          <CopyButton
+            ariaLabel="复制全部选题规划"
+            text={artifact.topics
+              .map(
+                (topic, index) =>
+                  `${index + 1}. ${topic.title}\n切入角度：${topic.angle}\n预期目标：${topic.goal}`,
+              )
+              .join("\n\n")}
+          />
+        }
+        title={artifact.title}
+      >
         <div className="space-y-3">
           {artifact.topics.map((topic) => (
             <div key={topic.title} className="rounded-2xl border border-border bg-muted p-4">
@@ -29,20 +42,26 @@ export function TopicPlanningArtifact({ artifact }: TopicPlanningArtifactProps) 
                 <div className="text-sm font-semibold leading-6 text-foreground">
                   {topic.title}
                 </div>
-                <CopyButton text={topic.title} />
+                <CopyButton ariaLabel="复制选题标题" text={topic.title} />
               </div>
               <div className="grid gap-3 md:grid-cols-2">
                 <div className="rounded-2xl bg-card p-3">
-                  <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand">
-                    <Lightbulb className="h-3.5 w-3.5" />
-                    切入角度
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand">
+                      <Lightbulb className="h-3.5 w-3.5" />
+                      切入角度
+                    </div>
+                    <CopyButton ariaLabel="复制切入角度" text={topic.angle} />
                   </div>
                   <div className="text-sm leading-6 text-muted-foreground">{topic.angle}</div>
                 </div>
                 <div className="rounded-2xl bg-card p-3">
-                  <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-secondary-foreground">
-                    <Goal className="h-3.5 w-3.5" />
-                    预期目标
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-secondary-foreground">
+                      <Goal className="h-3.5 w-3.5" />
+                      预期目标
+                    </div>
+                    <CopyButton ariaLabel="复制预期目标" text={topic.goal} />
                   </div>
                   <div className="text-sm leading-6 text-muted-foreground">{topic.goal}</div>
                 </div>

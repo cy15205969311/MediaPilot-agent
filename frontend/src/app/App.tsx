@@ -118,6 +118,10 @@ import {
   mapPlatformToBackend,
   mapTaskToBackend,
 } from "./utils";
+import {
+  buildArtifactMarkdown,
+  downloadArtifactMarkdown,
+} from "./artifactMarkdown";
 
 type AuthMode =
   | "login"
@@ -136,6 +140,16 @@ type TemplateCreationRequest = {
 
 const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
 const LEGACY_QWEN_MODEL_STORAGE_KEY = "omnimedia_qwen_model_override";
+
+function getPlatformDisplayLabel(platform: UiPlatform): string {
+  if (platform === "both") {
+    return "双平台";
+  }
+  if (platform === "douyin") {
+    return "抖音";
+  }
+  return "小红书";
+}
 
 function createConversationMessage(
   message: ConversationMessageDraft,
@@ -2503,6 +2517,20 @@ function App() {
     setStatusText(`已为选题绑定会话并预填草稿指令：${updatedTopic.title}`);
   };
 
+  const handleExportMarkdown = () => {
+    if (!artifact) {
+      setStatusText("当前还没有可导出的结构化结果");
+      return;
+    }
+
+    const markdownContent = buildArtifactMarkdown(artifact, {
+      taskLabel: activeTaskLabel,
+      platformLabel: getPlatformDisplayLabel(platform),
+    });
+    const downloadedFilename = downloadArtifactMarkdown(artifact, markdownContent);
+    setStatusText(`Markdown 已导出：${downloadedFilename}`);
+  };
+
   const artifactActions: ArtifactAction[] = useMemo(() => {
     const actions: ArtifactAction[] = [
       {
@@ -2533,10 +2561,7 @@ function App() {
       {
         id: "export-markdown",
         label: "导出 Markdown",
-        onClick: () =>
-          void navigator.clipboard.writeText(
-            "MediaPilot export preview\n\nThe structured artifact can be exported to Markdown in the next iteration.",
-          ),
+        onClick: handleExportMarkdown,
       },
     ];
 
@@ -2549,7 +2574,7 @@ function App() {
     }
 
     return actions;
-  }, [artifact, handleSaveArtifactAsTemplate]);
+  }, [artifact, handleExportMarkdown, handleSaveArtifactAsTemplate]);
 
   const handleConfirmNewThread = () => {
     const normalizedTitle = draftThreadTitle.trim() || "New thread";
@@ -3205,6 +3230,7 @@ function App() {
         <AppHeader
           currentDisplayName={currentDisplayName}
           modelOverride={modelOverride}
+          onExportMarkdown={handleExportMarkdown}
           onModelOverrideChange={setModelOverride}
           onOpenLeftSidebar={() => {
             setIsLeftSidebarCollapsed(false);
