@@ -102,6 +102,73 @@ function renderThinkingStepIcon(status: string) {
   return <CheckCircle2 className="h-4 w-4 text-success-foreground" />;
 }
 
+function extractCitationSourceMap(content: string): Map<string, string> {
+  const lines = content.split(/\r?\n/);
+  const sourceMap = new Map<string, string>();
+  const referenceMarkerIndex = lines.findIndex((line) =>
+    /^(参考资料|引用来源|references)\s*[:：]?\s*$/i.test(line.trim()),
+  );
+
+  if (referenceMarkerIndex >= 0) {
+    for (const line of lines.slice(referenceMarkerIndex + 1)) {
+      const match = /^\[(\d+)\]\s*(.+?)\s*$/.exec(line.trim());
+      if (!match) {
+        continue;
+      }
+      sourceMap.set(match[1], match[2]);
+    }
+    return sourceMap;
+  }
+
+  for (const line of lines) {
+    const match = /^\[(\d+)\]\s*\(([^)]+)\)/.exec(line.trim());
+    if (!match) {
+      continue;
+    }
+    sourceMap.set(match[1], match[2].trim());
+  }
+
+  return sourceMap;
+}
+
+function renderTextWithCitations(content: string) {
+  const citationPattern = /\[(\d+)\]/g;
+  const sourceMap = extractCitationSourceMap(content);
+  const nodes: Array<string | JSX.Element> = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null = citationPattern.exec(content);
+
+  while (match) {
+    if (match.index > lastIndex) {
+      nodes.push(content.slice(lastIndex, match.index));
+    }
+
+    const citationNumber = match[1];
+    const citationSource = sourceMap.get(citationNumber);
+    nodes.push(
+      <sup
+        aria-label={citationSource ? `引用 ${citationNumber}，来源 ${citationSource}` : `引用 ${citationNumber}`}
+        className={`ml-0.5 align-super text-[11px] font-semibold text-sky-600 ${
+          citationSource ? "cursor-help" : ""
+        }`}
+        data-testid={`chat-citation-${citationNumber}`}
+        key={`citation-${citationNumber}-${match.index}`}
+        title={citationSource ? `来源：${citationSource}` : `引用 [${citationNumber}]`}
+      >
+        [{citationNumber}]
+      </sup>,
+    );
+    lastIndex = match.index + match[0].length;
+    match = citationPattern.exec(content);
+  }
+
+  if (lastIndex < content.length) {
+    nodes.push(content.slice(lastIndex));
+  }
+
+  return nodes;
+}
+
 function renderMessageMaterials(item: ConversationMessage) {
   const materials = item.materials ?? [];
   if (materials.length === 0) {
@@ -425,7 +492,13 @@ export function ChatFeed({
               >
                 {renderMessageMaterials(item)}
                 <div className="whitespace-pre-wrap text-sm leading-7">
-                  {item.content || (
+                  {item.content ? (
+                    item.role === "assistant" ? (
+                      renderTextWithCitations(item.content)
+                    ) : (
+                      item.content
+                    )
+                  ) : (
                     <span className="inline-flex gap-1">
                       <span className="h-2 w-2 animate-bounce rounded-full bg-brand" />
                       <span

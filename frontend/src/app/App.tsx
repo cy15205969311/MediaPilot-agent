@@ -1555,9 +1555,9 @@ function App() {
   const handleUploadKnowledgeFiles = async (
     scope: string,
     files: File[],
-  ): Promise<void> => {
+  ): Promise<{ ok: boolean; errorMessage?: string }> => {
     if (files.length === 0) {
-      return;
+      return { ok: true };
     }
 
     const normalizedScope = scope.trim();
@@ -1576,10 +1576,15 @@ function App() {
       setStatusText(
         `知识库已更新：${lastScope || "自动 Scope"} 累计写入 ${totalChunks} 个知识切片`,
       );
+      return { ok: true };
     } catch (error) {
       if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
-        return;
+        return {
+          ok: false,
+          errorMessage:
+            error instanceof APIError ? error.message : "当前登录状态已失效，请重新登录。",
+        };
       }
 
       const errorMessage =
@@ -1596,6 +1601,10 @@ function App() {
         title: "知识文件上传失败",
         content: errorMessage,
       });
+      return {
+        ok: false,
+        errorMessage,
+      };
     } finally {
       setIsMutatingKnowledgeScopes(false);
       setMutatingKnowledgeScope(null);

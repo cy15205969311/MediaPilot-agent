@@ -27,6 +27,11 @@ import type {
   KnowledgeSourcePreviewApiResponse,
 } from "../../types";
 
+type KnowledgeUploadFeedback = {
+  ok: boolean;
+  errorMessage?: string;
+};
+
 type KnowledgeViewProps = {
   scopes: KnowledgeScopeItem[];
   isLoading: boolean;
@@ -40,8 +45,10 @@ type KnowledgeViewProps = {
     source: string,
   ) => Promise<KnowledgeSourcePreviewApiResponse | null>;
   onRenameScope: (scope: string, nextScopeName: string) => Promise<string | null>;
-  onUploadFiles: (scope: string, files: File[]) => Promise<void>;
+  onUploadFiles: (scope: string, files: File[]) => Promise<KnowledgeUploadFeedback>;
 };
+
+const SUPPORTED_KNOWLEDGE_FILE_EXTENSIONS = new Set([".txt", ".md", ".markdown"]);
 
 function formatUpdatedAt(value?: string | null): string {
   if (!value) {
@@ -57,6 +64,37 @@ function formatUpdatedAt(value?: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function getKnowledgeFileExtension(filename: string): string {
+  const lastDotIndex = filename.lastIndexOf(".");
+  if (lastDotIndex < 0) {
+    return "";
+  }
+  return filename.slice(lastDotIndex).toLowerCase();
+}
+
+function splitKnowledgeFiles(files: File[]): {
+  supportedFiles: File[];
+  invalidFiles: File[];
+} {
+  const supportedFiles: File[] = [];
+  const invalidFiles: File[] = [];
+
+  files.forEach((file) => {
+    if (SUPPORTED_KNOWLEDGE_FILE_EXTENSIONS.has(getKnowledgeFileExtension(file.name))) {
+      supportedFiles.push(file);
+      return;
+    }
+    invalidFiles.push(file);
+  });
+
+  return { supportedFiles, invalidFiles };
+}
+
+function buildUnsupportedKnowledgeFileMessage(invalidFiles: File[]): string {
+  const fileNames = invalidFiles.map((file) => `「${file.name}」`).join("、");
+  return `不支持以下文件格式：${fileNames}。知识库目前仅支持 .txt / .md / .markdown 文本导入。`;
 }
 
 export function KnowledgeView(props: KnowledgeViewProps) {
@@ -90,6 +128,8 @@ export function KnowledgeView(props: KnowledgeViewProps) {
   const [sourcePreview, setSourcePreview] = useState<KnowledgeSourcePreviewApiResponse | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const [scopeUploadError, setScopeUploadError] = useState("");
 
   useEffect(() => {
     if (!editingScope) {
@@ -121,7 +161,26 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     if (!files || files.length === 0) {
       return;
     }
-    await onUploadFiles(scopeInput, Array.from(files));
+    const { supportedFiles, invalidFiles } = splitKnowledgeFiles(Array.from(files));
+    const validationMessage =
+      invalidFiles.length > 0 ? buildUnsupportedKnowledgeFileMessage(invalidFiles) : "";
+
+    setUploadError(validationMessage);
+
+    if (supportedFiles.length === 0) {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    const result = await onUploadFiles(scopeInput, supportedFiles);
+    if (!result.ok) {
+      setUploadError(result.errorMessage ?? "上传知识文件失败，请稍后重试。");
+    } else if (!validationMessage) {
+      setUploadError("");
+    }
+
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -131,11 +190,32 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     if (!selectedScopeName || !files || files.length === 0) {
       return;
     }
-    await onUploadFiles(selectedScopeName, Array.from(files));
+    const { supportedFiles, invalidFiles } = splitKnowledgeFiles(Array.from(files));
+    const validationMessage =
+      invalidFiles.length > 0 ? buildUnsupportedKnowledgeFileMessage(invalidFiles) : "";
+
+    setScopeUploadError(validationMessage);
+
+    if (supportedFiles.length === 0) {
+      if (scopeFileInputRef.current) {
+        scopeFileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    const result = await onUploadFiles(selectedScopeName, supportedFiles);
+    if (!result.ok) {
+      setScopeUploadError(result.errorMessage ?? "上传知识文件失败，请稍后重试。");
+    } else if (!validationMessage) {
+      setScopeUploadError("");
+    }
+
     if (scopeFileInputRef.current) {
       scopeFileInputRef.current.value = "";
     }
-    await refreshScopeSources(selectedScopeName);
+    if (result.ok) {
+      await refreshScopeSources(selectedScopeName);
+    }
   };
 
   const handleDrop = async (event: DragEvent<HTMLLabelElement>) => {
@@ -187,6 +267,7 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     setSelectedScopeName(scope);
     setSelectedScopeSources([]);
     setSourceError("");
+    setScopeUploadError("");
     setPreviewSourceName(null);
     setSourcePreview(null);
     setPreviewError("");
@@ -198,6 +279,7 @@ export function KnowledgeView(props: KnowledgeViewProps) {
     setSelectedScopeName(null);
     setSelectedScopeSources([]);
     setSourceError("");
+    setScopeUploadError("");
     setIsLoadingSources(false);
     setPreviewSourceName(null);
     setSourcePreview(null);
@@ -357,6 +439,7 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                   ref={fileInputRef}
                   accept=".txt,.md,.markdown,text/plain,text/markdown"
                   className="hidden"
+                  data-testid="knowledge-upload-input"
                   multiple
                   onChange={(event) => void handleFileSelection(event.target.files)}
                   type="file"
@@ -373,6 +456,15 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                 </div>
               </label>
             </div>
+
+            {uploadError ? (
+              <div
+                className="rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm leading-6 text-destructive"
+                data-testid="knowledge-upload-error"
+              >
+                {uploadError}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -579,6 +671,7 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                 ref={scopeFileInputRef}
                 accept=".txt,.md,.markdown,text/plain,text/markdown"
                 className="hidden"
+                data-testid="knowledge-scope-upload-input"
                 multiple
                 onChange={(event) => void handleScopedFileSelection(event.target.files)}
                 type="file"
@@ -596,6 +689,15 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                 选择文件
               </span>
             </label>
+
+            {scopeUploadError ? (
+              <div
+                className="mt-4 rounded-[24px] border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm leading-6 text-destructive"
+                data-testid="knowledge-scope-upload-error"
+              >
+                {scopeUploadError}
+              </div>
+            ) : null}
 
             <div className="mt-6 min-h-0 flex-1 overflow-y-auto">
               {isLoadingSources ? (

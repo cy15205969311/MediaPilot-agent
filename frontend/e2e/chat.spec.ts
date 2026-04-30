@@ -150,6 +150,88 @@ test("loads existing thread history and replays persisted messages on startup", 
   );
 });
 
+test("renders assistant citations as superscript references with source hints", async ({
+  page,
+}) => {
+  const threadId = "thread-citation-e2e";
+  const assistantMessage = createMockHistoryMessage({
+    id: "history-assistant-citation-1",
+    thread_id: threadId,
+    role: "assistant",
+    content:
+      "火星一号基地贡献了 56.5% 的销量占比，是本季度最核心的增长来源。[1]\n\n参考资料：\n[1] 星际烤肠2026业务盘点.docx",
+    created_at: "2026-04-28T08:11:00Z",
+  });
+
+  await openWorkspace(page, {
+    threads: [
+      createMockThreadSummary({
+        id: threadId,
+        title: "Citation thread",
+        latest_message_excerpt: "销量占比分析",
+      }),
+    ],
+    threadMessagesById: {
+      [threadId]: createMockThreadMessages({
+        thread_id: threadId,
+        title: "Citation thread",
+        system_prompt: "Citation persona",
+        messages: [
+          createMockHistoryMessage({
+            id: "history-user-citation-1",
+            thread_id: threadId,
+            role: "user",
+            content: "帮我总结一下这个季度的销量结构。",
+            created_at: "2026-04-28T08:10:00Z",
+          }),
+          assistantMessage,
+        ],
+      }),
+    },
+  });
+
+  const assistantBubble = page
+    .getByTestId("chat-message-assistant")
+    .filter({ hasText: "56.5% 的销量占比" });
+  await expect(assistantBubble).toBeVisible();
+  const citation = assistantBubble.locator('[data-testid="chat-citation-1"]').first();
+  await expect(citation).toBeVisible();
+  await expect(citation).toHaveAttribute("title", "来源：星际烤肠2026业务盘点.docx");
+});
+
+test("blocks unsupported knowledge uploads and shows an inline error", async ({
+  page,
+}) => {
+  const knowledgeUploadRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/v1/media/knowledge/upload")) {
+      knowledgeUploadRequests.push(request.url());
+    }
+  });
+
+  await openWorkspace(page, {
+    knowledgeScopes: [],
+  });
+
+  await page.getByTestId("sidebar-shortcut-knowledge").click();
+  await expect(page.getByTestId("knowledge-view")).toBeVisible();
+
+  await page.getByTestId("knowledge-upload-input").setInputFiles({
+    name: "marketing-brief.docx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    buffer: Buffer.from("fake docx payload"),
+  });
+
+  await expect(page.getByTestId("knowledge-upload-error")).toContainText(
+    "知识库目前仅支持 .txt / .md / .markdown 文本导入。",
+  );
+  await expect(page.getByTestId("knowledge-upload-error")).toContainText(
+    "marketing-brief.docx",
+  );
+  expect(knowledgeUploadRequests).toHaveLength(0);
+});
+
 test("shows the drafts empty state when no saved artifacts exist", async ({ page }) => {
   await openWorkspace(page);
 

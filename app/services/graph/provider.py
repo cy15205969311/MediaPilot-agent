@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import traceback
+import re
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timedelta, timezone
@@ -318,7 +319,7 @@ class LangGraphProvider(BaseLLMProvider):
             "error": None,
             "db": db,
             "thread": thread,
-            "user_id": user_id,
+            "user_id": user_id or (thread.user_id if thread is not None else None),
             "needs_ocr": False,
             "needs_search": False,
             "next_route": "parse_materials_node",
@@ -722,9 +723,8 @@ class LangGraphProvider(BaseLLMProvider):
                         request.message,
                     )
                     retrieved_chunk_count = len(knowledge_documents)
-                    knowledge_base_context = "\n\n".join(
-                        f"[{index}] ({document.source}) {document.text}"
-                        for index, document in enumerate(knowledge_documents, start=1)
+                    knowledge_base_context = _build_knowledge_base_context_from_documents(
+                        knowledge_documents,
                     ).strip()
                 else:  # pragma: no cover - backward compatibility path
                     retrieve_context = knowledge_service.retrieve_context
@@ -745,6 +745,9 @@ class LangGraphProvider(BaseLLMProvider):
                             )
                             or ""
                         ).strip()
+                    knowledge_base_context = _ensure_knowledge_base_context_has_source_registry(
+                        knowledge_base_context,
+                    )
                     retrieved_chunk_count = len(
                         [section for section in knowledge_base_context.split("\n\n") if section.strip()]
                     )
@@ -1794,7 +1797,10 @@ def _build_draft_system_prompt(
         prompt_sections.append(
             "【专属外挂知识库检索结果】：\n"
             f"{knowledge_base_context.strip()}\n"
-            "请务必基于以上独家知识进行创作，切勿使用通用废话！"
+            "请务必基于以上独家知识进行创作，切勿使用通用废话！\n"
+            "当你使用上述知识库信息时，必须在对应句子末尾使用方括号来源编号引用，例如 [1]。\n"
+            "如果多条知识片段来自同一份资料，请沿用同一个来源编号，不要杜撰新的编号或来源。\n"
+            "回答结尾必须追加“参考资料：”小节，并逐行列出本次实际引用过的来源编号与文件名，例如：[1] 品牌手册.docx。"
         )
 
     if not prompt_sections:
@@ -2116,6 +2122,71 @@ def _resolve_knowledge_base_scope_from_state(state: GraphState) -> str:
         return normalized_request_scope
 
     return ""
+
+
+def _build_knowledge_base_context_from_documents(
+    documents: list[object],
+) -> str:
+    if not documents:
+        return ""
+
+    source_index_map: dict[str, int] = {}
+    chunk_sections: list[str] = []
+
+    for document in documents:
+        source_name = str(getattr(document, "source", "") or "").strip() or "uploaded_text"
+        chunk_text = str(getattr(document, "text", "") or "").strip()
+        if not chunk_text:
+            continue
+
+        source_index = source_index_map.setdefault(source_name, len(source_index_map) + 1)
+        chunk_sections.append(f"[{source_index}] ({source_name}) {chunk_text}")
+
+    if not chunk_sections:
+        return ""
+
+    reference_lines = [
+        f"[{index}] {source_name}"
+        for source_name, index in sorted(source_index_map.items(), key=lambda item: item[1])
+    ]
+
+    return (
+        "【知识片段】\n"
+        + "\n\n".join(chunk_sections)
+        + "\n\n【引用来源】\n"
+        + "\n".join(reference_lines)
+    ).strip()
+
+
+def _ensure_knowledge_base_context_has_source_registry(context: str) -> str:
+    normalized_context = context.strip()
+    if not normalized_context:
+        return ""
+
+    if "【引用来源】" in normalized_context or "参考资料" in normalized_context:
+        return normalized_context
+
+    source_pairs = re.findall(r"\[(\d+)\]\s*\(([^)]+)\)", normalized_context)
+    if not source_pairs:
+        return normalized_context
+
+    source_index_map: dict[str, str] = {}
+    for index, source_name in source_pairs:
+        normalized_source_name = source_name.strip()
+        if normalized_source_name and normalized_source_name not in source_index_map:
+            source_index_map[normalized_source_name] = index
+
+    if not source_index_map:
+        return normalized_context
+
+    reference_lines = [
+        f"[{index}] {source_name}"
+        for source_name, index in sorted(
+            source_index_map.items(),
+            key=lambda item: int(item[1]) if item[1].isdigit() else 9999,
+        )
+    ]
+    return normalized_context + "\n\n【引用来源】\n" + "\n".join(reference_lines)
 
 
 def _validate_artifact_candidate(

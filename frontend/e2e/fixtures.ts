@@ -10,6 +10,7 @@ import type {
   DraftSummaryItem,
   HistoryMessageItem,
   HistoryThreadSummary,
+  KnowledgeScopeItem,
   MediaChatRequestPayload,
   TopicItem,
   TemplateSkillDiscoveryItem,
@@ -40,6 +41,7 @@ export type MockBackendOptions = {
   topics?: TopicItem[];
   templates?: TemplateSummaryItem[];
   templateSkills?: TemplateSkillDiscoveryItem[];
+  knowledgeScopes?: KnowledgeScopeItem[];
   threadMessagesById?: Record<string, ThreadMessagesApiResponse>;
   sessions?: AuthSessionItem[];
   failOnceUnauthorizedPaths?: string[];
@@ -64,6 +66,7 @@ type MockBackendState = {
   topics: TopicItem[];
   templates: TemplateSummaryItem[];
   templateSkills: TemplateSkillDiscoveryItem[];
+  knowledgeScopes: KnowledgeScopeItem[];
   threadMessagesById: Record<string, ThreadMessagesApiResponse>;
   sessions: AuthSessionItem[];
   unauthorizedOncePending: Set<string>;
@@ -428,6 +431,12 @@ function inferContentType(filename: string): string {
   return "application/octet-stream";
 }
 
+function inferKnowledgeScopeName(filename: string): string {
+  const withoutExtension = filename.replace(/\.[^.]+$/, "").trim().toLowerCase();
+  const normalized = withoutExtension.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return normalized || "knowledge_upload";
+}
+
 function upsertThreadSummary(
   state: MockBackendState,
   summary: HistoryThreadSummary,
@@ -575,6 +584,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
     topics: clone(options.topics ?? []),
     templates: clone(options.templates ?? createDefaultTemplates()),
     templateSkills: clone(options.templateSkills ?? createDefaultTemplateSkills()),
+    knowledgeScopes: clone(options.knowledgeScopes ?? []),
     threadMessagesById: clone(options.threadMessagesById ?? {}),
     sessions: clone(
       options.sessions ?? [
@@ -731,6 +741,68 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         items: state.templates,
         total: state.templates.length,
       });
+      return;
+    }
+
+    if (path === "/api/v1/media/knowledge/scopes" && request.method() === "GET") {
+      await fulfillJson(route, {
+        items: state.knowledgeScopes,
+        total: state.knowledgeScopes.length,
+      });
+      return;
+    }
+
+    if (path === "/api/v1/media/knowledge/upload" && request.method() === "POST") {
+      const rawBody = request.postData() || "";
+      const filename = parseMultipartFilename(rawBody);
+      const scope = parseMultipartField(rawBody, "scope");
+      const loweredFilename = filename.toLowerCase();
+      if (
+        !(
+          loweredFilename.endsWith(".txt") ||
+          loweredFilename.endsWith(".md") ||
+          loweredFilename.endsWith(".markdown")
+        )
+      ) {
+        await fulfillJson(
+          route,
+          { detail: "当前知识库仅支持 .txt / .md / .markdown 文本文件上传。" },
+          415,
+        );
+        return;
+      }
+
+      const resolvedScope = scope?.trim() || inferKnowledgeScopeName(filename);
+      const nextScopeItem: KnowledgeScopeItem = {
+        scope: resolvedScope,
+        chunk_count: 1,
+        source_count: 1,
+        updated_at: nowIso(),
+      };
+      const existingIndex = state.knowledgeScopes.findIndex(
+        (item) => item.scope === resolvedScope,
+      );
+      if (existingIndex >= 0) {
+        const existing = state.knowledgeScopes[existingIndex];
+        state.knowledgeScopes[existingIndex] = {
+          ...existing,
+          chunk_count: existing.chunk_count + 1,
+          source_count: existing.source_count + 1,
+          updated_at: nowIso(),
+        };
+      } else {
+        state.knowledgeScopes = [nextScopeItem, ...state.knowledgeScopes];
+      }
+
+      await fulfillJson(
+        route,
+        {
+          scope: resolvedScope,
+          source: filename,
+          chunk_count: 1,
+        },
+        201,
+      );
       return;
     }
 

@@ -6,6 +6,7 @@ from app.db.models import Thread
 from app.models.schemas import MediaChatRequest
 from app.services import tools as business_tools
 from app.services.graph import LangGraphProvider
+from app.services.knowledge_base import KnowledgeDocument
 from app.services.providers import BaseLLMProvider
 from app.services.tools import execute_business_tool, get_openai_tool_specs
 
@@ -496,14 +497,46 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
         return {"needs_search": False, "search_query": ""}
 
     class StubKnowledgeBaseService:
-        def retrieve_context(self, scope: str, query: str, top_k: int = 3) -> str:
+        def retrieve_chunks(
+            self,
+            user_id: str,
+            scope: str,
+            query: str,
+            top_k: int = 3,
+        ) -> list[KnowledgeDocument]:
+            assert user_id == "user-rag"
             assert scope == "food_tourism_xhs"
             assert query == "帮我把这段文案改得更有代入感"
             assert top_k == 3
-            return (
-                "[1] Xiaohongshu food notes should mention price and regional contrast in the opening line.\n\n"
-                "[2] Strong store notes should include route efficiency, real budget, and one avoid-pit reminder."
-            )
+            return [
+                KnowledgeDocument(
+                    document_id="rag-1",
+                    user_id=user_id,
+                    scope=scope,
+                    source="餐饮探店方法论.docx",
+                    text="Xiaohongshu food notes should mention price and regional contrast in the opening line.",
+                    created_at="2026-04-30T12:00:00Z",
+                    chunk_index=0,
+                ),
+                KnowledgeDocument(
+                    document_id="rag-2",
+                    user_id=user_id,
+                    scope=scope,
+                    source="餐饮探店方法论.docx",
+                    text="Strong store notes should include route efficiency, real budget, and one avoid-pit reminder.",
+                    created_at="2026-04-30T12:00:00Z",
+                    chunk_index=1,
+                ),
+                KnowledgeDocument(
+                    document_id="rag-3",
+                    user_id=user_id,
+                    scope=scope,
+                    source="品牌语气手册.md",
+                    text="Use immersive sensory verbs before moving into the call to action.",
+                    created_at="2026-04-30T12:00:00Z",
+                    chunk_index=0,
+                ),
+            ]
 
     monkeypatch.setattr(
         graph_provider_module,
@@ -542,3 +575,8 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
     assert "专属外挂知识库检索结果" in inner_provider.last_request_system_prompt
     assert "price and regional contrast" in inner_provider.last_request_system_prompt
     assert "avoid-pit reminder" in inner_provider.last_request_system_prompt
+    assert "当你使用上述知识库信息时，必须在对应句子末尾使用方括号来源编号引用" in inner_provider.last_request_system_prompt
+    assert "【引用来源】" in inner_provider.last_request_system_prompt
+    assert "[1] 餐饮探店方法论.docx" in inner_provider.last_request_system_prompt
+    assert "[2] 品牌语气手册.md" in inner_provider.last_request_system_prompt
+    assert inner_provider.last_request_system_prompt.count("[1] (餐饮探店方法论.docx)") == 2
