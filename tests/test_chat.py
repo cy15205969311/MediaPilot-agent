@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 import app.services.agent as agent_module
+import app.api.v1.knowledge as knowledge_api_module
 import app.services.knowledge_base as knowledge_base_module
 import app.services.providers as providers_module
 from app.db.database import Base, get_db
@@ -1715,6 +1716,117 @@ def test_knowledge_scope_upload_list_delete_and_retrieval_are_user_scoped(
     bob_after_delete = client.get("/api/v1/media/knowledge/scopes", headers=bob_headers)
     assert bob_after_delete.status_code == 200
     assert bob_after_delete.json()["total"] == 1
+
+
+def test_knowledge_upload_accepts_csv_and_xlsx_documents(
+    client: TestClient,
+    isolated_knowledge_base: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _ = isolated_knowledge_base
+    headers = register_user(client, username="alice-knowledge-spreadsheets")
+    user_id = client.post(
+        "/api/v1/auth/login",
+        data={"username": "alice-knowledge-spreadsheets", "password": "super-secret-123"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    ).json()["user"]["id"]
+
+    async def fake_parse_document(path: str) -> str:
+        if path.endswith(".csv"):
+            return (
+                "Row: 1 | product: lipstick, selling_point: brightening, channel: xiaohongshu\n"
+                "Row: 2 | product: foundation, channel: douyin"
+            )
+        if path.endswith(".xlsx"):
+            return (
+                "Sheet: Campaign Calendar | Row: 1 | platform: xiaohongshu, topic: spring picnic, owner: ada\n"
+                "Sheet: Campaign Calendar | Row: 2 | platform: douyin, topic: campus vlog, owner: leo"
+            )
+        raise AssertionError(f"Unexpected parse path: {path}")
+
+    monkeypatch.setattr(knowledge_api_module, "parse_document", fake_parse_document)
+
+    csv_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=headers,
+        data={"scope": "sheet_scope"},
+        files={
+            "file": (
+                "keywords.csv",
+                "product,selling_point,channel\nlipstick,brightening,xiaohongshu",
+                "text/csv",
+            )
+        },
+    )
+    assert csv_upload.status_code == 201
+    assert csv_upload.json()["scope"] == "sheet_scope"
+    assert csv_upload.json()["source"] == "keywords.csv"
+    assert csv_upload.json()["chunk_count"] >= 1
+
+    xlsx_upload = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=headers,
+        data={"scope": "sheet_scope"},
+        files={
+            "file": (
+                "calendar.xlsx",
+                b"fake-xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert xlsx_upload.status_code == 201
+    assert xlsx_upload.json()["scope"] == "sheet_scope"
+    assert xlsx_upload.json()["source"] == "calendar.xlsx"
+    assert xlsx_upload.json()["chunk_count"] >= 1
+
+    service = knowledge_base_module.get_knowledge_base_service()
+    csv_context = service.retrieve_context(
+        str(user_id),
+        "sheet_scope",
+        "brightening xiaohongshu lipstick",
+    )
+    xlsx_context = service.retrieve_context(
+        str(user_id),
+        "sheet_scope",
+        "campus vlog owner leo",
+    )
+
+    assert "product: lipstick" in csv_context
+    assert "Sheet: Campaign Calendar" in xlsx_context
+    assert "owner: leo" in xlsx_context
+
+
+def test_knowledge_upload_returns_400_when_document_parse_fails(
+    client: TestClient,
+    isolated_knowledge_base: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _ = isolated_knowledge_base
+    headers = register_user(client, username="alice-knowledge-parse-error")
+
+    async def failing_parse_document(_: str) -> str:
+        raise knowledge_api_module.MediaParserError(
+            "Failed to parse the spreadsheet. Ensure the file is a valid CSV or Excel workbook.",
+        )
+
+    monkeypatch.setattr(knowledge_api_module, "parse_document", failing_parse_document)
+
+    response = client.post(
+        "/api/v1/media/knowledge/upload",
+        headers=headers,
+        data={"scope": "broken_sheet"},
+        files={
+            "file": (
+                "broken.xlsx",
+                b"broken-xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Knowledge document parsing failed" in response.json()["detail"]
 
 
 def test_system_seeded_knowledge_still_available_after_tenant_filtering(

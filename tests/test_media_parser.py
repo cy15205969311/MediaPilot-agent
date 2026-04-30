@@ -93,15 +93,15 @@ def test_parse_document_supports_local_upload_docx_file(
 
     class FakeDocument:
         paragraphs = [
-            FakeParagraph("执行摘要"),
-            FakeParagraph("面向 2026 Q2 的咖啡新品传播计划"),
+            FakeParagraph("Executive summary"),
+            FakeParagraph("Campaign plan for 2026 Q2 launch."),
         ]
         tables = [
             FakeTable(
                 [
-                    ["渠道", "主话题"],
-                    ["小红书", "咖啡液测评"],
-                    ["抖音", "门店开箱"],
+                    ["Channel", "Theme"],
+                    ["Xiaohongshu", "Coffee launch test"],
+                    ["Douyin", "Store opening teaser"],
                 ]
             )
         ]
@@ -110,10 +110,110 @@ def test_parse_document_supports_local_upload_docx_file(
 
     result = asyncio.run(media_parser_module.parse_document("/uploads/alice/brief.docx"))
 
-    assert "执行摘要" in result
-    assert "面向 2026 Q2 的咖啡新品传播计划" in result
-    assert "渠道 | 主话题" in result
-    assert "小红书 | 咖啡液测评" in result
+    assert "Executive summary" in result
+    assert "Campaign plan for 2026 Q2 launch." in result
+    assert "Channel | Theme" in result
+    assert "Xiaohongshu | Coffee launch test" in result
+
+
+def test_parse_document_supports_local_upload_csv_file(
+    tmp_path: Path,
+    monkeypatch,
+):
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    document_path = uploads_dir / "alice" / "keywords.csv"
+    document_path.parent.mkdir(parents=True, exist_ok=True)
+    document_path.write_bytes(b"fake-csv")
+    monkeypatch.setattr(media_parser_module, "LOCAL_UPLOADS_DIR", uploads_dir)
+
+    class FakeDataFrame:
+        def __init__(self, columns: list[str], rows: list[tuple[str, ...]]) -> None:
+            self.columns = columns
+            self._rows = rows
+
+        def fillna(self, _: str):
+            return self
+
+        def itertuples(self, index: bool = False, name=None):
+            assert index is False
+            assert name is None
+            return iter(self._rows)
+
+    class FakePandas:
+        def read_csv(self, path: str, *, dtype=str, keep_default_na: bool = False):
+            assert path == str(document_path)
+            assert dtype is str
+            assert keep_default_na is False
+            return FakeDataFrame(
+                ["product", "selling_point", "channel"],
+                [
+                    ("lipstick", "brightening", "xiaohongshu"),
+                    ("foundation", "", "douyin"),
+                ],
+            )
+
+    monkeypatch.setattr(media_parser_module, "pd", FakePandas())
+
+    result = asyncio.run(media_parser_module.parse_document("/uploads/alice/keywords.csv"))
+
+    assert "Row: 1 | product: lipstick, selling_point: brightening, channel: xiaohongshu" in result
+    assert "Row: 2 | product: foundation, channel: douyin" in result
+
+
+def test_parse_document_supports_local_upload_xlsx_file(
+    tmp_path: Path,
+    monkeypatch,
+):
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    document_path = uploads_dir / "alice" / "calendar.xlsx"
+    document_path.parent.mkdir(parents=True, exist_ok=True)
+    document_path.write_bytes(b"fake-xlsx")
+    monkeypatch.setattr(media_parser_module, "LOCAL_UPLOADS_DIR", uploads_dir)
+
+    class FakeDataFrame:
+        def __init__(self, columns: list[str], rows: list[tuple[str, ...]]) -> None:
+            self.columns = columns
+            self._rows = rows
+
+        def fillna(self, _: str):
+            return self
+
+        def itertuples(self, index: bool = False, name=None):
+            assert index is False
+            assert name is None
+            return iter(self._rows)
+
+    class FakePandas:
+        def read_excel(
+            self,
+            path: str,
+            *,
+            sheet_name=None,
+            dtype=str,
+            keep_default_na: bool = False,
+        ):
+            assert path == str(document_path)
+            assert sheet_name is None
+            assert dtype is str
+            assert keep_default_na is False
+            return {
+                "Campaign Calendar": FakeDataFrame(
+                    ["platform", "topic", "owner"],
+                    [
+                        ("xiaohongshu", "spring picnic", "ada"),
+                        ("douyin", "campus vlog", "leo"),
+                    ],
+                )
+            }
+
+    monkeypatch.setattr(media_parser_module, "pd", FakePandas())
+
+    result = asyncio.run(media_parser_module.parse_document("/uploads/alice/calendar.xlsx"))
+
+    assert "Sheet: Campaign Calendar | Row: 1 | platform: xiaohongshu, topic: spring picnic, owner: ada" in result
+    assert "Sheet: Campaign Calendar | Row: 2 | platform: douyin, topic: campus vlog, owner: leo" in result
 
 
 def test_request_audio_transcription_uses_dashscope_chat_path_when_only_llm_gateway_is_configured(

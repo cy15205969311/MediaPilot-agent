@@ -184,6 +184,182 @@ def test_openai_non_gpt_image_2_still_uses_images_generations(monkeypatch):
         "size": "1024x1024",
     }
 
+
+def test_openai_image_generation_accepts_b64_json_and_passes_it_to_persistence(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+
+    service = ImageGenerationService()
+    captured_persist_kwargs: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"data":[{"b64_json":"aGVsbG8="}]}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": [
+                    {"b64_json": "aGVsbG8="},
+                ],
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    async def fake_persist_generated_images(*, urls, user_id, thread_id):
+        captured_persist_kwargs.update(
+            {
+                "urls": urls,
+                "user_id": user_id,
+                "thread_id": thread_id,
+            }
+        )
+        return ["persisted::image"]
+
+    monkeypatch.setattr(image_generation_module.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(service, "_persist_generated_images", fake_persist_generated_images)
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-openai-b64",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "generate a cover image",
+            "materials": [],
+        }
+    )
+
+    result = asyncio.run(
+        service.generate_images(
+            request=request,
+            prompt="make a lifestyle cover image",
+            user_id="user-123",
+            thread_id=request.thread_id,
+        )
+    )
+
+    assert captured_persist_kwargs == {
+        "urls": ["data:image/png;base64,aGVsbG8="],
+        "user_id": "user-123",
+        "thread_id": "thread-openai-b64",
+    }
+    assert result == ["persisted::image"]
+
+
+def test_persist_generated_images_decodes_data_urls_into_storage_uploads(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+
+    service = ImageGenerationService()
+    captured_upload: dict[str, object] = {}
+
+    class FakeStorageClient:
+        async def upload_file(self, *, user_id, filename, content_type, data):
+            captured_upload.update(
+                {
+                    "user_id": user_id,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "data": data,
+                }
+            )
+
+            class StoredUpload:
+                backend_name = "local"
+                object_key = filename
+
+            return StoredUpload()
+
+    monkeypatch.setattr(
+        image_generation_module,
+        "create_storage_client",
+        lambda: FakeStorageClient(),
+    )
+    monkeypatch.setattr(
+        image_generation_module,
+        "build_delivery_url_from_stored_path",
+        lambda stored_path: f"delivery::{stored_path}",
+    )
+
+    result = asyncio.run(
+        service._persist_generated_images(
+            urls=["data:image/png;base64,aGVsbG8="],
+            user_id="user-123",
+            thread_id="thread-openai-b64-storage",
+        )
+    )
+
+    assert captured_upload["user_id"] == "user-123"
+    assert captured_upload["content_type"] == "image/png"
+    assert captured_upload["data"] == b"hello"
+    assert "generated/thread-openai-b64-storage/" in str(captured_upload["filename"])
+    assert result == [f"delivery::{captured_upload['filename']}"]
+
+
+def test_generate_images_falls_back_to_dashscope_when_openai_returns_no_images(monkeypatch, caplog):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "test-dashscope-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+    monkeypatch.setenv("IMAGE_GENERATION_MODEL", "wanx-v1")
+
+    service = ImageGenerationService()
+
+    async def fake_openai(*, prompt: str):
+        assert prompt == "make a fallback cover image"
+        return []
+
+    async def fake_dashscope(*, request, prompt: str):
+        assert request.thread_id == "thread-openai-fallback"
+        assert prompt == "make a fallback cover image"
+        return ["https://dashscope.example/fallback-cover.png"]
+
+    monkeypatch.setattr(service, "_generate_images_with_openai", fake_openai)
+    monkeypatch.setattr(service, "_generate_images_with_dashscope", fake_dashscope)
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-openai-fallback",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "generate a cover image",
+            "materials": [],
+        }
+    )
+
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(
+            service.generate_images(
+                request=request,
+                prompt="make a fallback cover image",
+                user_id=None,
+                thread_id=request.thread_id,
+            )
+        )
+
+    assert result == ["https://dashscope.example/fallback-cover.png"]
+    assert "触发高可用降级，切换至 DashScope 兜底生成" in caplog.text
+
+
 def test_openai_image_generation_non_json_response_returns_empty_list(monkeypatch, caplog):
     monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
     monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")

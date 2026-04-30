@@ -352,6 +352,8 @@ def _extract_openai_image_urls(payload: object) -> list[str]:
                 _append_openai_image_reference(urls, item)
 
     return _dedupe_urls(urls)
+
+
 def _dedupe_urls(urls: list[str]) -> list[str]:
     deduped_urls: list[str] = []
     seen_urls: set[str] = set()
@@ -576,7 +578,10 @@ class ImageGenerationService:
         )
 
         if active_backend == "openai":
-            urls = await self._generate_images_with_openai(prompt=prompt)
+            urls = await self._generate_images_with_openai_with_fallback(
+                request=request,
+                prompt=prompt,
+            )
         else:
             urls = await self._generate_images_with_dashscope(
                 request=request,
@@ -591,6 +596,43 @@ class ImageGenerationService:
             user_id=user_id,
             thread_id=thread_id,
         )
+
+    async def _generate_images_with_openai_with_fallback(
+        self,
+        *,
+        request: MediaChatRequest,
+        prompt: str,
+    ) -> list[str]:
+        try:
+            urls = await self._generate_images_with_openai(prompt=prompt)
+            if urls:
+                return urls
+            raise RuntimeError(
+                "OpenAI-compatible image generation returned no usable image references.",
+            )
+        except Exception as exc:
+            if not self._has_dashscope_config():
+                logger.warning(
+                    "主生图引擎(OpenAI-compatible)失败，且 DashScope 兜底不可用: %s",
+                    exc,
+                )
+                return []
+
+            logger.warning(
+                "主生图引擎(OpenAI-compatible)失败，触发高可用降级，切换至 DashScope 兜底生成。原因: %s",
+                exc,
+            )
+            try:
+                return await self._generate_images_with_dashscope(
+                    request=request,
+                    prompt=prompt,
+                )
+            except Exception as fallback_exc:
+                logger.error(
+                    "DashScope 兜底生图在 OpenAI-compatible 失败后仍然执行失败: %s",
+                    fallback_exc,
+                )
+                return []
 
     async def _generate_images_with_dashscope(
         self,
@@ -815,18 +857,12 @@ class ImageGenerationService:
                 str(error.get("message") or error.get("code") or "OpenAI-compatible image generation failed."),
             )
 
-        image_url = ""
-        response_data = data.get("data")
-        if isinstance(response_data, list) and response_data:
-            first_item = response_data[0]
-            if isinstance(first_item, dict):
-                image_url = str(first_item.get("url") or "").strip()
-
-        if image_url:
-            return [image_url]
+        urls = _extract_openai_image_urls(data)
+        if urls:
+            return urls
 
         logger.error(
-            "OpenAI-compatible image generation returned no standard image URL: %s",
+            "OpenAI-compatible image generation returned no usable image references: %s",
             data,
         )
         return []

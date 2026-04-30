@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.34`
+- Current version: `v1.13.36`
 - Updated on: `2026-04-30`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, access-token JTI blacklisting, password-reset recovery flows, password-change-based global access-token revocation, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, docx document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, chunk preview, citation-aware RAG prompt injection, citation-rendered chat replies, artifact graceful degradation on structure failure, SSE error surfacing, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level and chat-bubble copy interactions, rich-text clipboard delivery, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, access-token JTI blacklisting, password-reset recovery flows, password-change-based global access-token revocation, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, docx document parsing, spreadsheet parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md/pdf/docx/csv/xlsx ingestion, scope management, same-source upsert, chunk preview, citation-aware RAG prompt injection, citation-rendered chat replies, artifact graceful degradation on structure failure, SSE error surfacing, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level and chat-bubble copy interactions, rich-text clipboard delivery, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -75,7 +75,7 @@ The current baseline includes:
 33. Sidebar-driven workspace view routing with an authenticated drafts aggregation page backed by persisted `ArtifactRecord` history.
 34. Draft lifecycle management across single delete, batch delete, and clear-all operations for authenticated artifact cards.
 35. Persistent template-library API with preset seeding, user-scoped CRUD, Chinese management UI, and new-thread cascade prefill.
-36. Multi-tenant knowledge-base management with authenticated scope listing, txt/md upload chunking, same-source upsert, chunk-content preview, per-user scope/source deletion, unsupported-format prevalidation, inline upload-error surfacing, and a dedicated frontend knowledge workspace.
+36. Multi-tenant knowledge-base management with authenticated scope listing, shared-parser-backed txt/md/pdf/docx/csv/xlsx ingestion, same-source upsert, chunk-content preview, per-user scope/source deletion, unsupported-format prevalidation, inline upload-error surfacing, and a dedicated frontend knowledge workspace.
 37. User-level productivity dashboard with aggregated draft generation, topic lifecycle, knowledge-base asset counts, estimated words/tokens, and recent activity trend visualization.
 38. LangGraph multimodal attachment parsing for txt/md/pdf documents plus moviepy-and-Whisper-backed video transcription, with progress tool calls and `<document_context>` / `<video_transcript>` prompt injection.
 39. Dedicated `QwenLLMProvider` with three-tier fallback (`qwen-max -> qwen-plus -> qwen-turbo`), per-request `model_override`, and a frontend model selector persisted in local storage.
@@ -89,7 +89,8 @@ The current baseline includes:
 47. LangGraph now preserves raw draft text when the inner model fails structured artifact validation, degrading into a valid fallback artifact instead of dropping the response and leaving the user with an empty result.
 48. Frontend SSE handling now surfaces provider failures through explicit error cards and status messaging while removing empty assistant placeholders, preventing silent white-screen outcomes after streaming errors.
 49. Assistant chat bubbles can now inline backend-generated `generated_images` beneath the bound AI reply across both live streaming and history replay, preserving a natural conversation flow while keeping the right-side artifact panel available for deeper review.
-50. The OpenAI-compatible image gateway now uses the standard `/images/generations` protocol for providers such as `gpt-image-2`, while preserving raw-response logging, non-JSON protection, and downstream image persistence.
+50. The OpenAI-compatible image gateway now uses the standard `/images/generations` protocol for providers such as `gpt-image-2`, preserves raw-response logging and non-JSON protection, decodes `b64_json` image payloads into persistable image data, and can gracefully fall back to DashScope generation when the primary gateway fails or returns no usable image references.
+51. The knowledge-ingestion backend now routes `/api/v1/media/knowledge/upload` through the shared `media_parser`, allowing `.csv` and `.xlsx` spreadsheets plus `.pdf` and `.docx` documents to be normalized into chunk-ready text while preserving truncation guards and parser-level error logging.
 
 ### 3.2 Out of Scope
 
@@ -454,7 +455,7 @@ alembic upgrade head
 | `GET` | `/api/v1/media/artifacts` | authenticated artifact aggregation for drafts workspace |
 | `GET` | `/api/v1/media/dashboard/summary` | authenticated productivity and asset dashboard summary for the current user |
 | `GET` | `/api/v1/media/knowledge/scopes` | list owned knowledge scopes with chunk and source counts |
-| `POST` | `/api/v1/media/knowledge/upload` | upload txt/md knowledge content into an owned scope; same filename in the same scope is overwritten by deleting old chunks first |
+| `POST` | `/api/v1/media/knowledge/upload` | upload owned knowledge sources in `.txt`, `.md`, `.markdown`, `.pdf`, `.docx`, `.csv`, or `.xlsx`; the shared parser normalizes text before chunking, and the same filename in the same scope is overwritten by deleting old chunks first |
 | `PATCH` | `/api/v1/media/knowledge/scopes/{scope}` | rename one owned knowledge scope and sync bound thread/template references |
 | `DELETE` | `/api/v1/media/knowledge/scopes/{scope}` | delete all owned chunks for one knowledge scope |
 | `GET` | `/api/v1/media/knowledge/scopes/{scope}/sources` | list distinct uploaded sources inside one owned knowledge scope |
@@ -1322,28 +1323,47 @@ The Playwright config starts the Vite dev server automatically with `npm run dev
 
 ### 15.3 Latest Verification Result
 
-The following checks were executed for the current token-revocation hardening change set on `2026-04-30` and passed:
+The following targeted checks were executed for the current spreadsheet-ingestion change set on `2026-04-30` and passed:
 
 ```powershell
-$env:DATABASE_URL = "sqlite:///E:/omnimedia-agent/.codex_tmp/alembic_revocation_test.db"
-alembic upgrade head
-python -m pytest -q
+python -m pytest tests/test_media_parser.py -q
+python -m pytest tests/test_chat.py -q -k "knowledge_scope_upload_list_delete_and_retrieval_are_user_scoped or knowledge_upload_accepts_csv_and_xlsx_documents or knowledge_upload_returns_400_when_document_parse_fails or knowledge_scope_source_management_and_rename_are_user_scoped or dashboard_summary_aggregates_owned_productivity_assets_and_activity"
+python -m pytest tests/test_image_generation.py -q
 ```
 
 Observed result baseline:
 
-- Alembic upgrade smoke test against a temporary SQLite database: passed
-- full backend test suite: 117 passed
-- frontend production build: last verified as passed on the previous frontend-focused change set
-- frontend Playwright E2E suite: last verified at 21 passed on the previous frontend-focused change set
-- covered browser flows: auth bootstrap, password-reset request UX, logout cleanup, protected-route refresh retry, thread creation/replay/settings/rename/delete, drafts empty-state/reopen/single-delete/bulk-delete/clear-all flow, template-center render/use-template cascade flow, preset/custom template creation plus batch deletion, profile avatar/nickname/bio updates, active-session refresh and revoke, in-session password change, upload plus tool-call streaming feedback, and right-panel artifact follow-up actions
-- existing auth, scheduler, upload-retention, OSS signed-delivery, LangGraph search/tool, Tavily-backed business-tool live/fallback, and multimodal OCR regression suites remain green under the expanded browser baseline
+- media-parser regression slice: 7 passed
+- knowledge-upload and related RAG-management slice: 5 passed, 45 deselected
+- image-generation regression slice: 10 passed
+- observed warnings remain limited to the known `PyPDF2` deprecation notice and `httpx` `TestClient` shortcut deprecation warning
+- frontend production build: not re-run in this backend-only spreadsheet ingestion phase
+- frontend Playwright E2E suite: not re-run in this backend-only spreadsheet ingestion phase
 
 ### 15.4 Current Warning
 
 Current tests still emit a deprecation warning from `httpx` used by `FastAPI TestClient` regarding the deprecated `app` shortcut. This does not block execution but SHOULD be cleaned up during future dependency maintenance.
 
 ## 16. Current Implementation Status
+
+### 16.0.1 Completed in v1.13.36
+
+This version adds or solidifies:
+
+- `app/services/image_generation.py` now treats OpenAI-compatible image generation as a primary engine that can gracefully degrade into DashScope when the primary gateway times out, fails its HTTP call, or returns no usable image references.
+- the OpenAI-compatible parsing path now consumes both standard `data[].url` responses and non-standard `b64_json` image payloads, reusing the existing persistence path so Base64 images can still become first-party local or OSS-backed URLs.
+- `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the dual-engine image configuration pattern where OpenAI-compatible credentials remain primary while DashScope stays online as a fallback renderer.
+- `tests/test_image_generation.py` now verifies Base64 payload acceptance, data-URL persistence decoding, and the OpenAI-to-DashScope fallback path in addition to the existing OpenAI-compatible gateway coverage.
+
+### 16.0 Completed in v1.13.35
+
+This version adds or solidifies:
+
+- `requirements.txt` now declares `pandas==2.2.1` and `openpyxl==3.1.2` so spreadsheet parsing dependencies are explicit alongside the existing document and media parser stack.
+- `app/services/media_parser.py` now supports `.csv` and `.xlsx` documents, converting each spreadsheet row into retrieval-friendly `Key: Value` text blocks while reusing the same truncation guardrails and normalization pipeline used for txt, md, pdf, and docx parsing.
+- `app/api/v1/knowledge.py` now routes knowledge uploads through the shared `parse_document(...)` pipeline and accepts `.txt`, `.md`, `.markdown`, `.pdf`, `.docx`, `.csv`, and `.xlsx` at the backend API boundary, returning clean `400` or `415` responses when parsing fails or the file type is unsupported.
+- `tests/test_media_parser.py` and `tests/test_chat.py` now verify spreadsheet parsing, knowledge-upload acceptance for CSV/XLSX sources, and safe failure handling for malformed spreadsheet uploads.
+- `README.md` and `DEVELOPMENT.md` now document the backend spreadsheet-ingestion capability and clarify that frontend whitelist expansion for richer knowledge uploads remains a later UI phase.
 
 ### 16.1 Completed in v1.13.32
 
@@ -1612,4 +1632,7 @@ When updating this project:
 - DashScope image generation is still controlled by dedicated env vars such as `IMAGE_GENERATION_BACKEND`, `IMAGE_GENERATION_MODEL`, and `IMAGE_GENERATION_COUNT`; generated upstream URLs are persisted into the configured storage backend when possible.
 - OpenAI-compatible image providers are configured through `OPENAI_IMAGE_BASE_URL`, `OPENAI_IMAGE_API_KEY`, and `OPENAI_IMAGE_MODEL`, allowing deployments such as `https://www.onetopai.asia/v1` with `gpt-image-2` while reusing the existing persistence and gallery pipeline.
 - The OpenAI-compatible image gateway now bypasses the official image SDK and sends a direct `httpx` POST to `{OPENAI_IMAGE_BASE_URL}/images/generations` with `size=1024x1024`, then logs the raw gateway JSON (`中转站原始返回`) before parsing standard `data[].url`, common non-standard image fields, and `b64_json` payloads. This makes third-party gateway incompatibilities visible in backend logs and prevents empty SDK-normalized responses from hiding useful upstream data.
-- Regression coverage now includes dedicated config and service tests for the OpenAI-compatible image backend, including backend resolution, raw HTTP request construction, gateway variant parsing, and URL persistence handoff.
+- `b64_json` payloads are normalized into `data:image/...;base64,...` references first, then persisted through the existing storage abstraction so local and OSS-backed deployments can keep generated images under first-party control whenever persistence is enabled.
+- When `IMAGE_GENERATION_BACKEND=openai` and DashScope credentials are also configured, the image service now performs graceful degradation: OpenAI-compatible gateway failures, timeouts, or empty image responses trigger a warning log and automatically retry through the DashScope branch.
+- `.env` can now safely keep both OpenAI-compatible and DashScope image credentials online at the same time, allowing a primary-plus-fallback deployment without changing the LangGraph artifact contract.
+- Regression coverage now includes dedicated config and service tests for the OpenAI-compatible image backend, including backend resolution, raw HTTP request construction, gateway variant parsing, Base64 payload persistence handoff, and the OpenAI-to-DashScope fallback path.

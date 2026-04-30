@@ -209,6 +209,7 @@ Current backend regression baseline: `117 passed`.
 - Artifact delivery now supports per-block clipboard copy with success feedback and full Markdown export downloads from both the workspace header and the right-side artifact panel, assistant chat bubbles now expose one-click copy actions for plain conversational replies, and clipboard writes now include both plain text and rich HTML so paste targets such as Word or Feishu can preserve basic formatting.
 - Streamed `tool_call` progress now appears in the chat workspace as a collapsible "AI thinking" panel, so users can see attachment parsing, search, and review steps while long-running jobs are still in flight.
 - Chat attachment parsing now accepts `.docx` uploads in addition to txt, md, and pdf, allowing Word documents to flow into the existing document-context extraction pipeline.
+- The backend knowledge-ingestion API now supports `.txt`, `.md`, `.markdown`, `.pdf`, `.docx`, `.csv`, and `.xlsx`, converting spreadsheet rows into retrieval-friendly text before chunking.
 - Knowledge-base-backed RAG replies now support citation numbering such as `[1]`, and the chat UI renders those references as superscript markers with hoverable source hints to reduce enterprise trust black boxes.
 - The knowledge workspace now blocks unsupported upload formats before they leave the browser and shows inline error feedback inside the uploader, reducing silent failures when operators accidentally choose files outside the supported txt/md/markdown set.
 - When structured artifact generation collapses after the model has already produced usable raw text, LangGraph now preserves that draft and degrades into a fallback artifact instead of dropping the response; true SSE failures are also surfaced explicitly in the chat UI without leaving empty assistant bubbles behind.
@@ -287,7 +288,8 @@ npx playwright test --ui
 
 - 左侧边栏现已提供独立的“知识库”工作台，可查看当前用户名下的所有 Scope
 - 后端新增 `GET /api/v1/media/knowledge/scopes`、`POST /api/v1/media/knowledge/upload`、`DELETE /api/v1/media/knowledge/scopes/{scope}` 三个鉴权接口
-- 当前上传入口支持 `.txt`、`.md`、`.markdown`，并会自动处理 `utf-8-sig`、`utf-8`、`gb18030` 编码
+- 后端知识库上传接口当前支持 `.txt`、`.md`、`.markdown`、`.pdf`、`.docx`、`.csv`、`.xlsx`，其中表格会按行转换为 `Key: Value` 文本后再切块入库
+- 当前前端知识库上传器的本地白名单仍限制在 `.txt` / `.md` / `.markdown`，更完整的表格上传 UI 放行将在后续阶段补齐
 - 文本会在入库前自动切块，然后按 `user_id + scope + source` 维度持久化，避免不同用户之间的知识串库
 - `knowledge_base_scope` 仍然可以从模板一路透传到线程；当线程命中对应 Scope 时，LangGraph 会在最终生成前自动检索并注入相关上下文
 - 当前实现优先使用 Chroma 持久化向量集合，同时保留本地 JSON fallback，便于本地开发和低依赖环境运行
@@ -297,5 +299,7 @@ npx playwright test --ui
 - LangGraph inserts a non-blocking image node after review and before artifact formatting. If image generation fails, the text artifact still completes normally.
 - The image pipeline now supports a multi-backend gateway. Set `IMAGE_GENERATION_BACKEND` to `dashscope`, `openai`, or `disabled` depending on which provider should render the images.
 - DashScope image generation remains opt-in. Set `IMAGE_GENERATION_BACKEND=dashscope` and keep using your existing DashScope-compatible credentials to enable the flow.
-- OpenAI-compatible image providers are also supported. Configure `OPENAI_IMAGE_BASE_URL`, `OPENAI_IMAGE_API_KEY`, and `OPENAI_IMAGE_MODEL` to route generation through services such as `https://www.onetopai.asia/v1` with models like `gpt-image-2`; this path uses a direct `httpx` `/images/generations` request so non-standard gateway JSON can be logged and parsed without relying on the official image SDK response shape.
-- Generated image URLs are downloaded and re-saved into the active storage backend when possible, so artifact previews are not tied to temporary upstream URLs.
+- OpenAI-compatible image providers are also supported. Configure `OPENAI_IMAGE_BASE_URL`, `OPENAI_IMAGE_API_KEY`, and `OPENAI_IMAGE_MODEL` to route generation through services such as `https://www.onetopai.asia/v1` with models like `gpt-image-2`; this path uses a direct `httpx` `/images/generations` request so raw gateway JSON can be logged and parsed without relying on the official image SDK response shape.
+- The OpenAI-compatible path now accepts both standard `data[].url` responses and `b64_json` image payloads. Base64 images are converted into data URLs first, then persisted through the existing storage pipeline when possible.
+- When `IMAGE_GENERATION_BACKEND=openai` and DashScope credentials are also configured, the service now performs graceful degradation: OpenAI-compatible failures or empty image responses automatically fall back to DashScope generation instead of leaving the artifact without visuals.
+- Generated image URLs or decoded Base64 image payloads are re-saved into the active storage backend when possible, so artifact previews are not tied to temporary upstream URLs.

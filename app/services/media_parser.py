@@ -53,6 +53,11 @@ try:  # pragma: no cover - import guarded for environments missing optional deps
 except ImportError:  # pragma: no cover - surfaced later as a user-facing error
     Document = None  # type: ignore[assignment]
 
+try:  # pragma: no cover - import guarded for environments missing optional deps
+    import pandas as pd
+except ImportError:  # pragma: no cover - surfaced later as a user-facing error
+    pd = None  # type: ignore[assignment]
+
 load_environment()
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,7 @@ logger = logging.getLogger(__name__)
 TEXT_EXTENSIONS = {".txt", ".md"}
 PDF_EXTENSIONS = {".pdf"}
 DOCX_EXTENSIONS = {".docx"}
+SPREADSHEET_EXTENSIONS = {".csv", ".xlsx"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 DEFAULT_TEXT_CHAR_LIMIT = 12000
 DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "whisper-1"
@@ -122,6 +128,8 @@ async def parse_document(file_path_or_url: str) -> str:
                 extracted = await run_in_threadpool(_extract_pdf_text, resolved.local_path)
             elif suffix in DOCX_EXTENSIONS:
                 extracted = await run_in_threadpool(_extract_docx_text, resolved.local_path)
+            elif suffix in SPREADSHEET_EXTENSIONS:
+                extracted = await run_in_threadpool(_extract_spreadsheet_text, resolved.local_path)
             else:
                 raise MediaParserError(f"Unsupported document format: {suffix or 'unknown'}")
 
@@ -331,6 +339,93 @@ def _extract_docx_text(path: Path) -> str:
         sections.append("\n\n".join(table_blocks))
 
     return "\n\n".join(section for section in sections if section.strip())
+
+
+def _extract_spreadsheet_text(path: Path) -> str:
+    if pd is None:
+        raise MediaParserError(
+            "pandas and openpyxl are not installed. Run `pip install -r requirements.txt` first.",
+        )
+
+    try:
+        if path.suffix.lower() == ".csv":
+            workbook: dict[str, object] = {
+                "Sheet1": pd.read_csv(  # type: ignore[union-attr]
+                    str(path),
+                    dtype=str,
+                    keep_default_na=False,
+                )
+            }
+        else:
+            raw_workbook = pd.read_excel(  # type: ignore[union-attr]
+                str(path),
+                sheet_name=None,
+                dtype=str,
+                keep_default_na=False,
+            )
+            if isinstance(raw_workbook, dict):
+                workbook = {
+                    str(sheet_name).strip() or f"Sheet {index + 1}": frame
+                    for index, (sheet_name, frame) in enumerate(raw_workbook.items())
+                }
+            else:
+                workbook = {"Sheet1": raw_workbook}
+    except Exception as exc:
+        logger.error("Spreadsheet parsing failed for %s: %s", path.name, exc)
+        raise MediaParserError(
+            "Failed to parse the spreadsheet. Ensure the file is a valid CSV or Excel workbook.",
+        ) from exc
+
+    row_blocks: list[str] = []
+    include_sheet_name = path.suffix.lower() == ".xlsx" or len(workbook) > 1
+    for sheet_name, frame in workbook.items():
+        if frame is None:
+            continue
+        normalized_frame = frame.fillna("")
+        columns = [
+            _normalize_spreadsheet_header(raw_header, index)
+            for index, raw_header in enumerate(getattr(normalized_frame, "columns", []))
+        ]
+        for row_index, row in enumerate(
+            normalized_frame.itertuples(index=False, name=None),
+            start=1,
+        ):
+            pairs: list[str] = []
+            for column_index, raw_value in enumerate(row):
+                value = _normalize_spreadsheet_value(raw_value)
+                if not value:
+                    continue
+                header = (
+                    columns[column_index]
+                    if column_index < len(columns)
+                    else f"Column {column_index + 1}"
+                )
+                pairs.append(f"{header}: {value}")
+            if not pairs:
+                continue
+
+            prefix_parts: list[str] = []
+            if include_sheet_name:
+                prefix_parts.append(f"Sheet: {sheet_name}")
+            prefix_parts.append(f"Row: {row_index}")
+            row_blocks.append(f"{' | '.join(prefix_parts)} | {', '.join(pairs)}")
+
+    if not row_blocks:
+        raise MediaParserError("The spreadsheet did not contain any readable rows.")
+
+    return "\n".join(row_blocks)
+
+
+def _normalize_spreadsheet_header(raw_header: object, index: int) -> str:
+    normalized = re.sub(r"\s+", " ", str(raw_header or "")).strip()
+    return normalized or f"Column {index + 1}"
+
+
+def _normalize_spreadsheet_value(raw_value: object) -> str:
+    normalized = re.sub(r"\s+", " ", str(raw_value or "")).strip()
+    if normalized.lower() in {"", "nan", "nat", "none"}:
+        return ""
+    return normalized
 
 
 def _extract_audio_track(source_path: Path, audio_path: Path) -> None:
@@ -607,6 +702,6 @@ def _emit_dependency_install_hint() -> None:
         return
 
     logger.warning(
-        "Media parser reminder: run `pip install moviepy PyPDF2 python-docx openai` and ensure ffmpeg is available before debugging long-form document or video parsing.",
+        "Media parser reminder: run `pip install moviepy PyPDF2 python-docx pandas openpyxl openai` and ensure ffmpeg is available before debugging long-form document, spreadsheet, or video parsing.",
     )
     _dependency_hint_emitted = True

@@ -1,6 +1,10 @@
+import logging
+import shutil
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -25,40 +29,49 @@ from app.services.knowledge_base import (
     normalize_knowledge_source,
     split_text_into_knowledge_chunks,
 )
+from app.services.media_parser import MediaParserError, parse_document
 
 router = APIRouter(prefix="/api/v1/media", tags=["media-knowledge"])
 
-SUPPORTED_TEXT_SUFFIXES = {".txt", ".md", ".markdown"}
-SUPPORTED_TEXT_CONTENT_TYPES = {
-    "text/plain",
-    "text/markdown",
-    "text/x-markdown",
-    "application/octet-stream",
+logger = logging.getLogger(__name__)
+
+SUPPORTED_KNOWLEDGE_SUFFIXES = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".pdf",
+    ".docx",
+    ".csv",
+    ".xlsx",
 }
 
 
-def _decode_text_payload(raw_bytes: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
-        try:
-            return raw_bytes.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail="无法解析上传文件，请改用 UTF-8 / UTF-8 with BOM / GB18030 编码的 txt 或 md 文件。",
-    )
-
-
-def _validate_text_upload(file: UploadFile) -> str:
-    filename = (file.filename or "").strip() or "uploaded_text.txt"
+def _validate_knowledge_upload(file: UploadFile) -> str:
+    filename = Path((file.filename or "").strip() or "uploaded_document.txt").name
     suffix = Path(filename).suffix.lower()
-    content_type = (file.content_type or "").strip().lower()
-    if suffix not in SUPPORTED_TEXT_SUFFIXES and content_type not in SUPPORTED_TEXT_CONTENT_TYPES:
+    if suffix not in SUPPORTED_KNOWLEDGE_SUFFIXES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="当前知识库仅支持 .txt / .md / .markdown 文本文件上传。",
+            detail=(
+                "Knowledge uploads currently support .txt, .md, .markdown, .pdf, "
+                ".docx, .csv, and .xlsx files only."
+            ),
         )
     return filename
+
+
+async def _parse_uploaded_knowledge_document(
+    *,
+    filename: str,
+    raw_bytes: bytes,
+) -> str:
+    temp_dir = Path(tempfile.mkdtemp(prefix="omnimedia-knowledge-upload-"))
+    temp_path = temp_dir / filename
+    try:
+        await run_in_threadpool(temp_path.write_bytes, raw_bytes)
+        return await parse_document(str(temp_path))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @router.get("/knowledge/scopes", response_model=KnowledgeScopeListResponse)
@@ -91,19 +104,33 @@ async def upload_knowledge_document(
     current_user: User = Depends(get_current_user),
 ) -> KnowledgeUploadResponse:
     _ = _db
-    filename = _validate_text_upload(file)
+    filename = _validate_knowledge_upload(file)
     raw_bytes = await file.read()
     await file.close()
     if not raw_bytes:
-        raise HTTPException(status_code=400, detail="上传文件为空，无法写入知识库。")
+        raise HTTPException(status_code=400, detail="The uploaded knowledge document is empty.")
 
-    text = _decode_text_payload(raw_bytes)
+    try:
+        text = await _parse_uploaded_knowledge_document(
+            filename=filename,
+            raw_bytes=raw_bytes,
+        )
+    except MediaParserError as exc:
+        logger.error("Knowledge upload parsing failed for %s: %s", filename, exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Knowledge document parsing failed: {exc}",
+        ) from exc
+
     normalized_scope = normalize_knowledge_base_scope(scope) or build_default_scope_from_filename(
         filename,
     )
     chunks = split_text_into_knowledge_chunks(text)
     if not chunks:
-        raise HTTPException(status_code=400, detail="文件内容为空，无法切分知识块。")
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded knowledge document did not produce any usable chunks.",
+        )
 
     service = get_knowledge_base_service()
     service.delete_source(
@@ -133,7 +160,7 @@ async def delete_knowledge_scope(
     _ = _db
     normalized_scope = normalize_knowledge_base_scope(scope)
     if normalized_scope is None:
-        raise HTTPException(status_code=400, detail="知识库 Scope 不能为空。")
+        raise HTTPException(status_code=400, detail="Knowledge scope cannot be empty.")
 
     deleted_count = get_knowledge_base_service().delete_scope(current_user.id, normalized_scope)
     return KnowledgeScopeDeleteResponse(
