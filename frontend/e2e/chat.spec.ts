@@ -873,7 +873,7 @@ test("updates the password in-session and prunes revoked devices", async ({ page
   await expect(page.getByTestId("session-card-session-current")).toBeVisible();
 });
 
-test("sends a streamed chat message and renders user, tool, and AI feedback", async ({
+test("sends a streamed chat message and renders user thinking progress and AI feedback", async ({
   page,
 }) => {
   await openWorkspace(page, {
@@ -904,7 +904,9 @@ test("sends a streamed chat message and renders user, tool, and AI feedback", as
     mimeType: "image/png",
     buffer: Buffer.from("fake-image"),
   });
-  await expect(page.getByText("cover.png")).toBeVisible();
+  await expect(
+    page.getByTestId("composer-uploaded-material").filter({ hasText: "cover.png" }),
+  ).toBeVisible();
 
   const composer = page.getByTestId("composer-textarea");
   await composer.fill("Generate a tourism-note headline from this uploaded cover.");
@@ -916,11 +918,10 @@ test("sends a streamed chat message and renders user, tool, and AI feedback", as
       .getByTestId("chat-message-user")
       .filter({ hasText: "Generate a tourism-note headline from this uploaded cover." }),
   ).toBeVisible();
-  const toolMessages = page
-    .getByTestId("chat-message-tool")
-    .filter({ hasText: "analyze_market_trends" });
-  await expect(toolMessages).toHaveCount(2);
-  await expect(toolMessages.first()).toBeVisible();
+  await expect(page.getByTestId("thinking-panel")).toBeVisible();
+  await expect(page.getByTestId("thinking-panel")).toContainText("AI 思考完成");
+  await expect(page.getByTestId("thinking-panel")).toContainText("分析市场趋势");
+  await expect(page.getByTestId("chat-message-tool")).toHaveCount(0);
   await expect(
     page
       .getByTestId("chat-message-assistant")

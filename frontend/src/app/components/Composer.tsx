@@ -144,6 +144,7 @@ export function Composer({
               <div
                 key={item.id}
                 className="flex items-center gap-3 rounded-2xl border border-border bg-muted px-3 py-2 shadow-sm"
+                data-testid="composer-uploaded-material"
               >
                 {item.previewUrl ? (
                   <img

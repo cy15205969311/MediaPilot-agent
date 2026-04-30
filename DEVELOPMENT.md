@@ -3,9 +3,9 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.25`
+- Current version: `v1.13.26`
 - Updated on: `2026-04-30`
-- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, and chunk preview, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
+- Scope: current repository implementation, including backend gateway, dual-token authentication, password-reset recovery flows, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, and chunk preview, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level copy interactions, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
 Document set:
 
@@ -80,6 +80,7 @@ The current baseline includes:
 38. LangGraph multimodal attachment parsing for txt/md/pdf documents plus moviepy-and-Whisper-backed video transcription, with progress tool calls and `<document_context>` / `<video_transcript>` prompt injection.
 39. Dedicated `QwenLLMProvider` with three-tier fallback (`qwen-max -> qwen-plus -> qwen-turbo`), per-request `model_override`, and a frontend model selector persisted in local storage.
 40. Backend-driven model registry delivery through `GET /api/v1/models/available`, seeded with an Aliyun DashScope model catalog and consumed by a searchable grouped frontend selector with provider status awareness.
+41. Frontend artifact delivery now supports per-block clipboard copy with success-state feedback plus full Markdown export downloads from both header and right-panel actions, covering content-generation, topic-planning, hot-post-analysis, and comment-reply artifacts.
 
 ### 3.2 Out of Scope
 
@@ -1273,7 +1274,7 @@ Covered cases:
 47. Playwright workspace coverage verifies new-thread modal creation, startup thread replay, thread settings persistence, sidebar rename/delete flows, and streamed chat rendering for user and assistant bubbles
 48. Playwright profile coverage verifies nickname, bio, avatar, and in-session password updates through the profile modal with immediate workspace sync
 49. Playwright session-management coverage verifies session list refresh, targeted non-current device revocation, and password-change-driven session pruning
-50. Playwright upload-plus-SSE coverage verifies image material upload, tool-call progress rendering, assistant response completion, and right-panel artifact follow-up actions
+50. Playwright upload-plus-SSE coverage verifies image material upload, the chat thinking timeline fed by `tool_call` SSE events, assistant response completion, and right-panel artifact follow-up actions
 51. Business Tool registry exports OpenAI-compatible function schemas and typed live-or-fallback tool outputs
 52. LangGraph business-tool execution routes from draft generation to local tool execution and loops back with `<business_tool_context>` before review
 53. OSS delivery URLs are generated as signed previews instead of persisted long-lived public links
@@ -1288,6 +1289,7 @@ Covered cases:
 62. Playwright workspace coverage verifies the drafts empty state, draft-detail preview, and "open in conversation" navigation flow
 63. `GET /api/v1/media/templates` returns built-in prompt templates, and Playwright workspace coverage verifies template-center rendering plus one-click modal prefilling
 64. LangGraph attachment parsing now reads txt/md/pdf uploads into `<document_context>`, transcribes video speech into `<video_transcript>`, and streams parsing progress back through `tool_call` SSE events
+65. the frontend chat feed now aggregates live `tool_call` SSE events into a collapsible "AI thinking" panel so long-running parsing, search, and review steps remain visible without polluting the main message timeline
 
 ### 15.2 E2E Browser Automation
 
@@ -1333,27 +1335,17 @@ Current tests still emit a deprecation warning from `httpx` used by `FastAPI Tes
 
 ## 16. Current Implementation Status
 
-### 16.3 Completed in v1.13.23
+### 16.1 Completed in v1.13.26
 
 This version adds or solidifies:
 
-- `app/services/providers.py` now exposes a dedicated `QwenLLMProvider` built on the DashScope-compatible OpenAI transport, with configurable primary model, fallback pool, retry controls, and tool binding disabled by default so LangGraph can safely fall back to heuristic business-tool routing.
-- `QwenLLMProvider` now protects both streaming draft generation and non-stream JSON artifact structuring with retry-and-degrade logic, automatically stepping down across `qwen-max`, `qwen-plus`, and `qwen-turbo` style model tiers when rate limits, quota exhaustion, or model availability issues occur.
-- `app/services/agent.py`, `app/models/schemas.py`, `app/services/graph/provider.py`, and `frontend/src/app/types.ts` now propagate an optional per-request `model_override`, so runtime model choice can flow from the frontend into Qwen-backed chat execution without changing persisted thread contracts.
-- `frontend/src/app/components/AppHeader.tsx` and `frontend/src/app/App.tsx` now provide a persisted Qwen model selector in the workspace header, defaulting to `qwen-max` while allowing operators to switch the active runtime model per request.
-- `tests/test_qwen_provider.py` now covers Qwen provider auto-detection, disabled tool binding, retry-plus-fallback behavior, LangGraph clone behavior, and request-time model override cloning.
-- `app/services/media_parser.py` now routes speech transcription through two provider-aware paths: OpenAI-compatible `/audio/transcriptions` when a true transcription endpoint is configured, and DashScope-compatible `qwen3-asr-flash` chat completions with inline audio data when only the DashScope-compatible gateway is available.
-- `app/services/media_parser.py` now extracts compact mono `mp3` audio before transcription so video-to-ASR payloads are less likely to violate provider-side audio size limits.
-- `app/services/knowledge_base.py` now keeps its Chroma embedding adapter compatible with the current `chromadb` query contract by accepting `input=` on `embed_query(...)` and by sending explicit `query_embeddings=[...]` during retrieval.
-- `tests/test_media_parser.py` now verifies the DashScope-compatible transcription dispatch path, while `tests/test_knowledge_base.py` now covers the live Chroma query path instead of only the fallback JSON store.
-- `app/services/knowledge_base.py` now provides a multi-tenant knowledge service keyed by `user_id + scope + source`, with normalized scope handling, text chunking, source-document preview ordering, Chroma persistence, and a JSON fallback store.
-- the knowledge service preserves built-in seed scopes as system-owned documents while keeping uploaded user documents tenant-isolated.
-- `app/api/v1/knowledge.py` now exposes authenticated scope listing, txt/md upload ingestion, scope rename, grouped source inspection, chunk-joined source preview, single-source deletion, and per-scope deletion routes.
-- upload ingestion now decodes `utf-8-sig`, `utf-8`, and `gb18030`, deletes any existing same-filename source inside the target scope, then chunks content before persistence and reports normalized scope plus chunk counts back to the frontend.
-- `app/services/dashboard.py` and `app/api/v1/dashboard.py` now provide `GET /api/v1/media/dashboard/summary`, aggregating owned draft counts, 7-day generation, estimated words/tokens, topic status buckets, knowledge scope/chunk totals, and a 14-day activity series in one authenticated request.
-- `app/services/graph/provider.py` now injects tenant-scoped knowledge retrieval before final generation and logs `RAG Activated for user ...` when matching chunks are found.
+- `frontend/src/app/components/CopyButton.tsx` now uses the native Clipboard API with a textarea fallback, switching from the copy icon to a green check state for 2 seconds after a successful copy so users get immediate confirmation.
+- `frontend/src/app/artifactMarkdown.ts` now centralizes Markdown export assembly for all structured artifact types, formatting content-generation drafts, topic-planning lists, hot-post analysis, and comment-reply suggestions into stable `.md` downloads through the browser Blob API.
+- `frontend/src/app/App.tsx` now replaces the previous export placeholder with a real `handleExportMarkdown(...)` workflow, wiring both the workspace header button and the right-panel artifact action to the same download logic and surfacing a user-facing status update after export.
+- `frontend/src/app/components/artifacts/ContentGenerationArtifact.tsx`, `TopicPlanningArtifact.tsx`, `HotPostAnalysisArtifact.tsx`, and `CommentReplyArtifact.tsx` now expose copy affordances for individual artifact blocks such as title candidates, body copy, CTA copy, topic angles, goals, analysis insights, reusable templates, reply suggestions, and compliance notes.
+- the content-delivery loop is now materially complete inside the frontend workspace: operators can copy polished text blocks directly into publishing back offices or export the full structured artifact as Markdown for review, archiving, and downstream editing.
 
-### 16.1 Completed in v1.13.25
+### 16.2 Completed in v1.13.25
 
 This version adds or solidifies:
 
@@ -1364,7 +1356,7 @@ This version adds or solidifies:
 - `tests/test_qwen_provider.py` now includes a regression that starts from a `LangGraphProvider(inner_provider=CompatibleLLMProvider(...))` baseline and verifies that `dashscope:qwen2.5` is routed into a fresh `QwenLLMProvider` at runtime instead of silently staying on the compatible default path.
 - the committed `.env.example` already points `LANGGRAPH_INNER_PROVIDER=qwen`; local private `.env` files SHOULD follow the same default when DashScope/Qwen is intended to be the normal inner engine, while request-time overrides still take precedence.
 
-### 16.2 Completed in v1.13.24
+### 16.3 Completed in v1.13.24
 
 This version adds or solidifies:
 
@@ -1381,6 +1373,10 @@ This version adds or solidifies:
 - `tests/test_media_parser.py` now verifies local document parsing, `<document_context>` / `<video_transcript>` injection into LangGraph draft requests, and graceful attachment-parse degradation without collapsing the chat flow.
 - `tests/test_chat.py` now covers user-scoped upload/list/delete flows, grouped source management, scope rename conflict handling, and seeded-knowledge fallback, and the current repository baseline is verified by backend tests plus a passing frontend production build.
 
+### 16.4 Completed in v1.13.23
+
+This version adds or solidifies:
+
 1. `TopicRecord` now persists an optional `thread_id`, backed by Alembic migration `20260429_03_topic_thread_binding.py`, so every topic can bind to a single drafting conversation and avoid spawning duplicate chat threads.
 2. `app/api/v1/topics.py`, `app/models/schemas.py`, and `frontend/src/app/types.ts` now expose `thread_id` across topic read/write contracts, allowing topic cards to distinguish first-time drafting from resume-drafting flows.
 3. `frontend/src/app/App.tsx` now splits topic actions into two paths: first-time drafting binds a generated thread identifier and opens the existing new-thread modal, while already-bound topics skip the modal and jump directly back into the original chat history.
@@ -1394,7 +1390,7 @@ This version adds or solidifies:
 11. `frontend/src/app/components/views/TemplatesView.tsx` remains a local-first template center with hidden Skills UI, keyword search, 10 category pills, preset/custom badges, batch selection, batch deletion, and one-click apply.
 12. `python -m pytest` plus Playwright browser coverage remain green for topic thread binding, resume drafting, topic CRUD, the larger preset inventory, hidden Skills entry, new category tabs, and artifact-to-template capture.
 
-### 16.4 Completed in v1.13.15
+### 16.5 Completed in v1.13.15
 
 This version adds or solidifies:
 
@@ -1404,7 +1400,7 @@ This version adds or solidifies:
 4. `frontend/src/app/App.tsx`, `frontend/src/app/api.ts`, and `frontend/src/app/types.ts` now own template mutation state, Chinese template contracts, and the preset/custom cascade back into the new-thread modal.
 5. `frontend/e2e/fixtures.ts`, `frontend/e2e/chat.spec.ts`, and `tests/test_chat.py` now cover preset listing, custom creation, protected deletion, batch cleanup, and browser-level template management regressions.
 
-### 16.5 Completed in v1.13.14
+### 16.6 Completed in v1.13.14
 
 This version adds or solidifies:
 
@@ -1414,7 +1410,7 @@ This version adds or solidifies:
 4. `frontend/e2e/fixtures.ts` and `frontend/e2e/chat.spec.ts` now cover template-center rendering and the template-to-modal prefill flow without requiring a live backend.
 5. `tests/test_chat.py`, `README.md`, and `DEVELOPMENT.md` now lock the built-in template API baseline and the updated verification counts.
 
-### 16.6 Completed in v1.13.13
+### 16.7 Completed in v1.13.13
 
 This version adds or solidifies:
 
@@ -1424,7 +1420,7 @@ This version adds or solidifies:
 4. `frontend/src/app/components/views/DraftsView.tsx` now adds selection state, card-level delete actions, a bulk action bar, and a clear-all affordance while preserving search, filters, detail preview, and thread handoff.
 5. `tests/test_chat.py`, `frontend/e2e/fixtures.ts`, and `frontend/e2e/chat.spec.ts` now lock backend ownership-safe draft deletion plus browser coverage for single delete, bulk delete, and clear-all flows.
 
-### 16.7 Completed in v1.13.12
+### 16.8 Completed in v1.13.12
 
 This version adds or solidifies:
 
@@ -1434,7 +1430,7 @@ This version adds or solidifies:
 4. `frontend/src/app/components/LeftSidebar.tsx` now upgrades the business-module area from static placeholders into real workspace navigation, while cleaning up the current Chinese labels and wiring "我的草稿" to the new view.
 5. `frontend/e2e/fixtures.ts`, `frontend/e2e/chat.spec.ts`, and `tests/test_chat.py` now lock the drafts aggregation API plus end-to-end browser behavior for empty-state rendering and draft-to-thread reopen flows.
 
-### 16.8 Completed in v1.13.11
+### 16.9 Completed in v1.13.11
 
 This version adds or solidifies:
 
@@ -1444,7 +1440,7 @@ This version adds or solidifies:
 4. `.env.example` now documents that `TAVILY_API_KEY` powers both LangGraph search retrieval and the market-intelligence business tool path.
 5. `README.md` and `DEVELOPMENT.md` now document the live-or-fallback Business Tool baseline so the roadmap no longer treats all market-trend tooling as purely mock data.
 
-### 16.9 Completed in v1.13.10
+### 16.10 Completed in v1.13.10
 
 This version adds or solidifies:
 
@@ -1455,7 +1451,7 @@ This version adds or solidifies:
 5. Playwright browser coverage now spans the full high-frequency authenticated workspace lifecycle except archive-specific and live-backend delivery paths, reducing regression risk across the operator journey.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded `14 passed` browser baseline and the narrowed remaining E2E gaps.
 
-### 16.10 Completed in v1.13.9
+### 16.11 Completed in v1.13.9
 
 This version adds or solidifies:
 
@@ -1466,7 +1462,7 @@ This version adds or solidifies:
 5. Playwright coverage now exercises much more of the authenticated workspace lifecycle without requiring a live backend, reducing regression risk across the highest-frequency operator flows.
 6. `README.md` and `DEVELOPMENT.md` now document the expanded browser verification baseline and the increased E2E surface area.
 
-### 16.11 Completed in v1.13.8
+### 16.12 Completed in v1.13.8
 
 This version adds or solidifies:
 
@@ -1477,7 +1473,7 @@ This version adds or solidifies:
 5. LangGraph OCR image resolution can now consume OSS-managed image materials by converting normalized stored paths into signed delivery URLs before remote download.
 6. `tests/test_oss.py`, `tests/test_oss_client.py`, `README.md`, `.env.example`, and `DEVELOPMENT.md` now lock the signed delivery, lifecycle, promotion, and normalization baseline.
 
-### 16.12 Completed in v1.13.7
+### 16.13 Completed in v1.13.7
 
 This version adds or solidifies:
 
@@ -1488,7 +1484,7 @@ This version adds or solidifies:
 5. `pytest.ini` constrains default discovery to `tests/`, so `python -m pytest -q` no longer walks transient `uploads/` directories during collection.
 6. `tests/test_graph_tools.py`, `README.md`, and `DEVELOPMENT.md` now lock the sequential Business Tools baseline, title-only single-tool fallback, and the updated verification entrypoint.
 
-### 16.13 Completed in v1.13.6
+### 16.14 Completed in v1.13.6
 
 This version adds or solidifies:
 
@@ -1499,7 +1495,7 @@ This version adds or solidifies:
 5. `tests/test_graph_tools.py` locks the tool schema export, mock tool output, and ReAct loopback behavior without requiring live model credentials.
 6. `README.md` and `DEVELOPMENT.md` now document the Business Tools architecture and preserve the mandatory documentation-update rule.
 
-### 16.14 Completed in v1.13.5
+### 16.15 Completed in v1.13.5
 
 This version adds or solidifies:
 
@@ -1510,7 +1506,7 @@ This version adds or solidifies:
 5. frontend components now expose stable accessibility labels and `data-testid` anchors for critical auth, workspace, composer, and chat-bubble assertions.
 6. `README.md` and `DEVELOPMENT.md` now document E2E setup, commands, coverage scope, and the mandatory documentation-update rule for future changes.
 
-### 16.15 Completed in v1.13.4
+### 16.16 Completed in v1.13.4
 
 This version adds or solidifies:
 
@@ -1521,7 +1517,7 @@ This version adds or solidifies:
 5. `.env.example`, `README.md`, and `DEVELOPMENT.md` now document the password-reset capability, reset-token lifetime, and global forced sign-out behavior
 6. regression coverage and frontend production build validation now explicitly include account-recovery and password-reset compatibility
 
-### 16.16 Current Non-Blocking Gaps
+### 16.17 Current Non-Blocking Gaps
 
 The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 
@@ -1529,7 +1525,7 @@ The project is now a stronger SaaS-ready MVP, but the following gaps remain:
 2. password reset now works for local development, but there is still no real email/SMS delivery channel, signed recovery URL distribution, or admin-assisted recovery workflow
 3. upload cleanup now covers avatars plus local and OSS-backed material retention, OSS delivery now uses signed URLs with lifecycle-ready prefixes, lifecycle rollout can be automated, and users can inspect retention summaries, but the project still lacks CDN invalidation, multi-bucket governance, and a full admin retention console
 4. LangGraph now has branching, real vision integration, txt/md/pdf attachment parsing, video transcription, search routing, review retry control, provider-level `bind_tools`, Tavily-backed market-intelligence Business Tools, template-bound knowledge-base retrieval, and a user-managed multi-tenant knowledge workspace, but the project still lacks richer office-document loaders such as Docx, citation surfacing in the chat UI, advanced vector backends, product/CRM integrations, and broader live business-system connectivity
-5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming, artifact-side follow-up actions, local-first template-center management, and artifact-to-template capture, but still needs expansion for archive controls, clipboard/export affordances, and live backend plus OSS browser paths beyond the current mocked regression harness
+5. E2E coverage now spans auth, refresh retry, thread lifecycle, replay, profile/session security, uploads, tool-call streaming with the chat thinking panel, artifact-side follow-up actions, local-first template-center management, artifact-to-template capture, and artifact copy/export affordances, but still needs expansion for archive controls and live backend plus OSS browser paths beyond the current mocked regression harness
 
 ## 17. Recommended Next Steps
 
@@ -1537,7 +1533,7 @@ The next engineering steps SHOULD prioritize:
 
 1. evolve the current tenant-scoped RAG ingestion baseline into a richer document pipeline with Docx and spreadsheet loaders, citation surfacing, chunk inspection, stronger embeddings or vector backends, and broader internal or external business-system integrations such as product, competitor, CRM, or private knowledge sources
 2. harden OSS governance further with CDN invalidation, multi-bucket policy rollout, admin retention analytics, and richer signed-download policy controls on top of the current lifecycle rollout and retention-summary baseline
-3. expand browser coverage further into archive controls, clipboard/export interactions, and live backend/OSS delivery flows beyond the current mocked regression baseline
+3. expand browser coverage further into archive controls and live backend/OSS delivery flows beyond the current mocked regression baseline
 4. add real email/SMS recovery delivery, one-time reset-link UX, and broader access-token revocation strategy beyond the current refresh-session chain
 
 ## 18. Change Control Principle

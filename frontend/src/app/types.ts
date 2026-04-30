@@ -33,6 +33,15 @@ export type ConversationMessage = {
   materials?: MediaChatMaterialPayload[];
 };
 
+export type ToolCallTraceItem = {
+  id: string;
+  name: string;
+  status: string;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ThreadItem = {
   id: string;
   title: string;

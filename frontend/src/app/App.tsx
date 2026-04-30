@@ -102,6 +102,7 @@ import type {
   TemplateSummaryItem,
   ThreadItem,
   ThreadsApiResponse,
+  ToolCallTraceItem,
   UiPlatform,
   UiTaskType,
   UploadedMaterial,
@@ -149,6 +150,41 @@ function getPlatformDisplayLabel(platform: UiPlatform): string {
     return "抖音";
   }
   return "小红书";
+}
+
+function getToolCallFallbackMessage(name: string, status: string): string {
+  const toolLabelMap: Record<string, string> = {
+    parse_materials: "整理附件素材",
+    parse_document: "解析文档内容",
+    video_transcription: "转写视频语音",
+    ocr: "识别图片文字",
+    web_search: "检索全网信息",
+    retrieve_knowledge_base: "检索知识库",
+    analyze_market_trends: "分析市场趋势",
+    generate_content_outline: "生成内容大纲",
+    generate_draft: "生成正文草稿",
+    review_draft: "审查草稿质量",
+    format_artifact: "整理结构化产物",
+  };
+  const statusLabelMap: Record<string, string> = {
+    processing: "进行中",
+    completed: "已完成",
+    passed: "已通过",
+    skipped: "已跳过",
+    fallback: "已降级处理",
+    failed: "失败",
+    timeout: "超时",
+    retry: "准备重试",
+    max_retries: "达到最大重试次数",
+  };
+
+  const toolLabel = toolLabelMap[name] ?? name;
+  const statusLabel = statusLabelMap[status] ?? status;
+  return `${toolLabel} · ${statusLabel}`;
+}
+
+function isToolCallProcessingStatus(status: string): boolean {
+  return status === "processing";
 }
 
 function createConversationMessage(
@@ -838,6 +874,7 @@ function App() {
   const [templateSkills, setTemplateSkills] = useState<TemplateSkillDiscoveryItem[]>([]);
   const [uploadedMaterials, setUploadedMaterials] = useState<UploadedMaterial[]>([]);
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
+  const [toolCallTimeline, setToolCallTimeline] = useState<ToolCallTraceItem[]>([]);
   const [statusText, setStatusText] = useState("等待新的内容任务");
   const [activeThreadTitle, setActiveThreadTitle] = useState("New thread");
   const [activeThreadId, setActiveThreadId] = useState("thread-new");
@@ -934,7 +971,7 @@ function App() {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isStreaming, isLoadingThreadHistory]);
+  }, [messages, isStreaming, isLoadingThreadHistory, toolCallTimeline]);
 
   useEffect(() => {
     uploadedMaterialsRef.current = uploadedMaterials;
@@ -998,6 +1035,42 @@ function App() {
     setMessages((current) => [...current, createConversationMessage(messagePatch)]);
   };
 
+  const pushToolCallTrace = (event: Extract<ChatStreamEvent, { event: "tool_call" }>) => {
+    const nowIso = new Date().toISOString();
+    const nextMessage =
+      event.message?.trim() || getToolCallFallbackMessage(event.name, event.status);
+
+    setToolCallTimeline((current) => {
+      const lastStep = current.at(-1);
+      if (
+        lastStep &&
+        lastStep.name === event.name &&
+        isToolCallProcessingStatus(lastStep.status)
+      ) {
+        const updated = [...current];
+        updated[updated.length - 1] = {
+          ...lastStep,
+          status: event.status,
+          message: nextMessage,
+          updatedAt: nowIso,
+        };
+        return updated;
+      }
+
+      return [
+        ...current,
+        {
+          id: createId("thinking-step"),
+          name: event.name,
+          status: event.status,
+          message: nextMessage,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        },
+      ];
+    });
+  };
+
   const upsertThreadInList = (nextThread: ThreadItem) => {
     setThreads((current) => {
       const normalizedCurrent =
@@ -1033,6 +1106,7 @@ function App() {
   ) => {
     setMessages([]);
     setArtifact(null);
+    setToolCallTimeline([]);
     replaceUploadedMaterials([]);
     setMessage("");
     setActiveThreadId(nextThreadId);
@@ -1072,6 +1146,7 @@ function App() {
     setMutatingTemplateId(null);
     setThreads([]);
     setMessages([]);
+    setToolCallTimeline([]);
     replaceUploadedMaterials([]);
     setArtifact(null);
     setStatusText("请重新登录");
@@ -1152,6 +1227,7 @@ function App() {
     setActiveThreadId(thread.id);
     setActiveThreadTitle(thread.title);
     setActiveTopicId(topicId);
+    setToolCallTimeline([]);
     setStatusText("正在加载历史会话");
     setIsLoadingThreadHistory(true);
     setRightPanelOpen(true);
@@ -2323,6 +2399,7 @@ function App() {
   const handleStreamEvent = (event: ChatStreamEvent) => {
     switch (event.event) {
       case "start":
+        setToolCallTimeline([]);
         setStatusText("已建立流式连接，Agent 正在组织输出");
         setActiveThreadId(event.thread_id);
         updateAssistantTimestamp(new Date().toISOString());
@@ -2331,16 +2408,10 @@ function App() {
         updateAssistantMessage(event.delta);
         break;
       case "tool_call":
-        appendSystemMessage({
-          id: createId("tool"),
-          role: "tool",
-          title: "工具调用",
-          content:
-            event.message ??
-            `正在调用业务工具：${event.name}（状态：${event.status}）`,
-          createdAt: new Date().toISOString(),
-        });
-        setStatusText("Agent 正在整理中间结果");
+        pushToolCallTrace(event);
+        setStatusText(
+          event.message?.trim() || getToolCallFallbackMessage(event.name, event.status),
+        );
         break;
       case "artifact":
         setArtifact(event.artifact);
@@ -2793,6 +2864,7 @@ function App() {
     streamErrorRef.current = false;
     setActiveView("chat");
     setArtifact(null);
+    setToolCallTimeline([]);
     setActiveThreadId(nextThreadId);
     setActiveThreadTitle(nextThreadTitle);
     setStatusText("任务已提交，正在建立 Agent 流...");
@@ -3408,6 +3480,7 @@ function App() {
                       isLoadingHistory={isLoadingThreadHistory}
                       isStreaming={isStreaming}
                       messages={messages}
+                      toolCallTimeline={toolCallTimeline}
                       onSaveArtifactAsTemplate={
                         artifact ? handleSaveArtifactAsTemplate : undefined
                       }

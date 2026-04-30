@@ -206,6 +206,9 @@ python -m pytest -q
 ```
 Current backend regression baseline: `114 passed`.
 
+- Artifact delivery now supports per-block clipboard copy with success feedback and full Markdown export downloads from both the workspace header and the right-side artifact panel.
+- Streamed `tool_call` progress now appears in the chat workspace as a collapsible "AI thinking" panel, so users can see attachment parsing, search, and review steps while long-running jobs are still in flight.
+
 默认测试收集范围已通过 `pytest.ini` 限定为 `tests/`，不会误扫 `uploads/` 下的临时目录。
 当前后端回归基线为 `114 passed`。
 
