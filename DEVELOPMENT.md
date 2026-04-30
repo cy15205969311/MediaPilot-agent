@@ -3,7 +3,7 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.32`
+- Current version: `v1.13.33`
 - Updated on: `2026-04-30`
 - Scope: current repository implementation, including backend gateway, dual-token authentication, access-token JTI blacklisting, password-reset recovery flows, password-change-based global access-token revocation, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, docx document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, chunk preview, citation-aware RAG prompt injection, citation-rendered chat replies, artifact graceful degradation on structure failure, SSE error surfacing, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level and chat-bubble copy interactions, rich-text clipboard delivery, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
@@ -88,6 +88,8 @@ The current baseline includes:
 46. Assistant chat bubbles now render `[n]` references as superscript citation markers and expose the resolved source name through hoverable hints whenever the answer includes a reference list or source-tagged RAG context.
 47. LangGraph now preserves raw draft text when the inner model fails structured artifact validation, degrading into a valid fallback artifact instead of dropping the response and leaving the user with an empty result.
 48. Frontend SSE handling now surfaces provider failures through explicit error cards and status messaging while removing empty assistant placeholders, preventing silent white-screen outcomes after streaming errors.
+49. Assistant chat bubbles can now inline backend-generated `generated_images` beneath the bound AI reply across both live streaming and history replay, preserving a natural conversation flow while keeping the right-side artifact panel available for deeper review.
+50. The OpenAI-compatible image gateway now hardens support for non-standard `gpt-image-2` providers by routing that model through `/chat/completions`, parsing chat payloads, and extracting image URLs from Markdown-style response content.
 
 ### 3.2 Out of Scope
 
@@ -1601,3 +1603,13 @@ When updating this project:
 6. every implementation, test-baseline, workflow, or user-facing behavior change MUST update both `README.md` and `DEVELOPMENT.md` in the same change set when relevant
 7. this document SHOULD be updated in the same change set as the implementation
 8. root-level onboarding or usage changes SHOULD be reflected in `README.md` in the same change set
+## Image Generation Update
+
+- `ContentGenerationArtifactPayload` now includes `generated_images`, which is reserved for backend-generated cover URLs and rendered by the frontend artifact panel.
+- LangGraph now routes `content_generation` requests for Xiaohongshu and Douyin through a non-blocking `generate_image_node` after review and before final artifact formatting.
+- The new backend service lives in `app/services/image_generation.py` and is designed to fail open: image generation problems emit tool-call status updates but do not cancel text artifact delivery.
+- The image service now acts as a multi-backend gateway. `IMAGE_GENERATION_BACKEND` can be routed to `dashscope`, `openai`, or `disabled` without changing the LangGraph artifact flow.
+- DashScope image generation is still controlled by dedicated env vars such as `IMAGE_GENERATION_BACKEND`, `IMAGE_GENERATION_MODEL`, and `IMAGE_GENERATION_COUNT`; generated upstream URLs are persisted into the configured storage backend when possible.
+- OpenAI-compatible image providers are configured through `OPENAI_IMAGE_BASE_URL`, `OPENAI_IMAGE_API_KEY`, and `OPENAI_IMAGE_MODEL`, allowing deployments such as `https://www.onetopai.asia/v1` with `gpt-image-2` while reusing the existing persistence and gallery pipeline.
+- The OpenAI-compatible image gateway now bypasses the official image SDK and sends a direct `httpx` POST to `{OPENAI_IMAGE_BASE_URL}/images/generations` with `size=1024x1024`, then logs the raw gateway JSON (`中转站原始返回`) before parsing standard `data[].url`, common non-standard image fields, and `b64_json` payloads. This makes third-party gateway incompatibilities visible in backend logs and prevents empty SDK-normalized responses from hiding useful upstream data.
+- Regression coverage now includes dedicated config and service tests for the OpenAI-compatible image backend, including backend resolution, raw HTTP request construction, gateway variant parsing, and URL persistence handoff.

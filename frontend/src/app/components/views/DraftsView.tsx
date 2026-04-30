@@ -89,6 +89,33 @@ function renderArtifactDetail(artifact: ArtifactPayload) {
           </div>
         ) : null}
 
+        {artifact.generated_images && artifact.generated_images.length > 0 ? (
+          <div className="space-y-2">
+            <div className="text-sm font-medium text-foreground">AI Images</div>
+            <div
+              className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3"
+              data-testid="draft-detail-image-gallery"
+            >
+              {artifact.generated_images.map((imageUrl, index) => (
+                <a
+                  key={`${imageUrl}-${index}`}
+                  className="group overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-md"
+                  href={imageUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  <img
+                    alt={`${artifact.title} image ${index + 1}`}
+                    className="aspect-[3/4] w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+                    loading="lazy"
+                    src={imageUrl}
+                  />
+                </a>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <div>
           <div className="mb-2 text-sm font-medium text-foreground">正文内容</div>
           <div className="whitespace-pre-wrap rounded-2xl border border-border bg-muted/60 p-4 text-sm leading-7 text-card-foreground">

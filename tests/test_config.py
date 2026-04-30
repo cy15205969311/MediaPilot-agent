@@ -13,6 +13,10 @@ OSS_KEYS = [
     "OSS_BUCKET_NAME",
     "OSS_REGION",
     "OSS_PUBLIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_IMAGE_BASE_URL",
+    "OPENAI_IMAGE_API_KEY",
+    "OPENAI_IMAGE_MODEL",
 ]
 
 
@@ -103,3 +107,29 @@ def test_get_oss_settings_required_reports_missing_fields(
 
     assert "OSS_ACCESS_KEY_SECRET" in message
     assert "OSS_BUCKET_NAME" in message
+
+
+def test_get_openai_image_settings_prefers_dedicated_image_envs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    reset_config_state(monkeypatch, env_path)
+
+    env_path.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=shared-openai-key",
+                "OPENAI_IMAGE_BASE_URL=https://www.onetopai.asia/v1",
+                "OPENAI_IMAGE_API_KEY=dedicated-image-key",
+                "OPENAI_IMAGE_MODEL=gpt-image-2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    image_settings = config_module.get_openai_image_settings()
+
+    assert image_settings.base_url == "https://www.onetopai.asia/v1"
+    assert image_settings.api_key == "dedicated-image-key"
+    assert image_settings.model == "gpt-image-2"

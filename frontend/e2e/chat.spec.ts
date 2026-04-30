@@ -1170,3 +1170,163 @@ test("uses artifact actions to queue follow-up prompts and flip the workspace pl
   await page.getByTestId("artifact-action-generate-three-versions").click();
   await expect.poll(() => composer.inputValue()).not.toBe(secondPrompt);
 });
+
+test("renders generated image galleries in the right panel and drafts detail view", async ({
+  page,
+}) => {
+  const threadId = "thread-artifact-gallery";
+  const draftId = "draft-artifact-gallery";
+  const generatedImages = [
+    "https://example.com/generated-cover-1.png",
+    "https://example.com/generated-cover-2.png",
+  ];
+  const artifact: ContentGenerationArtifactPayload = {
+    artifact_type: "content_draft",
+    title: "Gallery artifact",
+    title_candidates: ["Gallery headline A", "Gallery headline B"],
+    body: "Artifact body copy for image gallery verification.",
+    platform_cta: "Artifact CTA block",
+    generated_images: generatedImages,
+  };
+
+  await openWorkspace(page, {
+    threads: [
+      createMockThreadSummary({
+        id: threadId,
+        title: "Artifact gallery thread",
+        latest_message_excerpt: "Artifact gallery ready",
+      }),
+    ],
+    drafts: [
+      createMockDraftSummary({
+        id: draftId,
+        message_id: "message-artifact-gallery",
+        thread_id: threadId,
+        thread_title: "Artifact gallery thread",
+        artifact,
+      }),
+    ],
+    threadMessagesById: {
+      [threadId]: createMockThreadMessages({
+        thread_id: threadId,
+        title: "Artifact gallery thread",
+        system_prompt: "Artifact gallery persona",
+        messages: [
+          createMockHistoryMessage({
+            id: "artifact-gallery-user-1",
+            thread_id: threadId,
+            role: "user",
+            content: "Please show me the generated cover gallery.",
+          }),
+          createMockHistoryMessage({
+            id: "artifact-gallery-assistant-1",
+            thread_id: threadId,
+            role: "assistant",
+            message_type: "artifact",
+            content: artifact.title,
+            artifact,
+          }),
+        ],
+      }),
+    },
+  });
+
+  await expect(page.getByTestId("artifact-image-gallery")).toBeVisible();
+  await expect(page.getByTestId("artifact-image-card-1")).toBeVisible();
+  await expect(page.getByTestId("artifact-image-card-2")).toBeVisible();
+  await expect(page.getByTestId("artifact-image-card-1").locator("img")).toBeVisible();
+
+  await page.getByTestId("sidebar-shortcut-drafts").click();
+  await page.getByTestId(`draft-preview-${draftId}`).click();
+  await expect(page.getByTestId("draft-detail-dialog")).toBeVisible();
+  await expect(page.getByTestId("draft-detail-image-gallery")).toBeVisible();
+  await expect(
+    page.getByTestId("draft-detail-image-gallery").locator("img"),
+  ).toHaveCount(2);
+});
+
+test("renders generated images inline inside the assistant chat bubble", async ({
+  page,
+}) => {
+  const threadId = "thread-chat-inline-gallery";
+  const generatedImages = [
+    "https://example.com/generated-inline-1.png",
+    "https://example.com/generated-inline-2.png",
+  ];
+  const artifact: ContentGenerationArtifactPayload = {
+    artifact_type: "content_draft",
+    title: "Inline gallery artifact",
+    title_candidates: ["Inline headline A", "Inline headline B"],
+    body: "Inline gallery artifact body.",
+    platform_cta: "Inline gallery CTA.",
+    generated_images: generatedImages,
+  };
+
+  await openWorkspace(page, {
+    threads: [
+      createMockThreadSummary({
+        id: threadId,
+        title: "Inline gallery thread",
+        latest_message_excerpt: "Inline gallery ready",
+      }),
+    ],
+    threadMessagesById: {
+      [threadId]: createMockThreadMessages({
+        thread_id: threadId,
+        title: "Inline gallery thread",
+        system_prompt: "Inline gallery persona",
+        messages: [
+          createMockHistoryMessage({
+            id: "inline-gallery-user-1",
+            thread_id: threadId,
+            role: "user",
+            content: "Please generate a visual cover for me.",
+          }),
+          createMockHistoryMessage({
+            id: "inline-gallery-assistant-text-1",
+            thread_id: threadId,
+            role: "assistant",
+            content: "Here is the finished draft and the generated cover set.",
+          }),
+          createMockHistoryMessage({
+            id: "inline-gallery-artifact-1",
+            thread_id: threadId,
+            role: "assistant",
+            message_type: "artifact",
+            content: artifact.title,
+            artifact,
+          }),
+          createMockHistoryMessage({
+            id: "inline-gallery-user-2",
+            thread_id: threadId,
+            role: "user",
+            content: "Thanks, now help me rewrite the ending.",
+          }),
+          createMockHistoryMessage({
+            id: "inline-gallery-assistant-text-2",
+            thread_id: threadId,
+            role: "assistant",
+            content: "Sure, I can help revise the ending next.",
+          }),
+        ],
+      }),
+    },
+  });
+
+  const firstAssistantBubble = page
+    .getByTestId("chat-message-assistant")
+    .filter({ hasText: "Here is the finished draft and the generated cover set." });
+  await expect(firstAssistantBubble).toBeVisible();
+  await expect(firstAssistantBubble.getByTestId("chat-artifact-image-gallery")).toBeVisible();
+  await expect(firstAssistantBubble.getByTestId("chat-artifact-image-card-1")).toBeVisible();
+  await expect(firstAssistantBubble.getByTestId("chat-artifact-image-card-2")).toBeVisible();
+  await expect(
+    firstAssistantBubble.locator(`img[src="${generatedImages[0]}"]`),
+  ).toBeVisible();
+
+  const latestAssistantBubble = page
+    .getByTestId("chat-message-assistant")
+    .filter({ hasText: "Sure, I can help revise the ending next." });
+  await expect(latestAssistantBubble).toBeVisible();
+  await expect(latestAssistantBubble.getByTestId("chat-artifact-image-gallery")).toHaveCount(0);
+});

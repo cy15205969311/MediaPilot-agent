@@ -31,6 +31,7 @@ export type ConversationMessage = {
   createdAt: string;
   title?: string;
   materials?: MediaChatMaterialPayload[];
+  artifact?: ArtifactPayload | null;
 };
 
 export type ToolCallTraceItem = {
@@ -392,6 +393,7 @@ export type ContentGenerationArtifactPayload = {
   title_candidates: string[];
   body: string;
   platform_cta: string;
+  generated_images?: string[];
 };
 
 export type HotPostAnalysisDimension = {

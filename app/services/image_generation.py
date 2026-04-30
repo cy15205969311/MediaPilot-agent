@@ -1,0 +1,1041 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import mimetypes
+import os
+import re
+import uuid
+
+import httpx
+from openai import AsyncOpenAI
+
+from app.config import get_openai_image_settings, load_environment
+from app.models.schemas import MediaChatRequest, Platform
+from app.services.oss_client import (
+    build_delivery_url_from_stored_path,
+    build_stored_file_path,
+    create_storage_client,
+)
+
+load_environment()
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_DASHSCOPE_API_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
+DEFAULT_DASHSCOPE_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_DASHSCOPE_IMAGE_MODEL = "qwen-image-2.0"
+DEFAULT_IMAGE_PROMPT_MODEL = "qwen-turbo"
+DEFAULT_IMAGE_GENERATION_COUNT = 3
+DEFAULT_IMAGE_GENERATION_TIMEOUT_SECONDS = 120.0
+DEFAULT_IMAGE_GENERATION_POLL_INTERVAL_SECONDS = 2.0
+OPENAI_COMPATIBLE_IMAGE_SIZE = "1024x1024"
+MAX_IMAGE_GENERATION_COUNT = 4
+DEFAULT_DASHSCOPE_DOUYIN_IMAGE_SIZE = "928*1664"
+DEFAULT_DASHSCOPE_XIAOHONGSHU_IMAGE_SIZE = "1104*1472"
+WANX_V1_DOUYIN_IMAGE_SIZE = "720*1280"
+WANX_V1_XIAOHONGSHU_IMAGE_SIZE = "768*1152"
+
+
+def _build_http_timeout(seconds: float) -> httpx.Timeout:
+    connect_timeout = min(seconds, 10.0)
+    return httpx.Timeout(seconds, connect=connect_timeout)
+
+
+def _read_positive_float_env(env_name: str, default: float) -> float:
+    raw_value = os.getenv(env_name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        parsed = float(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _read_positive_int_env(env_name: str, default: int) -> int:
+    raw_value = os.getenv(env_name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _clamp_image_count(count: int) -> int:
+    return max(1, min(MAX_IMAGE_GENERATION_COUNT, count))
+
+
+def _is_enabled_env(env_name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(env_name, "").strip().lower()
+    if not raw_value:
+        return default
+    return raw_value in {"1", "true", "yes", "on"}
+
+
+def _derive_dashscope_api_base_url(reference_url: str | None) -> str:
+    normalized = (reference_url or "").strip()
+    if not normalized:
+        return DEFAULT_DASHSCOPE_API_BASE_URL
+    return re.sub(
+        r"/compatible-mode/v\d+/?$",
+        "/api/v1",
+        normalized.rstrip("/"),
+    )
+
+
+def _derive_dashscope_prompt_base_url(reference_url: str | None) -> str:
+    normalized = (reference_url or "").strip()
+    if not normalized:
+        return DEFAULT_DASHSCOPE_COMPATIBLE_BASE_URL
+    if "/compatible-mode/" in normalized:
+        return normalized.rstrip("/")
+    return DEFAULT_DASHSCOPE_COMPATIBLE_BASE_URL
+
+
+def _resolve_image_generation_backend() -> str:
+    return os.getenv("IMAGE_GENERATION_BACKEND", "disabled").strip().lower() or "disabled"
+
+
+def _resolve_dashscope_image_generation_api_key() -> str:
+    return (
+        os.getenv("IMAGE_GENERATION_API_KEY", "").strip()
+        or os.getenv("QWEN_API_KEY", "").strip()
+        or os.getenv("LLM_API_KEY", "").strip()
+    )
+
+
+def _resolve_dashscope_image_generation_base_url() -> str:
+    explicit_base_url = os.getenv("IMAGE_GENERATION_BASE_URL", "").strip()
+    if explicit_base_url:
+        return explicit_base_url.rstrip("/")
+    return _derive_dashscope_api_base_url(
+        os.getenv("QWEN_BASE_URL", "").strip() or os.getenv("LLM_BASE_URL", "").strip(),
+    )
+
+
+def _resolve_image_prompt_api_key() -> str:
+    return (
+        os.getenv("IMAGE_PROMPT_API_KEY", "").strip()
+        or os.getenv("QWEN_API_KEY", "").strip()
+        or os.getenv("LLM_API_KEY", "").strip()
+    )
+
+
+def _resolve_image_prompt_base_url() -> str:
+    explicit_base_url = os.getenv("IMAGE_PROMPT_BASE_URL", "").strip()
+    if explicit_base_url:
+        return explicit_base_url.rstrip("/")
+    return _derive_dashscope_prompt_base_url(
+        os.getenv("QWEN_BASE_URL", "").strip() or os.getenv("LLM_BASE_URL", "").strip(),
+    )
+
+
+def _is_wanx_v1_model(model_name: str) -> bool:
+    return model_name.strip().lower() == "wanx-v1"
+
+
+def _resolve_dashscope_platform_size(
+    platform: Platform,
+    *,
+    model_name: str = "",
+) -> str:
+    if _is_wanx_v1_model(model_name):
+        if platform == Platform.DOUYIN:
+            return WANX_V1_DOUYIN_IMAGE_SIZE
+        return WANX_V1_XIAOHONGSHU_IMAGE_SIZE
+
+    if platform == Platform.DOUYIN:
+        return DEFAULT_DASHSCOPE_DOUYIN_IMAGE_SIZE
+    return DEFAULT_DASHSCOPE_XIAOHONGSHU_IMAGE_SIZE
+
+
+def _compact_text(value: str, limit: int = 240) -> str:
+    compact = " ".join(str(value or "").split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit].rstrip()}..."
+
+
+def _resolve_cover_title(
+    *,
+    request: MediaChatRequest,
+    artifact_candidate: dict[str, object] | None,
+    draft: str,
+) -> str:
+    if isinstance(artifact_candidate, dict):
+        title_candidates = artifact_candidate.get("title_candidates")
+        if isinstance(title_candidates, list):
+            for item in title_candidates:
+                normalized = str(item).strip()
+                if normalized:
+                    return normalized
+        title = str(artifact_candidate.get("title", "")).strip()
+        if title:
+            return title
+
+    if draft.strip():
+        first_line = draft.strip().splitlines()[0]
+        if first_line.strip():
+            return _compact_text(first_line, limit=42)
+
+    return _compact_text(request.message, limit=42) or "封面主标题"
+
+
+def _build_heuristic_cover_prompt(
+    *,
+    request: MediaChatRequest,
+    draft: str,
+    artifact_candidate: dict[str, object] | None,
+) -> str:
+    cover_title = _resolve_cover_title(
+        request=request,
+        artifact_candidate=artifact_candidate,
+        draft=draft,
+    )
+    summary = _compact_text(
+        draft
+        or str((artifact_candidate or {}).get("body", "")).strip()
+        or request.message,
+        limit=260,
+    )
+
+    if request.platform == Platform.DOUYIN:
+        platform_style = (
+            "抖音爆款封面，竖版 9:16，视觉冲击力强，对比鲜明，主体特写明显，"
+            "适合短视频首屏停留。"
+        )
+    else:
+        platform_style = (
+            "小红书高点击封面，竖版 3:4，生活方式感、真实质感、明亮高级，"
+            "适合图文笔记封面。"
+        )
+
+    return (
+        f"{platform_style}\n"
+        f"主题标题：{cover_title}\n"
+        f"内容摘要：{summary}\n"
+        "画面要求：\n"
+        "1. 只保留一个核心视觉主体和一个明确场景，不要做杂乱拼贴。\n"
+        "2. 构图干净，主体靠前，留出可放标题的安全留白区域。\n"
+        "3. 商业摄影质感，色彩统一，有情绪张力，但不要廉价夸张。\n"
+        "4. 不要水印、不要 logo、不要边框、不要二维码。\n"
+        f"5. 如果需要画面文字，只允许极少量清晰中文标题，优先使用：{cover_title}\n"
+        "6. 输出适合品牌营销与内容运营场景的封面图。"
+    ).strip()
+
+
+def _extract_dashscope_image_urls(payload: object) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+
+    output = payload.get("output")
+    if not isinstance(output, dict):
+        return []
+
+    urls: list[str] = []
+
+    choices = output.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    candidates = [
+                        item.get("image"),
+                        item.get("url"),
+                        item.get("image_url"),
+                    ]
+                    image_url = item.get("image_url")
+                    if isinstance(image_url, dict):
+                        candidates.append(image_url.get("url"))
+                    for candidate in candidates:
+                        normalized = str(candidate or "").strip()
+                        if normalized.startswith("http"):
+                            urls.append(normalized)
+
+    results = output.get("results")
+    if isinstance(results, list):
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            for candidate in (
+                result.get("url"),
+                result.get("image"),
+                result.get("image_url"),
+            ):
+                normalized = str(candidate or "").strip()
+                if normalized.startswith("http"):
+                    urls.append(normalized)
+
+    return _dedupe_urls(urls)
+
+
+def _append_openai_base64_reference(urls: list[str], candidate: object) -> None:
+    normalized = str(candidate or "").strip()
+    if not normalized:
+        return
+    if normalized.startswith("data:image/"):
+        urls.append(normalized)
+        return
+    compact_base64 = "".join(normalized.split())
+    if compact_base64:
+        urls.append(f"data:image/png;base64,{compact_base64}")
+
+
+def _append_openai_image_reference(urls: list[str], candidate: object) -> None:
+    if isinstance(candidate, dict):
+        for key in ("url", "image"):
+            _append_openai_image_reference(urls, candidate.get(key))
+        _append_openai_base64_reference(urls, candidate.get("b64_json"))
+        image_url = candidate.get("image_url")
+        if isinstance(image_url, dict):
+            _append_openai_image_reference(urls, image_url.get("url"))
+        else:
+            _append_openai_image_reference(urls, image_url)
+        return
+
+    normalized = str(candidate or "").strip()
+    if not normalized:
+        return
+    if normalized.startswith("http"):
+        urls.append(normalized)
+        return
+    if normalized.startswith("data:image/"):
+        urls.append(normalized)
+        return
+
+    # OpenAI-compatible gateways may return raw b64_json without the data URL prefix.
+    if len(normalized) > 100 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", normalized):
+        compact_base64 = "".join(normalized.split())
+        urls.append(f"data:image/png;base64,{compact_base64}")
+
+
+def _extract_openai_image_urls(payload: object) -> list[str]:
+    urls: list[str] = []
+    if not isinstance(payload, dict):
+        return urls
+
+    response_data = payload.get("data")
+    if isinstance(response_data, list):
+        for item in response_data:
+            _append_openai_image_reference(urls, item)
+
+    images = payload.get("images")
+    if isinstance(images, list):
+        for item in images:
+            _append_openai_image_reference(urls, item)
+
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            _append_openai_image_reference(urls, item)
+    elif isinstance(output, dict):
+        _append_openai_image_reference(urls, output.get("url"))
+        _append_openai_image_reference(urls, output.get("image"))
+        _append_openai_image_reference(urls, output.get("image_url"))
+        _append_openai_base64_reference(urls, output.get("b64_json"))
+        output_images = output.get("images")
+        if isinstance(output_images, list):
+            for item in output_images:
+                _append_openai_image_reference(urls, item)
+
+    return _dedupe_urls(urls)
+
+
+def _extract_openai_chat_completion_image_urls(payload: object) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+
+    urls: list[str] = []
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return urls
+
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            urls.extend(re.findall(r"(https?://[^\s\)]+)", content))
+            continue
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            _append_openai_image_reference(urls, item.get("image"))
+            _append_openai_image_reference(urls, item.get("image_url"))
+            text = item.get("text")
+            if isinstance(text, str):
+                urls.extend(re.findall(r"(https?://[^\s\)]+)", text))
+
+    return _dedupe_urls(urls)
+
+
+def _dedupe_urls(urls: list[str]) -> list[str]:
+    deduped_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for url in urls:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        deduped_urls.append(url)
+    return deduped_urls
+
+
+def _read_response_text(response: httpx.Response | None) -> str:
+    if response is None:
+        return ""
+    try:
+        return response.text
+    except Exception as exc:  # pragma: no cover - defensive logging fallback
+        return f"<failed to read response text: {exc}>"
+
+
+def _parse_image_generation_response_json(
+    response: httpx.Response,
+    *,
+    provider_name: str,
+) -> dict[str, object] | None:
+    response_text = _read_response_text(response)
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.error(
+            "%s image generation API returned non-JSON data. status=%s raw_response=%s",
+            provider_name,
+            response.status_code,
+            response_text,
+        )
+        logger.debug("%s image generation JSON decode failed: %s", provider_name, exc)
+        return None
+
+    if not isinstance(payload, dict):
+        logger.error(
+            "%s image generation returned a non-object response. status=%s body=%s payload=%s",
+            provider_name,
+            response.status_code,
+            response_text,
+            payload,
+        )
+        return None
+
+    return payload
+
+
+def _resolve_extension(*, source_url: str, content_type: str | None) -> str:
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    guessed_extension = (
+        mimetypes.guess_extension(normalized_content_type)
+        if normalized_content_type
+        else None
+    )
+    if guessed_extension:
+        return guessed_extension.lstrip(".")
+
+    path = source_url.split("?", 1)[0]
+    guessed_type = mimetypes.guess_type(path)[0]
+    guessed_extension = mimetypes.guess_extension(guessed_type or "")
+    if guessed_extension:
+        return guessed_extension.lstrip(".")
+    return "png"
+
+
+def _decode_data_image_url(source_url: str) -> tuple[bytes, str]:
+    match = re.match(
+        r"^data:(?P<content_type>image/[a-zA-Z0-9.+-]+);base64,(?P<payload>.+)$",
+        source_url,
+        flags=re.DOTALL,
+    )
+    if not match:
+        raise RuntimeError("Generated image data URL is invalid.")
+
+    image_bytes = base64.b64decode(match.group("payload"), validate=True)
+    if not image_bytes:
+        raise RuntimeError("Generated image data URL is empty.")
+    return image_bytes, match.group("content_type").lower()
+
+
+class ImageGenerationService:
+    def __init__(self) -> None:
+        self.backend = _resolve_image_generation_backend()
+        self.dashscope_api_key = _resolve_dashscope_image_generation_api_key()
+        self.dashscope_base_url = _resolve_dashscope_image_generation_base_url()
+        self.dashscope_model = (
+            os.getenv("IMAGE_GENERATION_MODEL", "").strip()
+            or DEFAULT_DASHSCOPE_IMAGE_MODEL
+        )
+        self.openai_settings = get_openai_image_settings()
+        self.count = _clamp_image_count(
+            _read_positive_int_env(
+                "IMAGE_GENERATION_COUNT",
+                DEFAULT_IMAGE_GENERATION_COUNT,
+            ),
+        )
+        self.timeout_seconds = _read_positive_float_env(
+            "IMAGE_GENERATION_TIMEOUT_SECONDS",
+            DEFAULT_IMAGE_GENERATION_TIMEOUT_SECONDS,
+        )
+        self.poll_interval_seconds = _read_positive_float_env(
+            "IMAGE_GENERATION_POLL_INTERVAL_SECONDS",
+            DEFAULT_IMAGE_GENERATION_POLL_INTERVAL_SECONDS,
+        )
+        self.request_timeout = _build_http_timeout(self.timeout_seconds)
+        self.persist_results = _is_enabled_env(
+            "IMAGE_GENERATION_PERSIST_RESULTS",
+            default=True,
+        )
+        self.prompt_api_key = _resolve_image_prompt_api_key()
+        self.prompt_base_url = _resolve_image_prompt_base_url()
+        self.prompt_model = (
+            os.getenv("IMAGE_PROMPT_MODEL", "").strip()
+            or DEFAULT_IMAGE_PROMPT_MODEL
+        )
+        self.prompt_timeout = _build_http_timeout(
+            _read_positive_float_env(
+                "IMAGE_PROMPT_TIMEOUT_SECONDS",
+                self.timeout_seconds,
+            ),
+        )
+        self._prompt_client: AsyncOpenAI | None = None
+
+    def resolve_backend(self) -> str:
+        requested_backend = self.backend
+        if requested_backend == "disabled":
+            return "disabled"
+        if requested_backend == "dashscope":
+            return "dashscope" if self._has_dashscope_config() else "disabled"
+        if requested_backend == "openai":
+            return "openai" if self._has_openai_config() else "disabled"
+        if requested_backend == "auto":
+            if self._has_dashscope_config():
+                return "dashscope"
+            if self._has_openai_config():
+                return "openai"
+            return "disabled"
+        return "disabled"
+
+    def resolve_model(self) -> str:
+        backend = self.resolve_backend()
+        if backend == "openai":
+            return self.openai_settings.model
+        if backend == "dashscope":
+            return self.dashscope_model
+        return ""
+
+    def is_enabled(self) -> bool:
+        return self.resolve_backend() != "disabled"
+
+    async def build_prompt(
+        self,
+        *,
+        request: MediaChatRequest,
+        draft: str,
+        artifact_candidate: dict[str, object] | None,
+    ) -> str:
+        heuristic_prompt = _build_heuristic_cover_prompt(
+            request=request,
+            draft=draft,
+            artifact_candidate=artifact_candidate,
+        )
+        if not (self.prompt_api_key and self.prompt_model):
+            return heuristic_prompt
+
+        try:
+            response = await self._get_prompt_client().chat.completions.create(
+                model=self.prompt_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是资深新媒体视觉策划。请根据给定草稿生成一段中文文生图提示词，"
+                            "用于生成高点击封面图。只输出最终提示词，不要解释。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"目标平台：{request.platform.value}\n"
+                            f"候选标题：{_resolve_cover_title(request=request, artifact_candidate=artifact_candidate, draft=draft)}\n"
+                            f"正文摘要：{_compact_text(draft, limit=320)}\n"
+                            f"请输出一段适合 {request.platform.value} 的高点击封面图提示词，"
+                            "强调主体、场景、情绪、构图、质感和留白。"
+                        ),
+                    },
+                ],
+                temperature=0.5,
+                timeout=self.prompt_timeout,
+            )
+            content = str(response.choices[0].message.content or "").strip()
+            if content:
+                return content
+        except Exception as exc:  # pragma: no cover - graceful fallback
+            logger.warning("Image prompt builder fallback triggered: %s", exc)
+
+        return heuristic_prompt
+
+    async def generate_images(
+        self,
+        *,
+        request: MediaChatRequest,
+        prompt: str,
+        user_id: str | None,
+        thread_id: str,
+    ) -> list[str]:
+        active_backend = self.resolve_backend()
+        if active_backend == "disabled":
+            return []
+
+        requested_count = 1 if active_backend == "openai" else self.count
+        logger.info(
+            "image_generation start thread_id=%s backend=%s model=%s count=%s",
+            thread_id,
+            active_backend,
+            self.resolve_model() or "<unset>",
+            requested_count,
+        )
+
+        if active_backend == "openai":
+            urls = await self._generate_images_with_openai(prompt=prompt)
+        else:
+            urls = await self._generate_images_with_dashscope(
+                request=request,
+                prompt=prompt,
+            )
+
+        if not urls:
+            return []
+
+        return await self._persist_generated_images(
+            urls=urls,
+            user_id=user_id,
+            thread_id=thread_id,
+        )
+
+    async def _generate_images_with_dashscope(
+        self,
+        *,
+        request: MediaChatRequest,
+        prompt: str,
+    ) -> list[str]:
+        if _is_wanx_v1_model(self.dashscope_model):
+            payload = {
+                "model": self.dashscope_model,
+                "input": {
+                    "prompt": prompt,
+                },
+                "parameters": {
+                    "size": _resolve_dashscope_platform_size(
+                        request.platform,
+                        model_name=self.dashscope_model,
+                    ),
+                    "n": self.count,
+                },
+            }
+            return await self._generate_images_with_dashscope_async_task(
+                payload,
+                endpoint_path="/services/aigc/text2image/image-synthesis",
+            )
+
+        payload = {
+            "model": self.dashscope_model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt,
+                            }
+                        ],
+                    }
+                ]
+            },
+            "parameters": {
+                "size": _resolve_dashscope_platform_size(
+                    request.platform,
+                    model_name=self.dashscope_model,
+                ),
+                "n": self.count,
+            },
+        }
+
+        if self._should_use_dashscope_async_task():
+            return await self._generate_images_with_dashscope_async_task(payload)
+        return await self._generate_images_with_dashscope_sync(payload)
+
+    def _should_use_dashscope_async_task(self) -> bool:
+        normalized_model = self.dashscope_model.strip().lower()
+        return normalized_model.startswith("wan")
+
+    async def _generate_images_with_dashscope_sync(
+        self,
+        payload: dict[str, object],
+    ) -> list[str]:
+        endpoint = (
+            f"{self.dashscope_base_url.rstrip('/')}"
+            "/services/aigc/multimodal-generation/generation"
+        )
+        response = await self._request_dashscope_json(
+            "POST",
+            endpoint,
+            json=payload,
+        )
+        if response is None:
+            return []
+        return _extract_dashscope_image_urls(response)
+
+    async def _generate_images_with_dashscope_async_task(
+        self,
+        payload: dict[str, object],
+        *,
+        endpoint_path: str = "/services/aigc/image-generation/generation",
+    ) -> list[str]:
+        endpoint = f"{self.dashscope_base_url.rstrip('/')}{endpoint_path}"
+        response = await self._request_dashscope_json(
+            "POST",
+            endpoint,
+            headers={"X-DashScope-Async": "enable"},
+            json=payload,
+        )
+        if response is None:
+            return []
+        task_id = str(((response.get("output") or {}).get("task_id") or "")).strip()
+        if not task_id:
+            raise RuntimeError("DashScope image generation did not return a task_id.")
+
+        max_attempts = max(1, int(self.timeout_seconds / self.poll_interval_seconds))
+        for _ in range(max_attempts):
+            await asyncio.sleep(self.poll_interval_seconds)
+            task_payload = await self._request_dashscope_json(
+                "GET",
+                f"{self.dashscope_base_url.rstrip('/')}/tasks/{task_id}",
+            )
+            if task_payload is None:
+                continue
+            task_output = task_payload.get("output")
+            if not isinstance(task_output, dict):
+                continue
+
+            task_status = str(task_output.get("task_status", "")).strip().upper()
+            if task_status in {"SUCCEEDED", "SUCCESS"}:
+                urls = _extract_dashscope_image_urls(task_payload)
+                if urls:
+                    return urls
+                break
+            if task_status in {"FAILED", "CANCELED", "CANCELLED"}:
+                raise RuntimeError(
+                    str(
+                        task_output.get("message")
+                        or task_output.get("task_message")
+                        or "DashScope image task failed."
+                    ),
+                )
+
+        raise RuntimeError("DashScope image generation task timed out.")
+
+    async def _request_dashscope_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        json: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        request_headers = {
+            "Authorization": f"Bearer {self.dashscope_api_key}",
+            "Content-Type": "application/json",
+        }
+        if headers:
+            request_headers.update(headers)
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.request_timeout,
+                follow_redirects=True,
+            ) as client:
+                response = await client.request(
+                    method,
+                    url,
+                    headers=request_headers,
+                    json=json,
+                )
+                _read_response_text(response)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            response_text = _read_response_text(exc.response)
+            raise RuntimeError(
+                "DashScope image generation HTTP request failed: "
+                f"{exc}; response={response_text}",
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"DashScope image generation request failed: {exc}",
+            ) from exc
+
+        return _parse_image_generation_response_json(
+            response,
+            provider_name="DashScope",
+        )
+
+    async def _generate_images_with_openai(
+        self,
+        *,
+        prompt: str,
+    ) -> list[str]:
+        if self._should_use_openai_chat_completions():
+            return await self._generate_images_with_openai_chat_completions(prompt=prompt)
+        return await self._generate_images_with_openai_images_api(prompt=prompt)
+
+    def _should_use_openai_chat_completions(self) -> bool:
+        normalized_model = self.openai_settings.model.strip().lower()
+        return normalized_model == "gpt-image-2"
+
+    async def _generate_images_with_openai_chat_completions(
+        self,
+        *,
+        prompt: str,
+    ) -> list[str]:
+        endpoint = f"{self.openai_settings.base_url.rstrip('/')}/chat/completions"
+        payload = {
+            "model": self.openai_settings.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {self.openai_settings.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.request_timeout,
+                follow_redirects=True,
+            ) as client:
+                response = await client.post(
+                    endpoint,
+                    headers=headers,
+                    json=payload,
+                )
+                _read_response_text(response)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            response_text = _read_response_text(exc.response)
+            raise RuntimeError(
+                "OpenAI-compatible chat-completions image request failed: "
+                f"{exc}; response={response_text}",
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"OpenAI-compatible chat-completions image request failed: {exc}",
+            ) from exc
+
+        data = _parse_image_generation_response_json(
+            response,
+            provider_name="OpenAI-compatible",
+        )
+        if data is None:
+            return []
+
+        logger.info("OpenAI-compatible chat-completions raw response: %s", data)
+
+        if isinstance(data.get("error"), dict):
+            logger.error("OpenAI-compatible chat-completions error response: %s", data)
+            error = data["error"]
+            raise RuntimeError(
+                str(
+                    error.get("message")
+                    or error.get("code")
+                    or "OpenAI-compatible chat-completions image generation failed."
+                ),
+            )
+
+        urls = _extract_openai_chat_completion_image_urls(data)
+        if not urls:
+            urls = _extract_openai_image_urls(data)
+        if not urls:
+            logger.error(
+                "OpenAI-compatible chat-completions returned no usable image references: %s",
+                data,
+            )
+            raise RuntimeError(
+                "OpenAI-compatible chat-completions returned no image URLs.",
+            )
+        return urls
+
+    async def _generate_images_with_openai_images_api(
+        self,
+        *,
+        prompt: str,
+    ) -> list[str]:
+        endpoint = f"{self.openai_settings.base_url.rstrip('/')}/images/generations"
+        payload = {
+            "model": self.openai_settings.model,
+            "prompt": prompt,
+            "n": 1,
+            "size": OPENAI_COMPATIBLE_IMAGE_SIZE,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.openai_settings.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.request_timeout,
+                follow_redirects=True,
+            ) as client:
+                response = await client.post(
+                    endpoint,
+                    headers=headers,
+                    json=payload,
+                )
+                _read_response_text(response)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            response_text = _read_response_text(exc.response)
+            raise RuntimeError(
+                "OpenAI-compatible image generation HTTP request failed: "
+                f"{exc}; response={response_text}",
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"OpenAI-compatible image generation request failed: {exc}",
+            ) from exc
+
+        data = _parse_image_generation_response_json(
+            response,
+            provider_name="OpenAI-compatible",
+        )
+        if data is None:
+            return []
+
+        logger.info("OpenAI-compatible image generation raw response: %s", data)
+
+        if isinstance(data.get("error"), dict):
+            logger.error("OpenAI-compatible image generation error response: %s", data)
+            error = data["error"]
+            raise RuntimeError(
+                str(error.get("message") or error.get("code") or "OpenAI-compatible image generation failed."),
+            )
+
+        urls = _extract_openai_image_urls(data)
+        if not urls:
+            logger.error("OpenAI-compatible image generation returned no usable image references: %s", data)
+            raise RuntimeError(
+                "OpenAI-compatible image generation returned no image URLs.",
+            )
+        return urls
+
+    async def _persist_generated_images(
+        self,
+        *,
+        urls: list[str],
+        user_id: str | None,
+        thread_id: str,
+    ) -> list[str]:
+        if not self.persist_results or not user_id:
+            return urls
+
+        try:
+            storage_client = create_storage_client()
+        except RuntimeError as exc:  # pragma: no cover - environment-specific fallback
+            logger.warning("Image storage persistence skipped: %s", exc)
+            return urls
+
+        persisted_urls: list[str] = []
+        async with httpx.AsyncClient(
+            timeout=self.request_timeout,
+            follow_redirects=True,
+        ) as client:
+            for index, url in enumerate(urls, start=1):
+                try:
+                    if url.startswith("data:image/"):
+                        image_bytes, content_type = _decode_data_image_url(url)
+                    else:
+                        response = await client.get(url)
+                        response.raise_for_status()
+                        image_bytes = response.content
+                        if not image_bytes:
+                            raise RuntimeError("Generated image content is empty.")
+
+                        content_type = (
+                            response.headers.get("content-type", "").split(";", 1)[0].strip()
+                            or "image/png"
+                        )
+                    extension = _resolve_extension(
+                        source_url=url,
+                        content_type=content_type,
+                    )
+                    filename = f"generated/{thread_id}/{uuid.uuid4().hex}-{index}.{extension}"
+                    stored_upload = await storage_client.upload_file(
+                        user_id=user_id,
+                        filename=filename,
+                        content_type=content_type,
+                        data=image_bytes,
+                    )
+                    stored_path = build_stored_file_path(
+                        stored_upload.backend_name,
+                        stored_upload.object_key,
+                    )
+                    persisted_urls.append(build_delivery_url_from_stored_path(stored_path))
+                except Exception as exc:  # pragma: no cover - network/storage fallback
+                    logger.warning("Generated image persistence failed for %s: %s", url, exc)
+                    persisted_urls.append(url)
+
+        return persisted_urls
+
+    def _has_dashscope_config(self) -> bool:
+        return bool(self.dashscope_api_key and self.dashscope_base_url and self.dashscope_model)
+
+    def _has_openai_config(self) -> bool:
+        return bool(
+            self.openai_settings.api_key
+            and self.openai_settings.base_url
+            and self.openai_settings.model
+        )
+
+    def _get_prompt_client(self) -> AsyncOpenAI:
+        if self._prompt_client is None:
+            self._prompt_client = AsyncOpenAI(
+                api_key=self.prompt_api_key,
+                base_url=self.prompt_base_url,
+                timeout=self.prompt_timeout,
+            )
+        return self._prompt_client
+
+
+DashScopeImageGenerationService = ImageGenerationService
+
+
+def build_cover_image_prompt(
+    *,
+    request: MediaChatRequest,
+    draft: str,
+    artifact_candidate: dict[str, object] | None,
+) -> str:
+    return _build_heuristic_cover_prompt(
+        request=request,
+        draft=draft,
+        artifact_candidate=artifact_candidate,
+    )

@@ -42,6 +42,7 @@ from app.models.schemas import (
     MaterialInput,
     MaterialType,
     MediaChatRequest,
+    Platform,
     TaskType,
     TopicPlanningArtifactPayload,
     TopicPlanningItem,
@@ -55,6 +56,7 @@ from app.services.knowledge_base import (
     get_knowledge_base_service,
     normalize_knowledge_base_scope,
 )
+from app.services.image_generation import DashScopeImageGenerationService
 from app.services.media_parser import MediaParserError, parse_document, transcribe_video
 from app.services.persistence import extract_upload_relative_path
 from app.services.providers import (
@@ -70,6 +72,14 @@ from app.services.tools import execute_business_tool, get_business_tools
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
+ImagePromptBuilder = Callable[
+    [MediaChatRequest, str, dict[str, object] | None],
+    Awaitable[str] | str,
+]
+ImageGenerator = Callable[
+    [MediaChatRequest, str, str | None, str],
+    Awaitable[list[str]] | list[str],
+]
 
 
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
@@ -163,6 +173,8 @@ class GraphState(TypedDict, total=False):
     knowledge_base_scope: str
     knowledge_base_context: str
     artifact_fallback_reason: str | None
+    image_generation_prompt: str
+    generated_images: list[str]
 
 
 class SearchRouteDecision(BaseModel):
@@ -207,6 +219,8 @@ class LangGraphProvider(BaseLLMProvider):
         route_analyzer: Callable[[MediaChatRequest], Awaitable[SearchRouteDecision | dict[str, object]]] | None = None,
         vision_analyzer: Callable[[MediaChatRequest], Awaitable[list[str]]] | None = None,
         search_analyzer: Callable[..., Awaitable[object]] | None = None,
+        image_prompt_builder: ImagePromptBuilder | None = None,
+        image_generator: ImageGenerator | None = None,
         vision_model: str | None = None,
         vision_timeout_seconds: float | None = None,
         search_timeout_seconds: float | None = None,
@@ -217,6 +231,9 @@ class LangGraphProvider(BaseLLMProvider):
         self.route_analyzer = route_analyzer
         self.vision_analyzer = vision_analyzer
         self.search_analyzer = search_analyzer
+        self.image_service = DashScopeImageGenerationService()
+        self.image_prompt_builder = image_prompt_builder
+        self.image_generator = image_generator
         self.vision_model = _resolve_vision_model(vision_model)
         self.vision_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.vision_base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
@@ -255,6 +272,8 @@ class LangGraphProvider(BaseLLMProvider):
             route_analyzer=self.route_analyzer,
             vision_analyzer=self.vision_analyzer,
             search_analyzer=self.search_analyzer,
+            image_prompt_builder=self.image_prompt_builder,
+            image_generator=self.image_generator,
             vision_model=self.vision_model,
             vision_timeout_seconds=self.vision_timeout_seconds,
             search_timeout_seconds=self.search_timeout_seconds,
@@ -331,6 +350,8 @@ class LangGraphProvider(BaseLLMProvider):
             "knowledge_base_scope": "",
             "knowledge_base_context": "",
             "artifact_fallback_reason": None,
+            "image_generation_prompt": "",
+            "generated_images": [],
         }
 
         try:
@@ -363,6 +384,7 @@ class LangGraphProvider(BaseLLMProvider):
         graph.add_node("generate_draft_node", self._generate_draft_node)
         graph.add_node("tool_execution_node", self._tool_execution_node)
         graph.add_node("review_node", self._review_node)
+        graph.add_node("generate_image_node", self._generate_image_node)
         graph.add_node("format_artifact_node", self._format_artifact_node)
 
         graph.add_edge(START, "router")
@@ -403,9 +425,11 @@ class LangGraphProvider(BaseLLMProvider):
             self._route_after_review,
             {
                 "generate_draft_node": "generate_draft_node",
+                "generate_image_node": "generate_image_node",
                 "format_artifact_node": "format_artifact_node",
             },
         )
+        graph.add_edge("generate_image_node", "format_artifact_node")
         graph.add_edge("format_artifact_node", END)
 
         return graph.compile()
@@ -1018,12 +1042,174 @@ class LangGraphProvider(BaseLLMProvider):
 
     def _route_after_review(self, state: GraphState) -> str:
         next_route = state.get("next_route", "format_artifact_node")
+        resolved_route = next_route
+        if next_route == "format_artifact_node" and _should_generate_cover_images(state):
+            resolved_route = "generate_image_node"
         logger.info(
             "langgraph route=after_review thread_id=%s next=%s",
             state["request"].thread_id,
-            next_route,
+            resolved_route,
         )
-        return next_route
+        return resolved_route
+
+    async def _generate_image_node(self, state: GraphState) -> GraphState:
+        request = state["request"]
+        if not _should_generate_cover_images(state):
+            return {"current_step": "generate_image:ineligible"}
+
+        writer = get_stream_writer()
+        if not self._is_image_generation_available():
+            return {"current_step": "generate_image:disabled"}
+
+        if self.image_generator is not None:
+            logger.info(
+                "langgraph node=generate_image thread_id=%s backend=custom model=<injected>",
+                request.thread_id,
+            )
+        else:
+            logger.info(
+                "langgraph node=generate_image thread_id=%s backend=%s model=%s",
+                request.thread_id,
+                self.image_service.resolve_backend(),
+                self.image_service.resolve_model() or "<unset>",
+            )
+
+        draft_text = state.get("current_draft", "").strip() or str(
+            (state.get("artifact_candidate") or {}).get("body", ""),
+        ).strip()
+        if not draft_text:
+            return {"current_step": "generate_image:no_draft"}
+
+        _emit_tool_call(
+            writer,
+            name="build_image_prompt",
+            status="processing",
+            message="正在提炼封面配图提示词...",
+        )
+        try:
+            prompt = await self._build_image_prompt_for_state(state)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Image prompt generation failed for thread_id=%s: %s",
+                request.thread_id,
+                exc,
+            )
+            _emit_tool_call(
+                writer,
+                name="build_image_prompt",
+                status="failed",
+                message=f"配图提示词生成失败，已跳过配图：{exc}",
+            )
+            return {"current_step": "generate_image:prompt_failed"}
+
+        if not prompt.strip():
+            _emit_tool_call(
+                writer,
+                name="build_image_prompt",
+                status="skipped",
+                message="未生成有效的配图提示词，已继续交付正文。",
+            )
+            return {"current_step": "generate_image:prompt_skipped"}
+
+        _emit_tool_call(
+            writer,
+            name="build_image_prompt",
+            status="completed",
+            message="封面配图提示词已准备完成。",
+        )
+        _emit_tool_call(
+            writer,
+            name="generate_cover_images",
+            status="processing",
+            message="正在生成内容配图...",
+        )
+
+        try:
+            generated_images = await self._generate_images_for_state(
+                state,
+                prompt=prompt,
+            )
+        except Exception as exc:  # pragma: no cover - provider fallback
+            logger.warning(
+                "Image generation failed for thread_id=%s: %s",
+                request.thread_id,
+                exc,
+            )
+            _emit_tool_call(
+                writer,
+                name="generate_cover_images",
+                status="failed",
+                message=f"配图生成失败，正文已继续交付：{exc}",
+            )
+            return {
+                "image_generation_prompt": prompt,
+                "generated_images": [],
+                "current_step": "generate_image:failed",
+            }
+
+        if not generated_images:
+            _emit_tool_call(
+                writer,
+                name="generate_cover_images",
+                status="skipped",
+                message="当前未生成到可用配图，已继续交付正文。",
+            )
+            return {
+                "image_generation_prompt": prompt,
+                "generated_images": [],
+                "current_step": "generate_image:empty",
+            }
+
+        _emit_tool_call(
+            writer,
+            name="generate_cover_images",
+            status="completed",
+            message=f"已生成 {len(generated_images)} 张内容配图。",
+        )
+        return {
+            "image_generation_prompt": prompt,
+            "generated_images": generated_images,
+            "current_step": "generate_image:completed",
+        }
+
+    def _is_image_generation_available(self) -> bool:
+        return self.image_generator is not None or self.image_service.is_enabled()
+
+    async def _build_image_prompt_for_state(self, state: GraphState) -> str:
+        request = state["request"]
+        builder = self.image_prompt_builder or self.image_service.build_prompt
+        prompt = builder(
+            request=request,
+            draft=state.get("current_draft", ""),
+            artifact_candidate=state.get("artifact_candidate"),
+        )
+        if inspect.isawaitable(prompt):
+            prompt = await prompt
+        return str(prompt or "").strip()
+
+    async def _generate_images_for_state(
+        self,
+        state: GraphState,
+        *,
+        prompt: str,
+    ) -> list[str]:
+        request = state["request"]
+        generator = self.image_generator or self.image_service.generate_images
+        generated_images = generator(
+            request=request,
+            prompt=prompt,
+            user_id=state.get("user_id"),
+            thread_id=request.thread_id,
+        )
+        if inspect.isawaitable(generated_images):
+            generated_images = await generated_images
+
+        normalized_urls: list[str] = []
+        for item in generated_images or []:
+            normalized = str(item or "").strip()
+            if normalized:
+                normalized_urls.append(normalized)
+        return normalized_urls
 
     async def _format_artifact_node(self, state: GraphState) -> GraphState:
         if state.get("error") is not None:
@@ -1045,12 +1231,18 @@ class LangGraphProvider(BaseLLMProvider):
         validation_errors = list(state.get("validation_errors", []))
         artifact_payload: dict[str, object] | None = None
         artifact_fallback_reason = str(state.get("artifact_fallback_reason") or "").strip()
+        generated_images = _normalize_generated_images(state.get("generated_images"))
 
         candidate = state.get("artifact_candidate")
         if isinstance(candidate, dict):
             try:
                 artifact = _validate_artifact_candidate(request, candidate)
                 artifact_payload = artifact.model_dump(mode="json")
+                if artifact_payload.get("artifact_type") == "content_draft":
+                    artifact_payload["generated_images"] = _merge_generated_images(
+                        artifact_payload.get("generated_images"),
+                        generated_images,
+                    )
             except ValidationError as exc:
                 validation_errors.append(str(exc))
                 _emit_tool_call(writer, name="format_artifact", status="fallback")
@@ -1068,6 +1260,7 @@ class LangGraphProvider(BaseLLMProvider):
                 draft=state.get("current_draft", ""),
                 materials_parsed=state.get("materials_parsed", []),
                 degraded_from_provider_error=bool(artifact_fallback_reason),
+                generated_images=generated_images,
             )
             artifact_payload = artifact.model_dump(mode="json")
 
@@ -2156,6 +2349,19 @@ def _resolve_review_prompt(state: GraphState) -> str:
     return ""
 
 
+def _should_generate_cover_images(state: GraphState) -> bool:
+    request = state["request"]
+    if request.task_type != TaskType.CONTENT_GENERATION:
+        return False
+    if request.platform not in {Platform.XIAOHONGSHU, Platform.DOUYIN}:
+        return False
+
+    draft_text = state.get("current_draft", "").strip() or str(
+        (state.get("artifact_candidate") or {}).get("body", ""),
+    ).strip()
+    return bool(draft_text)
+
+
 def _resolve_knowledge_base_scope_from_state(state: GraphState) -> str:
     thread = state.get("thread")
     if thread is not None:
@@ -2253,12 +2459,34 @@ def _validate_artifact_candidate(
     return CommentReplyArtifactPayload.model_validate(candidate)
 
 
+def _normalize_generated_images(raw_urls: object) -> list[str]:
+    if not isinstance(raw_urls, list):
+        return []
+
+    normalized_urls: list[str] = []
+    for item in raw_urls:
+        normalized = str(item or "").strip()
+        if normalized:
+            normalized_urls.append(normalized)
+    return normalized_urls
+
+
+def _merge_generated_images(existing: object, incoming: list[str]) -> list[str]:
+    merged_urls: list[str] = []
+    for source in (_normalize_generated_images(existing), incoming):
+        for url in source:
+            if url not in merged_urls:
+                merged_urls.append(url)
+    return merged_urls
+
+
 def _build_fallback_artifact(
     *,
     request: MediaChatRequest,
     draft: str,
     materials_parsed: list[str],
     degraded_from_provider_error: bool = False,
+    generated_images: list[str] | None = None,
 ) -> BaseModel:
     supporting_context = "；".join(materials_parsed[:2]) if materials_parsed else "无补充素材"
 
@@ -2310,6 +2538,7 @@ def _build_fallback_artifact(
                 if degraded_from_provider_error
                 else "如果你愿意，我可以继续把这版草稿改写成小红书图文版或抖音口播版。"
             ),
+            generated_images=list(generated_images or []),
         )
 
     if request.task_type == TaskType.HOT_POST_ANALYSIS:

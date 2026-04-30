@@ -204,6 +204,10 @@ class ContentGenerationArtifactPayload(ArtifactPayload):
     )
     body: str = Field(..., description="Draft body.")
     platform_cta: str = Field(..., description="Platform-specific CTA.")
+    generated_images: list[str] = Field(
+        default_factory=list,
+        description="Backend-generated cover or supporting image URLs. Models should leave this empty.",
+    )
 
 
 class HotPostAnalysisDimension(SchemaModel):

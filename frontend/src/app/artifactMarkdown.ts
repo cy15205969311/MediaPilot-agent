@@ -6,10 +6,7 @@ type ArtifactMarkdownOptions = {
 };
 
 function sanitizeFilename(value: string): string {
-  return value
-    .replace(/[\\/:*?"<>|]+/g, "-")
-    .replace(/\s+/g, " ")
-    .trim();
+  return value.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
 }
 
 function joinSections(sections: string[]): string {
@@ -26,8 +23,20 @@ function buildContentGenerationMarkdown(artifact: ArtifactPayload): string {
       ? artifact.title_candidates.map((title) => `- ${title}`).join("\n")
       : "- 暂无标题候选";
 
+  const generatedImages = artifact.generated_images ?? [];
+  const imageSection =
+    generatedImages.length > 0
+      ? joinSections([
+          "## 配图",
+          generatedImages
+            .map((url, index) => `![AI 配图 ${index + 1}](${url})`)
+            .join("\n\n"),
+        ]).trim()
+      : "";
+
   return joinSections([
     `# ${artifact.title}`,
+    imageSection,
     "## 标题候选",
     titleCandidates,
     "## 正文",
@@ -43,13 +52,12 @@ function buildTopicPlanningMarkdown(artifact: ArtifactPayload): string {
   }
 
   const topics = artifact.topics
-    .map(
-      (topic, index) =>
-        [
-          `## 选题 ${index + 1}：${topic.title}`,
-          `- 切入角度：${topic.angle}`,
-          `- 预期目标：${topic.goal}`,
-        ].join("\n"),
+    .map((topic, index) =>
+      [
+        `## 选题 ${index + 1}：${topic.title}`,
+        `- 切入角度：${topic.angle}`,
+        `- 预期目标：${topic.goal}`,
+      ].join("\n"),
     )
     .join("\n\n");
 
@@ -62,10 +70,7 @@ function buildHotPostAnalysisMarkdown(artifact: ArtifactPayload): string {
   }
 
   const analysisDimensions = artifact.analysis_dimensions
-    .map(
-      (item) =>
-        [`## ${item.dimension}`, item.insight].join("\n\n"),
-    )
+    .map((item) => [`## ${item.dimension}`, item.insight].join("\n\n"))
     .join("\n\n");
 
   const reusableTemplates =

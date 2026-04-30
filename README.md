@@ -291,3 +291,11 @@ npx playwright test --ui
 - 文本会在入库前自动切块，然后按 `user_id + scope + source` 维度持久化，避免不同用户之间的知识串库
 - `knowledge_base_scope` 仍然可以从模板一路透传到线程；当线程命中对应 Scope 时，LangGraph 会在最终生成前自动检索并注入相关上下文
 - 当前实现优先使用 Chroma 持久化向量集合，同时保留本地 JSON fallback，便于本地开发和低依赖环境运行
+## 13. Image Generation Artifacts
+
+- Content-generation artifacts can now carry `generated_images`, allowing the right-side panel to render AI-created cover images alongside the draft body.
+- LangGraph inserts a non-blocking image node after review and before artifact formatting. If image generation fails, the text artifact still completes normally.
+- The image pipeline now supports a multi-backend gateway. Set `IMAGE_GENERATION_BACKEND` to `dashscope`, `openai`, or `disabled` depending on which provider should render the images.
+- DashScope image generation remains opt-in. Set `IMAGE_GENERATION_BACKEND=dashscope` and keep using your existing DashScope-compatible credentials to enable the flow.
+- OpenAI-compatible image providers are also supported. Configure `OPENAI_IMAGE_BASE_URL`, `OPENAI_IMAGE_API_KEY`, and `OPENAI_IMAGE_MODEL` to route generation through services such as `https://www.onetopai.asia/v1` with models like `gpt-image-2`; this path uses a direct `httpx` `/images/generations` request so non-standard gateway JSON can be logged and parsed without relying on the official image SDK response shape.
+- Generated image URLs are downloaded and re-saved into the active storage backend when possible, so artifact previews are not tied to temporary upstream URLs.

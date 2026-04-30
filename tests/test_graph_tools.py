@@ -68,6 +68,33 @@ class StructuringFailureProvider(BaseLLMProvider):
         yield {"event": "done", "thread_id": request.thread_id}
 
 
+class ImageReadyProvider(BaseLLMProvider):
+    async def generate_stream(self, request, **kwargs):
+        yield {
+            "event": "start",
+            "thread_id": request.thread_id,
+            "platform": request.platform.value,
+            "task_type": request.task_type.value,
+            "materials_count": len(request.materials),
+        }
+        yield {
+            "event": "message",
+            "delta": "这是已经完成结构化的正文草稿，会继续进入配图节点。",
+            "index": 0,
+        }
+        yield {
+            "event": "artifact",
+            "artifact": {
+                "artifact_type": "content_draft",
+                "title": "图文成稿",
+                "title_candidates": ["标题 A", "标题 B", "标题 C"],
+                "body": "这里是一段适合继续生成封面图的正文草稿，包含明确主题和情绪线索。",
+                "platform_cta": "欢迎继续把这版内容细化成最终发布稿。",
+            },
+        }
+        yield {"event": "done", "thread_id": request.thread_id}
+
+
 async def collect_events(
     provider: LangGraphProvider,
     request: MediaChatRequest,
@@ -636,3 +663,88 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
     assert "[1] 餐饮探店方法论.docx" in inner_provider.last_request_system_prompt
     assert "[2] 品牌语气手册.md" in inner_provider.last_request_system_prompt
     assert inner_provider.last_request_system_prompt.count("[1] (餐饮探店方法论.docx)") == 2
+def test_langgraph_attaches_generated_images_to_content_artifact():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-image-generation",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请把这段内容整理成适合小红书发布的图文草稿。",
+            "materials": [],
+        }
+    )
+
+    async def fake_prompt_builder(*, request, draft, artifact_candidate):
+        assert request.platform.value == "xiaohongshu"
+        assert draft
+        assert artifact_candidate is not None
+        return "为这篇小红书内容生成一张明亮、真实、有点击欲的封面图。"
+
+    async def fake_image_generator(*, request, prompt, user_id, thread_id):
+        assert request.thread_id == thread_id
+        assert user_id is None
+        assert "封面图" in prompt
+        return [
+            "https://example.com/generated-cover-1.png",
+            "https://example.com/generated-cover-2.png",
+        ]
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        image_prompt_builder=fake_prompt_builder,
+        image_generator=fake_image_generator,
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    tool_call_names = [
+        str(event["name"]) for event in events if event["event"] == "tool_call"
+    ]
+    assert "build_image_prompt" in tool_call_names
+    assert "generate_cover_images" in tool_call_names
+
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    assert artifact.generated_images == [
+        "https://example.com/generated-cover-1.png",
+        "https://example.com/generated-cover-2.png",
+    ]
+
+
+def test_langgraph_keeps_text_artifact_when_image_generation_fails():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-image-generation-failure",
+            "platform": "douyin",
+            "task_type": "content_generation",
+            "message": "帮我整理成抖音图文草稿。",
+            "materials": [],
+        }
+    )
+
+    async def fake_prompt_builder(*, request, draft, artifact_candidate):
+        return "一张适合抖音首屏的高冲击封面图。"
+
+    async def failing_image_generator(*, request, prompt, user_id, thread_id):
+        raise RuntimeError("image provider boom")
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        image_prompt_builder=fake_prompt_builder,
+        image_generator=failing_image_generator,
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    assert not any(event["event"] == "error" for event in events)
+    failed_image_events = [
+        event
+        for event in events
+        if event["event"] == "tool_call" and event["name"] == "generate_cover_images"
+    ]
+    assert failed_image_events[-1]["status"] == "failed"
+
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    assert artifact.artifact_type == "content_draft"
+    assert artifact.generated_images == []

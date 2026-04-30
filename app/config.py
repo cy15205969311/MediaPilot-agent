@@ -21,6 +21,13 @@ class OSSSettings:
     region: str
 
 
+@dataclass(frozen=True)
+class OpenAIImageSettings:
+    base_url: str
+    api_key: str
+    model: str
+
+
 def load_environment() -> Path | None:
     global _DOTENV_MTIME_NS, _DOTENV_MANAGED_KEYS
 
@@ -140,4 +147,24 @@ def get_oss_settings(*, required: bool = False) -> OSSSettings | None:
         bucket_name=bucket_name,
         public_base_url=public_base_url,
         region=region,
+    )
+
+
+def get_openai_image_settings() -> OpenAIImageSettings:
+    load_environment()
+
+    base_url = (
+        os.getenv("OPENAI_IMAGE_BASE_URL", "").strip()
+        or "https://www.onetopai.asia/v1"
+    )
+    api_key = (
+        os.getenv("OPENAI_IMAGE_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
+    model = os.getenv("OPENAI_IMAGE_MODEL", "").strip() or "gpt-image-2"
+
+    return OpenAIImageSettings(
+        base_url=base_url.rstrip("/"),
+        api_key=api_key,
+        model=model,
     )

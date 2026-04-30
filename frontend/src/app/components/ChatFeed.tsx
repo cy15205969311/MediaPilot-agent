@@ -239,6 +239,13 @@ function renderMessageMaterials(item: ConversationMessage) {
   );
 }
 
+function getArtifactGeneratedImages(artifact: ArtifactPayload | null): string[] {
+  if (!artifact || artifact.artifact_type !== "content_draft") {
+    return [];
+  }
+  return artifact.generated_images ?? [];
+}
+
 function ThinkingPanel({
   steps,
   isStreaming,
@@ -457,6 +464,8 @@ export function ChatFeed({
           Boolean(artifact) &&
           Boolean(onSaveArtifactAsTemplate) &&
           item.id === latestAssistantMessageId;
+        const artifactGeneratedImages =
+          item.role === "assistant" ? getArtifactGeneratedImages(item.artifact ?? null) : [];
         const shouldRenderAssistantActions =
           canCopyAssistantMessage || canSaveArtifactAsTemplate;
 
@@ -512,6 +521,42 @@ export function ChatFeed({
                     </span>
                   )}
                 </div>
+                {artifactGeneratedImages.length > 0 ? (
+                  <div className="mt-4">
+                    <div
+                      className={`grid max-w-md gap-2 ${
+                        artifactGeneratedImages.length === 1
+                          ? "grid-cols-1"
+                          : artifactGeneratedImages.length === 2
+                            ? "grid-cols-2"
+                            : "grid-cols-2 sm:grid-cols-3"
+                      }`}
+                      data-testid="chat-artifact-image-gallery"
+                    >
+                      {artifactGeneratedImages.map((imageUrl, index) => (
+                        <a
+                          key={`${imageUrl}-${index}`}
+                          className="group overflow-hidden rounded-lg border border-border/60 bg-card/70 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                          data-testid={`chat-artifact-image-card-${index + 1}`}
+                          href={imageUrl}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          <img
+                            alt={`AI generated image ${index + 1}`}
+                            className={`w-full object-cover transition duration-200 group-hover:scale-[1.02] ${
+                              artifactGeneratedImages.length === 1
+                                ? "aspect-[4/5]"
+                                : "aspect-square"
+                            }`}
+                            loading="lazy"
+                            src={imageUrl}
+                          />
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 {shouldRenderAssistantActions ? (
                   <div className="mt-3 flex items-center justify-end gap-2 border-t border-border/50 pt-2">
                     {canCopyAssistantMessage ? (

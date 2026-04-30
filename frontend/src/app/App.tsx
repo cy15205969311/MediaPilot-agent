@@ -164,6 +164,8 @@ function getToolCallFallbackMessage(name: string, status: string): string {
     generate_content_outline: "生成内容大纲",
     generate_draft: "生成正文草稿",
     review_draft: "审查草稿质量",
+    build_image_prompt: "提炼配图提示词",
+    generate_cover_images: "生成内容配图",
     format_artifact: "整理结构化产物",
   };
   const statusLabelMap: Record<string, string> = {
@@ -228,16 +230,36 @@ function toConversationMessages(messages: HistoryMessageItem[]): {
   latestArtifact: ArtifactPayload | null;
 } {
   let latestArtifact: ArtifactPayload | null = null;
+  const chatMessages: ConversationMessage[] = [];
 
-  const chatMessages = messages
-    .filter((message) => {
-      if (message.message_type === "artifact" && message.artifact) {
-        latestArtifact = message.artifact;
-        return false;
+  for (const message of messages) {
+    if (message.message_type === "artifact" && message.artifact) {
+      latestArtifact = message.artifact;
+      const latestAssistantIndex = [...chatMessages]
+        .map((item, index) => ({ item, index }))
+        .reverse()
+        .find(({ item }) => item.role === "assistant")?.index;
+
+      if (latestAssistantIndex !== undefined) {
+        chatMessages[latestAssistantIndex] = {
+          ...chatMessages[latestAssistantIndex],
+          artifact: message.artifact,
+        };
+      } else {
+        chatMessages.push(
+          createConversationMessage({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            createdAt: message.created_at,
+            artifact: message.artifact,
+          }),
+        );
       }
-      return true;
-    })
-    .map((message) =>
+      continue;
+    }
+
+    chatMessages.push(
       createConversationMessage({
         id: message.id,
         role: message.role,
@@ -250,6 +272,7 @@ function toConversationMessages(messages: HistoryMessageItem[]): {
         createdAt: message.created_at,
       }),
     );
+  }
 
   return { chatMessages, latestArtifact };
 }
@@ -1205,6 +1228,35 @@ function App() {
         return current;
       }
       return current.filter((item) => item.id !== assistantId);
+    });
+  };
+
+  const attachArtifactToLatestAssistantMessage = (nextArtifact: ArtifactPayload) => {
+    const assistantId = assistantMessageIdRef.current;
+
+    setMessages((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+
+      if (assistantId) {
+        return current.map((item) =>
+          item.id === assistantId ? { ...item, artifact: nextArtifact } : item,
+        );
+      }
+
+      const latestAssistantIndex = [...current]
+        .map((item, index) => ({ item, index }))
+        .reverse()
+        .find(({ item }) => item.role === "assistant")?.index;
+
+      if (latestAssistantIndex === undefined) {
+        return current;
+      }
+
+      return current.map((item, index) =>
+        index === latestAssistantIndex ? { ...item, artifact: nextArtifact } : item,
+      );
     });
   };
 
@@ -2457,6 +2509,7 @@ function App() {
         break;
       case "artifact":
         setArtifact(event.artifact);
+        attachArtifactToLatestAssistantMessage(event.artifact);
         setStatusText("结构化结果已更新，可在右侧继续编辑或导出");
         break;
       case "error":
