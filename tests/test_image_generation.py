@@ -94,19 +94,16 @@ def test_image_generation_service_uses_openai_compatible_backend(monkeypatch):
     )
 
     assert captured_client_kwargs["follow_redirects"] is True
-    assert captured_request_kwargs["url"] == "https://www.onetopai.asia/v1/chat/completions"
+    assert captured_request_kwargs["url"] == "https://www.onetopai.asia/v1/images/generations"
     assert captured_request_kwargs["headers"] == {
         "Authorization": "Bearer test-image-key",
         "Content-Type": "application/json",
     }
     assert captured_request_kwargs["json"] == {
         "model": "gpt-image-2",
-        "messages": [
-            {
-                "role": "user",
-                "content": "make a lifestyle cover image",
-            }
-        ],
+        "prompt": "make a lifestyle cover image",
+        "n": 1,
+        "size": "1024x1024",
     }
     assert captured_persist_kwargs == {
         "urls": [
@@ -186,80 +183,6 @@ def test_openai_non_gpt_image_2_still_uses_images_generations(monkeypatch):
         "n": 1,
         "size": "1024x1024",
     }
-
-
-def test_openai_chat_completions_extracts_markdown_image_url(monkeypatch):
-    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
-    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
-    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
-    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
-
-    service = ImageGenerationService()
-
-    class FakeResponse:
-        status_code = 200
-        text = json.dumps(
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "Here is your image: ![cover](https://upstream.example/markdown-cover.png)"
-                        }
-                    }
-                ]
-            }
-        )
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "Here is your image: ![cover](https://upstream.example/markdown-cover.png)"
-                        }
-                    }
-                ]
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr(image_generation_module.httpx, "AsyncClient", FakeAsyncClient)
-
-    request = MediaChatRequest.model_validate(
-        {
-            "thread_id": "thread-openai-markdown-image",
-            "platform": "xiaohongshu",
-            "task_type": "content_generation",
-            "message": "generate a cover image",
-            "materials": [],
-        }
-    )
-
-    result = asyncio.run(
-        service.generate_images(
-            request=request,
-            prompt="make a lifestyle cover image",
-            user_id=None,
-            thread_id=request.thread_id,
-        )
-    )
-
-    assert result == ["https://upstream.example/markdown-cover.png"]
-
 
 def test_openai_image_generation_non_json_response_returns_empty_list(monkeypatch, caplog):
     monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")

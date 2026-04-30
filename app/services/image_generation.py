@@ -352,41 +352,6 @@ def _extract_openai_image_urls(payload: object) -> list[str]:
                 _append_openai_image_reference(urls, item)
 
     return _dedupe_urls(urls)
-
-
-def _extract_openai_chat_completion_image_urls(payload: object) -> list[str]:
-    if not isinstance(payload, dict):
-        return []
-
-    urls: list[str] = []
-    choices = payload.get("choices")
-    if not isinstance(choices, list):
-        return urls
-
-    for choice in choices:
-        if not isinstance(choice, dict):
-            continue
-        message = choice.get("message")
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            urls.extend(re.findall(r"(https?://[^\s\)]+)", content))
-            continue
-        if not isinstance(content, list):
-            continue
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            _append_openai_image_reference(urls, item.get("image"))
-            _append_openai_image_reference(urls, item.get("image_url"))
-            text = item.get("text")
-            if isinstance(text, str):
-                urls.extend(re.findall(r"(https?://[^\s\)]+)", text))
-
-    return _dedupe_urls(urls)
-
-
 def _dedupe_urls(urls: list[str]) -> list[str]:
     deduped_urls: list[str] = []
     seen_urls: set[str] = set()
@@ -799,95 +764,6 @@ class ImageGenerationService:
         *,
         prompt: str,
     ) -> list[str]:
-        if self._should_use_openai_chat_completions():
-            return await self._generate_images_with_openai_chat_completions(prompt=prompt)
-        return await self._generate_images_with_openai_images_api(prompt=prompt)
-
-    def _should_use_openai_chat_completions(self) -> bool:
-        normalized_model = self.openai_settings.model.strip().lower()
-        return normalized_model == "gpt-image-2"
-
-    async def _generate_images_with_openai_chat_completions(
-        self,
-        *,
-        prompt: str,
-    ) -> list[str]:
-        endpoint = f"{self.openai_settings.base_url.rstrip('/')}/chat/completions"
-        payload = {
-            "model": self.openai_settings.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {self.openai_settings.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            async with httpx.AsyncClient(
-                timeout=self.request_timeout,
-                follow_redirects=True,
-            ) as client:
-                response = await client.post(
-                    endpoint,
-                    headers=headers,
-                    json=payload,
-                )
-                _read_response_text(response)
-                response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            response_text = _read_response_text(exc.response)
-            raise RuntimeError(
-                "OpenAI-compatible chat-completions image request failed: "
-                f"{exc}; response={response_text}",
-            ) from exc
-        except Exception as exc:
-            raise RuntimeError(
-                f"OpenAI-compatible chat-completions image request failed: {exc}",
-            ) from exc
-
-        data = _parse_image_generation_response_json(
-            response,
-            provider_name="OpenAI-compatible",
-        )
-        if data is None:
-            return []
-
-        logger.info("OpenAI-compatible chat-completions raw response: %s", data)
-
-        if isinstance(data.get("error"), dict):
-            logger.error("OpenAI-compatible chat-completions error response: %s", data)
-            error = data["error"]
-            raise RuntimeError(
-                str(
-                    error.get("message")
-                    or error.get("code")
-                    or "OpenAI-compatible chat-completions image generation failed."
-                ),
-            )
-
-        urls = _extract_openai_chat_completion_image_urls(data)
-        if not urls:
-            urls = _extract_openai_image_urls(data)
-        if not urls:
-            logger.error(
-                "OpenAI-compatible chat-completions returned no usable image references: %s",
-                data,
-            )
-            raise RuntimeError(
-                "OpenAI-compatible chat-completions returned no image URLs.",
-            )
-        return urls
-
-    async def _generate_images_with_openai_images_api(
-        self,
-        *,
-        prompt: str,
-    ) -> list[str]:
         endpoint = f"{self.openai_settings.base_url.rstrip('/')}/images/generations"
         payload = {
             "model": self.openai_settings.model,
@@ -939,13 +815,21 @@ class ImageGenerationService:
                 str(error.get("message") or error.get("code") or "OpenAI-compatible image generation failed."),
             )
 
-        urls = _extract_openai_image_urls(data)
-        if not urls:
-            logger.error("OpenAI-compatible image generation returned no usable image references: %s", data)
-            raise RuntimeError(
-                "OpenAI-compatible image generation returned no image URLs.",
-            )
-        return urls
+        image_url = ""
+        response_data = data.get("data")
+        if isinstance(response_data, list) and response_data:
+            first_item = response_data[0]
+            if isinstance(first_item, dict):
+                image_url = str(first_item.get("url") or "").strip()
+
+        if image_url:
+            return [image_url]
+
+        logger.error(
+            "OpenAI-compatible image generation returned no standard image URL: %s",
+            data,
+        )
+        return []
 
     async def _persist_generated_images(
         self,

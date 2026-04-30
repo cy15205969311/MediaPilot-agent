@@ -3,7 +3,7 @@
 ## 1. Document Info
 
 - Document: `DEVELOPMENT.md`
-- Current version: `v1.13.33`
+- Current version: `v1.13.34`
 - Updated on: `2026-04-30`
 - Scope: current repository implementation, including backend gateway, dual-token authentication, access-token JTI blacklisting, password-reset recovery flows, password-change-based global access-token revocation, tenant isolation, tracked user-scoped uploads, storage-backend abstraction with local and OSS support, signed delivery URL resolution, managed OSS lifecycle helpers, upload cleanup, scheduled material GC, thread-linked material retention, temporary-object promotion, thread persistence, provider abstraction, dedicated Qwen provider fallback orchestration, LangGraph vision-aware orchestration, document parsing, docx document parsing, video transcription, search routing, multi-step ReAct-style business-tool execution with provider-level `bind_tools` support, Tavily-backed market-intelligence business tools with safe mock fallback, UTC timestamp normalization, user profile management, session visibility, frontend workspace, persistent preset-plus-user template-library CRUD with Chinese management UX, a local-first template center with hidden Skills entry, `100+` industry presets across `10` categories, knowledge-base-scoped templates, a multi-tenant knowledge workspace with txt/md ingestion, scope management, same-source upsert, chunk preview, citation-aware RAG prompt injection, citation-rendered chat replies, artifact graceful degradation on structure failure, SSE error surfacing, user-level productivity dashboard, conversation-to-template capture, a topic-pool kanban with CRUD, thread binding, drafting-state transitions, new-thread cascade prefill, Qwen model selection override, artifact-level and chat-bubble copy interactions, rich-text clipboard delivery, Markdown export delivery, global dual-theme support, expanded Playwright end-to-end browser coverage for thread lifecycle, replay, profile/session security, upload, artifact-action flows, and verification baseline
 
@@ -89,7 +89,7 @@ The current baseline includes:
 47. LangGraph now preserves raw draft text when the inner model fails structured artifact validation, degrading into a valid fallback artifact instead of dropping the response and leaving the user with an empty result.
 48. Frontend SSE handling now surfaces provider failures through explicit error cards and status messaging while removing empty assistant placeholders, preventing silent white-screen outcomes after streaming errors.
 49. Assistant chat bubbles can now inline backend-generated `generated_images` beneath the bound AI reply across both live streaming and history replay, preserving a natural conversation flow while keeping the right-side artifact panel available for deeper review.
-50. The OpenAI-compatible image gateway now hardens support for non-standard `gpt-image-2` providers by routing that model through `/chat/completions`, parsing chat payloads, and extracting image URLs from Markdown-style response content.
+50. The OpenAI-compatible image gateway now uses the standard `/images/generations` protocol for providers such as `gpt-image-2`, while preserving raw-response logging, non-JSON protection, and downstream image persistence.
 
 ### 3.2 Out of Scope
 
