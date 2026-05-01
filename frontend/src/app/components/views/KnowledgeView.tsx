@@ -17,8 +17,10 @@ import {
   LoaderCircle,
   Pencil,
   Search,
+  Sheet,
   Trash2,
   X,
+  type LucideIcon,
 } from "lucide-react";
 
 import type {
@@ -48,7 +50,28 @@ type KnowledgeViewProps = {
   onUploadFiles: (scope: string, files: File[]) => Promise<KnowledgeUploadFeedback>;
 };
 
-const SUPPORTED_KNOWLEDGE_FILE_EXTENSIONS = new Set([".txt", ".md", ".markdown"]);
+const SUPPORTED_KNOWLEDGE_FILE_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".markdown",
+  ".pdf",
+  ".docx",
+  ".csv",
+  ".xlsx",
+]);
+
+const KNOWLEDGE_FILE_ACCEPT =
+  ".txt,.md,.markdown,.pdf,.docx,.csv,.xlsx,text/plain,text/markdown,application/pdf,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+const SUPPORTED_KNOWLEDGE_FILE_LABEL =
+  ".txt / .md / .markdown / .pdf / .docx / .csv / .xlsx";
+
+type KnowledgeSourceVisual = {
+  Icon: LucideIcon;
+  iconClassName: string;
+  badgeClassName: string;
+  label: string;
+};
 
 function formatUpdatedAt(value?: string | null): string {
   if (!value) {
@@ -74,6 +97,47 @@ function getKnowledgeFileExtension(filename: string): string {
   return filename.slice(lastDotIndex).toLowerCase();
 }
 
+function getKnowledgeSourceVisual(filename: string): KnowledgeSourceVisual {
+  const extension = getKnowledgeFileExtension(filename);
+
+  if (extension === ".csv" || extension === ".xlsx") {
+    return {
+      Icon: Sheet,
+      iconClassName: "text-emerald-500",
+      badgeClassName:
+        "border-emerald-200/70 bg-emerald-500/10 text-emerald-700 dark:border-emerald-900/60 dark:text-emerald-300",
+      label: extension === ".csv" ? "CSV" : "XLSX",
+    };
+  }
+
+  if (extension === ".docx") {
+    return {
+      Icon: FileText,
+      iconClassName: "text-blue-500",
+      badgeClassName:
+        "border-blue-200/70 bg-blue-500/10 text-blue-700 dark:border-blue-900/60 dark:text-blue-300",
+      label: "DOCX",
+    };
+  }
+
+  if (extension === ".pdf") {
+    return {
+      Icon: FileText,
+      iconClassName: "text-rose-500",
+      badgeClassName:
+        "border-rose-200/70 bg-rose-500/10 text-rose-700 dark:border-rose-900/60 dark:text-rose-300",
+      label: "PDF",
+    };
+  }
+
+  return {
+    Icon: FileText,
+    iconClassName: "text-muted-foreground",
+    badgeClassName: "border-border bg-surface-muted text-muted-foreground",
+    label: extension ? extension.slice(1).toUpperCase() : "TEXT",
+  };
+}
+
 function splitKnowledgeFiles(files: File[]): {
   supportedFiles: File[];
   invalidFiles: File[];
@@ -93,8 +157,8 @@ function splitKnowledgeFiles(files: File[]): {
 }
 
 function buildUnsupportedKnowledgeFileMessage(invalidFiles: File[]): string {
-  const fileNames = invalidFiles.map((file) => `「${file.name}」`).join("、");
-  return `不支持以下文件格式：${fileNames}。知识库目前仅支持 .txt / .md / .markdown 文本导入。`;
+  const normalizedFileNames = invalidFiles.map((file) => `《${file.name}》`).join("、");
+  return `不支持以下文件格式：${normalizedFileNames}。知识库当前支持 ${SUPPORTED_KNOWLEDGE_FILE_LABEL}。`;
 }
 
 export function KnowledgeView(props: KnowledgeViewProps) {
@@ -401,7 +465,7 @@ export function KnowledgeView(props: KnowledgeViewProps) {
               </div>
 
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50/80 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
-                当前仅支持 `.txt` / `.md` 文件，系统会自动切分为约 500 字左右的知识块。
+                当前支持 TXT / MD / PDF / Word / 表格知识文件上传，系统会自动解析并切分为可检索的知识块。
               </div>
             </div>
 
@@ -437,13 +501,16 @@ export function KnowledgeView(props: KnowledgeViewProps) {
               >
                 <input
                   ref={fileInputRef}
-                  accept=".txt,.md,.markdown,text/plain,text/markdown"
+                  accept={KNOWLEDGE_FILE_ACCEPT}
                   className="hidden"
                   data-testid="knowledge-upload-input"
                   multiple
                   onChange={(event) => void handleFileSelection(event.target.files)}
                   type="file"
                 />
+                <div className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  支持 TXT / MD / PDF / Word / 表格
+                </div>
                 <div className="mb-3 rounded-2xl bg-primary/10 p-3 text-primary">
                   <FileUp className="h-6 w-6" />
                 </div>
@@ -669,7 +736,7 @@ export function KnowledgeView(props: KnowledgeViewProps) {
             >
               <input
                 ref={scopeFileInputRef}
-                accept=".txt,.md,.markdown,text/plain,text/markdown"
+                accept={KNOWLEDGE_FILE_ACCEPT}
                 className="hidden"
                 data-testid="knowledge-scope-upload-input"
                 multiple
@@ -736,6 +803,7 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                 <div className="space-y-3">
                   {selectedScopeSources.map((source) => {
                     const isPreviewOpen = previewSourceName === source.filename;
+                    const sourceVisual = getKnowledgeSourceVisual(source.filename);
                     return (
                     <div
                       key={source.filename}
@@ -743,8 +811,22 @@ export function KnowledgeView(props: KnowledgeViewProps) {
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-semibold text-foreground">
-                            {source.filename}
+                          <div className="flex items-center gap-3">
+                            <div
+                              className={`rounded-2xl bg-surface-tint p-2 ${sourceVisual.iconClassName}`}
+                            >
+                              <sourceVisual.Icon className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-semibold text-foreground">
+                                {source.filename}
+                              </div>
+                            </div>
+                            <span
+                              className={`shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${sourceVisual.badgeClassName}`}
+                            >
+                              {sourceVisual.label}
+                            </span>
                           </div>
                           <div className="mt-2 text-sm text-muted-foreground">
                             共 {source.chunk_count} 个知识切片

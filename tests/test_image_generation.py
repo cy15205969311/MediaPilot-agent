@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import httpx
+
 from app.models.schemas import MediaChatRequest
 from app.services import image_generation as image_generation_module
 from app.services.image_generation import ImageGenerationService, _extract_openai_image_urls
@@ -94,6 +96,9 @@ def test_image_generation_service_uses_openai_compatible_backend(monkeypatch):
     )
 
     assert captured_client_kwargs["follow_redirects"] is True
+    assert isinstance(captured_client_kwargs["timeout"], httpx.Timeout)
+    assert captured_client_kwargs["timeout"].connect == 10.0
+    assert captured_client_kwargs["timeout"].read == 180.0
     assert captured_request_kwargs["url"] == "https://www.onetopai.asia/v1/images/generations"
     assert captured_request_kwargs["headers"] == {
         "Authorization": "Bearer test-image-key",
@@ -104,6 +109,7 @@ def test_image_generation_service_uses_openai_compatible_backend(monkeypatch):
         "prompt": "make a lifestyle cover image",
         "n": 1,
         "size": "1024x1024",
+        "response_format": "b64_json",
     }
     assert captured_persist_kwargs == {
         "urls": [
@@ -182,6 +188,7 @@ def test_openai_non_gpt_image_2_still_uses_images_generations(monkeypatch):
         "prompt": "make a lifestyle cover image",
         "n": 1,
         "size": "1024x1024",
+        "response_format": "b64_json",
     }
 
 
@@ -358,6 +365,63 @@ def test_generate_images_falls_back_to_dashscope_when_openai_returns_no_images(m
 
     assert result == ["https://dashscope.example/fallback-cover.png"]
     assert "触发高可用降级，切换至 DashScope 兜底生成" in caplog.text
+
+
+def test_generate_images_logs_root_timeout_before_dashscope_fallback(monkeypatch, caplog):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "test-dashscope-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+    monkeypatch.setenv("IMAGE_GENERATION_MODEL", "wanx-v1")
+
+    service = ImageGenerationService()
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, **kwargs):
+            raise httpx.ReadTimeout("upstream image generation timed out")
+
+    async def fake_dashscope(*, request, prompt: str):
+        assert request.thread_id == "thread-openai-timeout-fallback"
+        assert prompt == "make a slow cover image"
+        return ["https://dashscope.example/fallback-timeout-cover.png"]
+
+    monkeypatch.setattr(image_generation_module.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(service, "_generate_images_with_dashscope", fake_dashscope)
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-openai-timeout-fallback",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "generate a cover image",
+            "materials": [],
+        }
+    )
+
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(
+            service.generate_images(
+                request=request,
+                prompt="make a slow cover image",
+                user_id=None,
+                thread_id=request.thread_id,
+            )
+        )
+
+    assert result == ["https://dashscope.example/fallback-timeout-cover.png"]
+    assert "ReadTimeout" in caplog.text
+    assert "upstream image generation timed out" in caplog.text
 
 
 def test_openai_image_generation_non_json_response_returns_empty_list(monkeypatch, caplog):

@@ -428,6 +428,15 @@ function inferContentType(filename: string): string {
   if (lowered.endsWith(".pdf")) {
     return "application/pdf";
   }
+  if (lowered.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (lowered.endsWith(".csv")) {
+    return "text/csv";
+  }
+  if (lowered.endsWith(".xlsx")) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
   return "application/octet-stream";
 }
 
@@ -761,14 +770,17 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
         !(
           loweredFilename.endsWith(".txt") ||
           loweredFilename.endsWith(".md") ||
-          loweredFilename.endsWith(".markdown")
+          loweredFilename.endsWith(".markdown") ||
+          loweredFilename.endsWith(".pdf") ||
+          loweredFilename.endsWith(".docx") ||
+          loweredFilename.endsWith(".csv") ||
+          loweredFilename.endsWith(".xlsx")
         )
       ) {
-        await fulfillJson(
-          route,
-          { detail: "当前知识库仅支持 .txt / .md / .markdown 文本文件上传。" },
-          415,
-        );
+        await fulfillJson(route, {
+          detail:
+            "当前知识库支持 .txt / .md / .markdown / .pdf / .docx / .csv / .xlsx 文件上传。",
+        }, 415);
         return;
       }
 

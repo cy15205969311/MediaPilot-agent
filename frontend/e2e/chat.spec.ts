@@ -217,19 +217,48 @@ test("blocks unsupported knowledge uploads and shows an inline error", async ({
   await expect(page.getByTestId("knowledge-view")).toBeVisible();
 
   await page.getByTestId("knowledge-upload-input").setInputFiles({
+    name: "marketing-brief.pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from("fake pptx payload"),
+  });
+
+  await expect(page.getByTestId("knowledge-upload-error")).toContainText(
+    ".txt / .md / .markdown / .pdf / .docx / .csv / .xlsx",
+  );
+  await expect(page.getByTestId("knowledge-upload-error")).toContainText(
+    "marketing-brief.pptx",
+  );
+  expect(knowledgeUploadRequests).toHaveLength(0);
+});
+
+test("accepts supported docx knowledge uploads and refreshes the scope list", async ({
+  page,
+}) => {
+  const knowledgeUploadRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/v1/media/knowledge/upload")) {
+      knowledgeUploadRequests.push(request.url());
+    }
+  });
+
+  await openWorkspace(page, {
+    knowledgeScopes: [],
+  });
+
+  await page.getByTestId("sidebar-shortcut-knowledge").click();
+  await expect(page.getByTestId("knowledge-view")).toBeVisible();
+
+  await page.getByTestId("knowledge-upload-input").setInputFiles({
     name: "marketing-brief.docx",
     mimeType:
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     buffer: Buffer.from("fake docx payload"),
   });
 
-  await expect(page.getByTestId("knowledge-upload-error")).toContainText(
-    "知识库目前仅支持 .txt / .md / .markdown 文本导入。",
-  );
-  await expect(page.getByTestId("knowledge-upload-error")).toContainText(
-    "marketing-brief.docx",
-  );
-  expect(knowledgeUploadRequests).toHaveLength(0);
+  await expect.poll(() => knowledgeUploadRequests.length).toBe(1);
+  await expect(page.getByTestId("knowledge-upload-error")).toHaveCount(0);
+  await expect(page.getByText("marketing_brief")).toBeVisible();
 });
 
 test("shows the drafts empty state when no saved artifacts exist", async ({ page }) => {

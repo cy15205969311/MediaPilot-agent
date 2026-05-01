@@ -26,6 +26,7 @@ from app.services.persistence import (
     build_history_message_item,
     build_material_history_item,
     cleanup_abandoned_materials,
+    resolve_artifact_media_references,
     summarize_message_content,
 )
 
@@ -261,7 +262,9 @@ async def list_artifacts(
 
     items = []
     for record, thread, message in rows:
-        artifact = ARTIFACT_PAYLOAD_ADAPTER.validate_python(record.payload)
+        artifact = resolve_artifact_media_references(
+            ARTIFACT_PAYLOAD_ADAPTER.validate_python(record.payload)
+        )
         items.append(
             ArtifactListItem(
                 id=record.id,

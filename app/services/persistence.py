@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from pydantic import TypeAdapter
 from sqlalchemy import select
@@ -55,6 +56,38 @@ def decode_artifact_message(content: str) -> ArtifactPayloadModel | None:
     return ARTIFACT_TYPE_ADAPTER.validate_python(json.loads(payload))
 
 
+def _remap_content_artifact_generated_images(
+    artifact: ArtifactPayloadModel,
+    *,
+    mapper: Callable[[str], str | None],
+) -> ArtifactPayloadModel:
+    if artifact.artifact_type != "content_draft":
+        return artifact
+
+    remapped_images: list[str] = []
+    for raw_url in artifact.generated_images:
+        normalized_url = str(raw_url or "").strip()
+        if not normalized_url:
+            continue
+        remapped_images.append(mapper(normalized_url) or normalized_url)
+
+    return artifact.model_copy(update={"generated_images": remapped_images})
+
+
+def normalize_artifact_for_storage(artifact: ArtifactPayloadModel) -> ArtifactPayloadModel:
+    return _remap_content_artifact_generated_images(
+        artifact,
+        mapper=normalize_storage_reference,
+    )
+
+
+def resolve_artifact_media_references(artifact: ArtifactPayloadModel) -> ArtifactPayloadModel:
+    return _remap_content_artifact_generated_images(
+        artifact,
+        mapper=resolve_media_reference,
+    )
+
+
 def summarize_message_content(content: str, limit: int = 72) -> str:
     artifact = decode_artifact_message(content)
     if artifact is not None:
@@ -70,6 +103,7 @@ def build_history_message_item(message: Message) -> MessageHistoryItem:
     materials = [build_material_history_item(material) for material in message.materials]
     artifact = decode_artifact_message(message.content)
     if artifact is not None:
+        artifact = resolve_artifact_media_references(artifact)
         return MessageHistoryItem(
             id=message.id,
             thread_id=message.thread_id,
@@ -93,7 +127,9 @@ def build_history_message_item(message: Message) -> MessageHistoryItem:
 
 
 def build_artifact_history_item(record: ArtifactRecord) -> MessageHistoryItem:
-    artifact = ARTIFACT_TYPE_ADAPTER.validate_python(record.payload)
+    artifact = resolve_artifact_media_references(
+        ARTIFACT_TYPE_ADAPTER.validate_python(record.payload)
+    )
     return MessageHistoryItem(
         id=record.id,
         thread_id=record.thread_id,
@@ -143,12 +179,13 @@ def persist_assistant_output(
         db.flush()
 
     if artifact is not None and assistant_message is not None:
+        artifact_for_storage = normalize_artifact_for_storage(artifact)
         db.add(
             ArtifactRecord(
                 thread_id=thread_id,
                 message_id=assistant_message.id,
-                artifact_type=artifact.artifact_type,
-                payload=artifact.model_dump(mode="json"),
+                artifact_type=artifact_for_storage.artifact_type,
+                payload=artifact_for_storage.model_dump(mode="json"),
             )
         )
 

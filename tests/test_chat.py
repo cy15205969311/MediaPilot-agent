@@ -13,9 +13,10 @@ from sqlalchemy.orm import sessionmaker
 import app.services.agent as agent_module
 import app.api.v1.knowledge as knowledge_api_module
 import app.services.knowledge_base as knowledge_base_module
+import app.services.persistence as persistence_module
 import app.services.providers as providers_module
 from app.db.database import Base, get_db
-from app.db.models import AccessTokenBlacklist, User
+from app.db.models import AccessTokenBlacklist, ArtifactRecord, Message, Thread, User
 from app.main import app
 from app.models.schemas import (
     CommentReplyArtifactPayload,
@@ -2439,6 +2440,135 @@ def test_thread_history_returns_user_message_image_material(client: TestClient):
             "created_at": user_message["materials"][0]["created_at"],
         }
     ]
+
+
+def test_persist_assistant_output_normalizes_generated_images_before_storage(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    auth_payload = register_auth_response(client, username="alice-generated-image-storage")
+    user_id = str(auth_payload["user"]["id"])
+    thread_id = "thread-generated-image-storage"
+    signed_url = (
+        "https://mediapilot-bucket.oss-cn-beijing.aliyuncs.com/uploads/"
+        "alice/generated/thread-generated-image-storage/cover-1.png"
+        "?x-oss-date=20260430T154609Z&x-oss-expires=3600&x-oss-signature=expired"
+    )
+    normalized_stored_path = (
+        "oss://uploads/alice/generated/thread-generated-image-storage/cover-1.png"
+    )
+
+    monkeypatch.setattr(
+        persistence_module,
+        "normalize_storage_reference",
+        lambda reference: normalized_stored_path if reference == signed_url else reference,
+    )
+
+    artifact = ContentGenerationArtifactPayload(
+        title="带配图的内容草稿",
+        title_candidates=["标题 A"],
+        body="正文草稿",
+        platform_cta="平台引导语",
+        generated_images=[signed_url],
+    )
+
+    with client.app.state.testing_session_local() as db:
+        persistence_module.persist_assistant_output(
+            db,
+            thread_id=thread_id,
+            user_id=user_id,
+            assistant_text="生成完成",
+            artifact=artifact,
+        )
+        record = db.scalar(
+            select(ArtifactRecord).where(ArtifactRecord.thread_id == thread_id)
+        )
+
+    assert record is not None
+    assert record.payload["generated_images"] == [normalized_stored_path]
+
+
+def test_history_and_artifact_routes_refresh_generated_image_urls(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    auth_payload = register_auth_response(client, username="alice-generated-image-history")
+    user_id = str(auth_payload["user"]["id"])
+    headers = {"Authorization": f"Bearer {auth_payload['access_token']}"}
+    thread_id = "thread-generated-image-history"
+    expired_url = (
+        "https://mediapilot-bucket.oss-cn-beijing.aliyuncs.com/uploads/"
+        "alice/generated/thread-generated-image-history/cover-1.png"
+        "?x-oss-date=20260430T154609Z&x-oss-expires=3600&x-oss-signature=expired"
+    )
+    refreshed_url = (
+        "https://mediapilot-bucket.oss-cn-beijing.aliyuncs.com/uploads/"
+        "alice/generated/thread-generated-image-history/cover-1.png"
+        "?x-oss-date=20260501T020000Z&x-oss-expires=3600&x-oss-signature=fresh"
+    )
+
+    def fake_resolve_media_reference(reference: str | None) -> str | None:
+        if reference == expired_url:
+            return refreshed_url
+        return reference
+
+    monkeypatch.setattr(
+        persistence_module,
+        "resolve_media_reference",
+        fake_resolve_media_reference,
+    )
+
+    artifact = ContentGenerationArtifactPayload(
+        title="历史带图草稿",
+        title_candidates=["标题 A"],
+        body="正文草稿",
+        platform_cta="平台引导语",
+        generated_images=[expired_url],
+    )
+
+    with client.app.state.testing_session_local() as db:
+        thread = Thread(
+            id=thread_id,
+            user_id=user_id,
+            title="历史带图线程",
+            system_prompt="",
+        )
+        message = Message(
+            thread_id=thread_id,
+            role="assistant",
+            content="历史带图草稿",
+        )
+        db.add(thread)
+        db.add(message)
+        db.flush()
+        db.add(
+            ArtifactRecord(
+                thread_id=thread_id,
+                message_id=message.id,
+                artifact_type=artifact.artifact_type,
+                payload=artifact.model_dump(mode="json"),
+            )
+        )
+        db.commit()
+
+    history_response = client.get(
+        f"/api/v1/media/threads/{thread_id}/messages",
+        headers=headers,
+    )
+    assert history_response.status_code == 200
+    history_payload = history_response.json()
+    artifact_message = next(
+        item for item in history_payload["messages"] if item["message_type"] == "artifact"
+    )
+    assert artifact_message["artifact"]["generated_images"] == [refreshed_url]
+
+    artifacts_response = client.get("/api/v1/media/artifacts", headers=headers)
+    assert artifacts_response.status_code == 200
+    artifacts_payload = artifacts_response.json()
+    matching_item = next(item for item in artifacts_payload["items"] if item["thread_id"] == thread_id)
+    assert matching_item["artifact"]["generated_images"] == [refreshed_url]
+
+
 def test_thread_update_archive_and_delete_flow(client: TestClient):
     register_user(client, username="alice-manage")
     headers = login_user(client, username="alice-manage")

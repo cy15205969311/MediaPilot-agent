@@ -32,6 +32,7 @@ DEFAULT_IMAGE_GENERATION_COUNT = 3
 DEFAULT_IMAGE_GENERATION_TIMEOUT_SECONDS = 120.0
 DEFAULT_IMAGE_GENERATION_POLL_INTERVAL_SECONDS = 2.0
 OPENAI_COMPATIBLE_IMAGE_SIZE = "1024x1024"
+DEFAULT_OPENAI_COMPATIBLE_IMAGE_REQUEST_TIMEOUT_SECONDS = 180.0
 MAX_IMAGE_GENERATION_COUNT = 4
 DEFAULT_DASHSCOPE_DOUYIN_IMAGE_SIZE = "928*1664"
 DEFAULT_DASHSCOPE_XIAOHONGSHU_IMAGE_SIZE = "1104*1472"
@@ -159,6 +160,13 @@ def _compact_text(value: str, limit: int = 240) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[:limit].rstrip()}..."
+
+
+def _describe_exception_for_log(exc: Exception) -> str:
+    root_exc: BaseException = exc
+    while getattr(root_exc, "__cause__", None) is not None:
+        root_exc = root_exc.__cause__  # type: ignore[assignment]
+    return f"{type(root_exc).__name__}: {root_exc}"
 
 
 def _resolve_cover_title(
@@ -463,6 +471,15 @@ class ImageGenerationService:
             DEFAULT_IMAGE_GENERATION_POLL_INTERVAL_SECONDS,
         )
         self.request_timeout = _build_http_timeout(self.timeout_seconds)
+        self.openai_request_timeout = _build_http_timeout(
+            _read_positive_float_env(
+                "OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS",
+                max(
+                    DEFAULT_OPENAI_COMPATIBLE_IMAGE_REQUEST_TIMEOUT_SECONDS,
+                    self.timeout_seconds,
+                ),
+            ),
+        )
         self.persist_results = _is_enabled_env(
             "IMAGE_GENERATION_PERSIST_RESULTS",
             default=True,
@@ -613,14 +630,14 @@ class ImageGenerationService:
         except Exception as exc:
             if not self._has_dashscope_config():
                 logger.warning(
-                    "主生图引擎(OpenAI-compatible)失败，且 DashScope 兜底不可用: %s",
-                    exc,
+                    "主生图引擎(OpenAI-compatible)失败，且 DashScope 兜底不可用。exception=%s",
+                    _describe_exception_for_log(exc),
                 )
                 return []
 
             logger.warning(
-                "主生图引擎(OpenAI-compatible)失败，触发高可用降级，切换至 DashScope 兜底生成。原因: %s",
-                exc,
+                "主生图引擎(OpenAI-compatible)失败，触发高可用降级，切换至 DashScope 兜底生成。exception=%s",
+                _describe_exception_for_log(exc),
             )
             try:
                 return await self._generate_images_with_dashscope(
@@ -629,8 +646,8 @@ class ImageGenerationService:
                 )
             except Exception as fallback_exc:
                 logger.error(
-                    "DashScope 兜底生图在 OpenAI-compatible 失败后仍然执行失败: %s",
-                    fallback_exc,
+                    "DashScope 兜底生图在 OpenAI-compatible 失败后仍然执行失败。exception=%s",
+                    _describe_exception_for_log(fallback_exc),
                 )
                 return []
 
@@ -812,6 +829,7 @@ class ImageGenerationService:
             "prompt": prompt,
             "n": 1,
             "size": OPENAI_COMPATIBLE_IMAGE_SIZE,
+            "response_format": "b64_json",
         }
         headers = {
             "Authorization": f"Bearer {self.openai_settings.api_key}",
@@ -820,7 +838,7 @@ class ImageGenerationService:
 
         try:
             async with httpx.AsyncClient(
-                timeout=self.request_timeout,
+                timeout=self.openai_request_timeout,
                 follow_redirects=True,
             ) as client:
                 response = await client.post(
