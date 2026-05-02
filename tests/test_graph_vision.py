@@ -307,6 +307,104 @@ def test_build_conversation_messages_replaces_latest_user_history_with_rewritten
     assert "看这张图片，帮我写一段小红书文案" not in user_messages
 
 
+def test_build_conversation_messages_embeds_native_video_parts_for_mimo_models(monkeypatch):
+    monkeypatch.setattr(
+        providers_module,
+        "_load_thread_history",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        providers_module,
+        "resolve_media_reference",
+        lambda raw_url: f"https://cdn.example.com/{str(raw_url).split('/')[-1]}",
+    )
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-native-video-message",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请总结视频里的核心卖点，并结合附件整理成一段文案。",
+            "materials": [
+                {
+                    "type": "video_url",
+                    "url": "/uploads/alice/demo.mp4",
+                    "text": "门店探店视频",
+                },
+                {
+                    "type": "text_link",
+                    "url": "/uploads/alice/brief.pdf",
+                    "text": "brief.pdf",
+                },
+            ],
+        }
+    )
+
+    messages = providers_module._build_conversation_messages(
+        request,
+        db=None,
+        thread=None,
+        user_id=None,
+        active_model="mimo-v2-omni",
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, list)
+    assert user_content[0] == {"type": "text", "text": request.message}
+    assert any(
+        part.get("type") == "video_url"
+        and part.get("video_url", {}).get("url") == "https://cdn.example.com/demo.mp4"
+        for part in user_content
+    )
+    assert any(
+        part.get("type") == "text" and "brief.pdf" in str(part.get("text", ""))
+        for part in user_content
+    )
+
+
+def test_langgraph_provider_skips_transcription_for_mimo_native_video_models(monkeypatch):
+    class NativeVideoRecordingProvider(RecordingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = "mimo-v2-omni"
+
+    async def fail_transcribe(_: str) -> str:
+        raise AssertionError("native MiMo video path should not call audio transcription")
+
+    monkeypatch.setattr(graph_provider_module, "transcribe_video", fail_transcribe)
+
+    inner_provider = NativeVideoRecordingProvider()
+    provider = LangGraphProvider(inner_provider=inner_provider)
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-native-video-skip",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请直接理解这个视频，并生成一段发布文案。",
+            "materials": [
+                {
+                    "type": "video_url",
+                    "url": "/uploads/alice/demo.mp4",
+                    "text": "demo.mp4",
+                }
+            ],
+        }
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    skip_events = [
+        event
+        for event in events
+        if event["event"] == "tool_call" and event.get("name") == "video_transcription"
+    ]
+
+    assert inner_provider.last_request_material_types == ["video_url"]
+    assert skip_events[-1]["status"] == "skipped"
+    assert "原生视频理解" in str(skip_events[-1].get("message", ""))
+    assert not any(event["event"] == "error" for event in events)
+
+
 def test_langgraph_provider_fails_fast_when_vision_analysis_fails():
     inner_provider = RecordingProvider()
 

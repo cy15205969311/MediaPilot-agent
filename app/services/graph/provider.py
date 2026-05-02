@@ -66,6 +66,7 @@ from app.services.providers import (
     OpenAIProvider,
     QwenLLMProvider,
     _is_dashscope_compatible_base_url,
+    _supports_native_video_understanding,
 )
 from app.services.tools import execute_business_tool, get_business_tools
 
@@ -145,6 +146,10 @@ def _resolve_vision_model(explicit_model: str | None) -> str:
         return openai_vision_model
 
     return "gpt-4o-mini"
+
+
+def _supports_native_video_material_passthrough(inner_provider: BaseLLMProvider) -> bool:
+    return _supports_native_video_understanding(getattr(inner_provider, "model", ""))
 
 
 class GraphState(TypedDict, total=False):
@@ -465,6 +470,7 @@ class LangGraphProvider(BaseLLMProvider):
         request = state["request"]
         parsed_materials, needs_ocr = _parse_materials(request)
         enriched_materials = list(parsed_materials)
+        native_video_enabled = _supports_native_video_material_passthrough(self.inner_provider)
 
         for material in request.materials:
             if material.type == MaterialType.TEXT_LINK and material.url:
@@ -507,6 +513,17 @@ class LangGraphProvider(BaseLLMProvider):
 
             if material.type == MaterialType.VIDEO_URL and material.url:
                 source_name = _resolve_material_source_name(material)
+                if native_video_enabled:
+                    _emit_tool_call(
+                        writer,
+                        name="video_transcription",
+                        status="skipped",
+                        message=(
+                            f"\u5f53\u524d\u6a21\u578b\u652f\u6301\u539f\u751f\u89c6\u9891\u7406\u89e3\uff0c"
+                            f"\u5df2\u8df3\u8fc7\u8f6c\u5199\u5e76\u76f4\u4f20\u89c6\u9891\uff1a{source_name}"
+                        ),
+                    )
+                    continue
                 _emit_tool_call(
                     writer,
                     name="video_transcription",

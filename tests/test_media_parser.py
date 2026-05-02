@@ -259,6 +259,52 @@ def test_request_audio_transcription_uses_dashscope_chat_path_when_only_llm_gate
     assert result == "dashscope transcript"
 
 
+def test_resolve_transcription_runtime_config_prefers_dedicated_transcription_gateway(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_TRANSCRIPTION_API_KEY", "dashscope-transcription-key")
+    monkeypatch.setenv(
+        "OPENAI_TRANSCRIPTION_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setenv("OPENAI_TRANSCRIPTION_MODEL", "qwen-audio-turbo")
+    monkeypatch.setenv("LLM_API_KEY", "mimo-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+
+    runtime_config = media_parser_module._resolve_transcription_runtime_config()
+
+    assert runtime_config == TranscriptionRuntimeConfig(
+        api_key="dashscope-transcription-key",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen-audio-turbo",
+        mode="dashscope_chat_completions",
+    )
+
+
+def test_resolve_transcription_runtime_config_falls_back_to_llm_gateway_when_dedicated_config_is_empty(
+    monkeypatch,
+):
+    monkeypatch.delenv("OPENAI_TRANSCRIPTION_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_TRANSCRIPTION_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_TRANSCRIPTION_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv(
+        "LLM_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    runtime_config = media_parser_module._resolve_transcription_runtime_config()
+
+    assert runtime_config == TranscriptionRuntimeConfig(
+        api_key="llm-key",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen3-asr-flash",
+        mode="dashscope_chat_completions",
+    )
+
+
 def test_langgraph_provider_injects_document_and_video_context(monkeypatch):
     inner_provider = RecordingProvider()
 

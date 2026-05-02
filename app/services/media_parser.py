@@ -26,7 +26,7 @@ from openai import (
     RateLimitError,
 )
 
-from app.config import load_environment
+from app.config import get_openai_transcription_settings, load_environment
 from app.services.oss_client import (
     LOCAL_UPLOADS_DIR,
     build_delivery_url_from_stored_path,
@@ -494,7 +494,7 @@ async def _request_openai_audio_transcription(
     except NotFoundError as exc:
         raise MediaParserError(
             "The configured transcription gateway does not expose /audio/transcriptions. "
-            "Set OPENAI_TRANSCRIPTION_BASE_URL or OPENAI_BASE_URL to a provider that supports it.",
+            "Set OPENAI_TRANSCRIPTION_BASE_URL or LLM_BASE_URL to a provider that supports it.",
         ) from exc
     except BadRequestError as exc:
         raise MediaParserError(f"Audio transcription request was rejected: {exc}") from exc
@@ -582,57 +582,35 @@ def _get_transcription_client(
 
 
 def _resolve_transcription_runtime_config() -> TranscriptionRuntimeConfig:
-    explicit_api_key = (
-        os.getenv("OPENAI_TRANSCRIPTION_API_KEY", "").strip()
-        or os.getenv("OPENAI_API_KEY", "").strip()
-    )
-    explicit_base_url = (
-        os.getenv("OPENAI_TRANSCRIPTION_BASE_URL", "").strip()
-        or os.getenv("OPENAI_BASE_URL", "").strip()
-        or None
-    )
-    if explicit_api_key:
-        return _build_transcription_runtime_config(
-            api_key=explicit_api_key,
-            base_url=explicit_base_url,
-        )
+    settings = get_openai_transcription_settings()
+    if settings is None or not settings.api_key:
+        raise MediaParserError("No transcription API key is configured.")
 
-    compatible_api_key = os.getenv("LLM_API_KEY", "").strip()
-    compatible_base_url = os.getenv("LLM_BASE_URL", "").strip() or None
-    if compatible_api_key:
-        return _build_transcription_runtime_config(
-            api_key=compatible_api_key,
-            base_url=compatible_base_url,
-        )
-
-    raise MediaParserError("No transcription API key is configured.")
+    return _build_transcription_runtime_config(
+        api_key=settings.api_key,
+        base_url=settings.base_url or None,
+        model_override=settings.model or None,
+    )
 
 
 def _build_transcription_runtime_config(
     *,
     api_key: str,
     base_url: str | None,
+    model_override: str | None = None,
 ) -> TranscriptionRuntimeConfig:
     if _is_dashscope_compatible_base_url(base_url):
         return TranscriptionRuntimeConfig(
             api_key=api_key,
             base_url=base_url,
-            model=os.getenv(
-                "OPENAI_TRANSCRIPTION_MODEL",
-                DEFAULT_DASHSCOPE_TRANSCRIPTION_MODEL,
-            ).strip()
-            or DEFAULT_DASHSCOPE_TRANSCRIPTION_MODEL,
+            model=(model_override or "").strip() or DEFAULT_DASHSCOPE_TRANSCRIPTION_MODEL,
             mode="dashscope_chat_completions",
         )
 
     return TranscriptionRuntimeConfig(
         api_key=api_key,
         base_url=base_url,
-        model=os.getenv(
-            "OPENAI_TRANSCRIPTION_MODEL",
-            DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
-        ).strip()
-        or DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
+        model=(model_override or "").strip() or DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
         mode="audio_transcriptions",
     )
 

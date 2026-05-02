@@ -28,6 +28,13 @@ class OpenAIImageSettings:
     model: str
 
 
+@dataclass(frozen=True)
+class OpenAITranscriptionSettings:
+    api_key: str
+    base_url: str
+    model: str
+
+
 def load_environment() -> Path | None:
     global _DOTENV_MTIME_NS, _DOTENV_MANAGED_KEYS
 
@@ -168,3 +175,40 @@ def get_openai_image_settings() -> OpenAIImageSettings:
         api_key=api_key,
         model=model,
     )
+
+
+def get_openai_transcription_settings() -> OpenAITranscriptionSettings | None:
+    load_environment()
+
+    explicit_api_key = os.getenv("OPENAI_TRANSCRIPTION_API_KEY", "").strip()
+    explicit_base_url = _normalize_endpoint(os.getenv("OPENAI_TRANSCRIPTION_BASE_URL", ""))
+    explicit_model = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "").strip()
+
+    llm_api_key = os.getenv("LLM_API_KEY", "").strip()
+    llm_base_url = _normalize_endpoint(os.getenv("LLM_BASE_URL", ""))
+
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_base_url = _normalize_endpoint(os.getenv("OPENAI_BASE_URL", ""))
+
+    if explicit_api_key or explicit_base_url or explicit_model:
+        return OpenAITranscriptionSettings(
+            api_key=explicit_api_key or llm_api_key or openai_api_key,
+            base_url=(explicit_base_url or llm_base_url or openai_base_url).rstrip("/"),
+            model=explicit_model,
+        )
+
+    if llm_api_key:
+        return OpenAITranscriptionSettings(
+            api_key=llm_api_key,
+            base_url=llm_base_url.rstrip("/"),
+            model=explicit_model,
+        )
+
+    if openai_api_key:
+        return OpenAITranscriptionSettings(
+            api_key=openai_api_key,
+            base_url=openai_base_url.rstrip("/"),
+            model=explicit_model,
+        )
+
+    return None

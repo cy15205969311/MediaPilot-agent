@@ -36,11 +36,14 @@ from app.models.schemas import (
     ContentGenerationArtifactPayload,
     HotPostAnalysisArtifactPayload,
     HotPostAnalysisDimension,
+    MaterialInput,
+    MaterialType,
     MediaChatRequest,
     TaskType,
     TopicPlanningArtifactPayload,
     TopicPlanningItem,
 )
+from app.services.persistence import resolve_media_reference
 
 load_environment()
 
@@ -60,6 +63,9 @@ ArtifactSchemaType = (
     | type[HotPostAnalysisArtifactPayload]
     | type[CommentReplyArtifactPayload]
 )
+ConversationMessage = dict[str, object]
+ConversationContentPart = dict[str, object]
+MIMO_NATIVE_VIDEO_MODELS = {"mimo-v2.5", "mimo-v2-omni"}
 
 
 class QwenProviderFallbackError(RuntimeError):
@@ -111,6 +117,18 @@ def _normalize_compatible_model_name(model_name: str | None) -> str:
     if normalized.lower().startswith("mimo-"):
         return normalized.lower()
     return normalized
+
+
+def _supports_native_video_understanding(model_name: str | None) -> bool:
+    normalized = _normalize_compatible_model_name(model_name)
+    return normalized in MIMO_NATIVE_VIDEO_MODELS
+
+
+def _request_has_video_materials(request: MediaChatRequest) -> bool:
+    return any(
+        material.type == MaterialType.VIDEO_URL and bool((material.url or "").strip())
+        for material in request.materials
+    )
 
 
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
@@ -504,6 +522,7 @@ class OpenAIProvider(BaseLLMProvider):
                 db=db,
                 thread=thread,
                 user_id=user_id,
+                active_model=self.model,
             )
             stream = await self._get_client().chat.completions.create(
                 model=self.model,
@@ -732,6 +751,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
                 db=db,
                 thread=thread,
                 user_id=user_id,
+                active_model=self.model,
             )
             stream = await self._get_client().chat.completions.create(
                 model=self.model,
@@ -1034,6 +1054,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
                 db=db,
                 thread=thread,
                 user_id=user_id,
+                active_model=self.model,
             )
             async for delta in self._stream_text_with_fallback(
                 messages=messages,
@@ -1199,7 +1220,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
     async def _stream_text_with_fallback(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[ConversationMessage],
         temperature: float,
     ) -> AsyncGenerator[str, None]:
         attempted_models: list[str] = []
@@ -1464,8 +1485,18 @@ def _build_conversation_messages(
     db: Session | None,
     thread: Thread | None,
     user_id: str | None,
-) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = [
+    active_model: str | None = None,
+) -> list[ConversationMessage]:
+    native_video_enabled = (
+        _supports_native_video_understanding(active_model)
+        and _request_has_video_materials(request)
+    )
+    current_user_content = _build_current_user_content(
+        request,
+        native_video_enabled=native_video_enabled,
+    )
+
+    messages: list[ConversationMessage] = [
         {"role": "system", "content": _resolve_system_prompt(request, thread)},
         {"role": "system", "content": _build_task_instruction(request)},
     ]
@@ -1483,11 +1514,12 @@ def _build_conversation_messages(
             messages=messages,
             history=history,
             request=request,
+            current_user_content=current_user_content,
         )
-    else:
-        messages.append({"role": "user", "content": request.message})
+    elif _message_content_has_payload(current_user_content):
+        messages.append({"role": "user", "content": current_user_content})
 
-    if request.materials:
+    if request.materials and not native_video_enabled:
         messages.append(
             {
                 "role": "user",
@@ -1500,24 +1532,103 @@ def _build_conversation_messages(
 
 def _replace_or_append_current_user_message(
     *,
-    messages: list[dict[str, str]],
+    messages: list[ConversationMessage],
     history: list[Message],
     request: MediaChatRequest,
+    current_user_content: str | list[ConversationContentPart],
 ) -> None:
-    current_message = request.message.strip()
-    if not current_message:
+    if not _message_content_has_payload(current_user_content):
         return
 
+    current_message = request.message.strip()
     last_history_item = history[-1]
     last_history_role = str(last_history_item.role).strip().lower()
     last_history_content = last_history_item.content.strip()
+    content_matches_plain_text = (
+        isinstance(current_user_content, str) and current_user_content == request.message
+    )
 
     if last_history_role == "user":
-        if last_history_content != current_message:
-            messages[-1] = {"role": "user", "content": request.message}
+        if last_history_content != current_message or not content_matches_plain_text:
+            messages[-1] = {"role": "user", "content": current_user_content}
         return
 
-    messages.append({"role": "user", "content": request.message})
+    messages.append({"role": "user", "content": current_user_content})
+
+
+def _build_current_user_content(
+    request: MediaChatRequest,
+    *,
+    native_video_enabled: bool,
+) -> str | list[ConversationContentPart]:
+    if not native_video_enabled:
+        return request.message
+
+    content: list[ConversationContentPart] = []
+    message_text = request.message.strip()
+    if message_text:
+        content.append({"type": "text", "text": request.message})
+    else:
+        content.append({"type": "text", "text": "请结合附带视频素材完成当前任务。"})
+
+    supplemental_materials = _serialize_materials(request, include_video_materials=False)
+    if supplemental_materials.strip() and supplemental_materials != "无":
+        content.append(
+            {
+                "type": "text",
+                "text": "当前请求附带的其他素材如下：\n" + supplemental_materials,
+            }
+        )
+
+    for index, material in enumerate(request.materials, start=1):
+        if material.type != MaterialType.VIDEO_URL or not (material.url or "").strip():
+            continue
+        content.extend(_build_native_video_content_parts(material=material, index=index))
+
+    if not any(part.get("type") == "video_url" for part in content):
+        return content if _message_content_has_payload(content) else request.message
+    return content
+
+
+def _build_native_video_content_parts(
+    *,
+    material: MaterialInput,
+    index: int,
+) -> list[ConversationContentPart]:
+    parts: list[ConversationContentPart] = []
+    label = material.text.strip() or f"视频素材 {index}"
+    parts.append({"type": "text", "text": f"{label}：请直接理解这个视频的画面与音频内容。"})
+
+    resolved_url = _resolve_native_video_material_url(material)
+    if not resolved_url:
+        parts.append(
+            {
+                "type": "text",
+                "text": f"{label} 的可访问视频链接暂时无法解析，请忽略该视频并继续基于其余上下文回答。",
+            }
+        )
+        return parts
+
+    parts.append({"type": "video_url", "video_url": {"url": resolved_url}})
+    return parts
+
+
+def _resolve_native_video_material_url(material: MaterialInput) -> str:
+    resolved_url = resolve_media_reference(material.url)
+    if resolved_url is None:
+        return ""
+    return str(resolved_url).strip()
+
+
+def _message_content_has_payload(content: str | list[ConversationContentPart]) -> bool:
+    if isinstance(content, list):
+        return any(
+            bool(str(item.get("text", "")).strip())
+            or bool(str((item.get("video_url") or {}).get("url", "")).strip())
+            for item in content
+            if isinstance(item, dict)
+        )
+    return bool(content.strip())
 
 
 def _build_artifact_messages(
@@ -1615,17 +1726,25 @@ def _build_task_instruction(request: MediaChatRequest) -> str:
     )
 
 
-def _serialize_materials(request: MediaChatRequest) -> str:
+def _serialize_materials(
+    request: MediaChatRequest,
+    *,
+    include_video_materials: bool = True,
+) -> str:
     if not request.materials:
         return "无"
 
     lines = []
     for index, material in enumerate(request.materials, start=1):
+        if not include_video_materials and material.type == MaterialType.VIDEO_URL:
+            continue
         lines.append(
             f"{index}. type={material.type.value}; "
             f"url={material.url or 'none'}; "
             f"text={material.text or 'none'}"
         )
+    if not lines:
+        return "无"
     return "\n".join(lines)
 
 
