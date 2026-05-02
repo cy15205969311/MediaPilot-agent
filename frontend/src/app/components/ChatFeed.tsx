@@ -187,13 +187,13 @@ function renderMessageMaterials(item: ConversationMessage) {
   return (
     <div className="mb-3 space-y-2">
       {imageMaterials.length > 0 ? (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <div className="scrollbar-hide flex max-w-full flex-row gap-2 overflow-x-auto overscroll-x-contain pb-2 snap-x">
           {imageMaterials.map((material, index) => (
             <a
-              className={`group overflow-hidden rounded-2xl border ${
+              className={`group h-16 w-16 flex-shrink-0 snap-start overflow-hidden rounded-xl border border-black/5 shadow-sm transition-opacity hover:opacity-80 dark:border-white/10 ${
                 isUser
-                  ? "border-user-bubble-subtle-border bg-user-bubble-subtle"
-                  : "border-border bg-muted"
+                  ? "bg-user-bubble-subtle"
+                  : "bg-muted"
               }`}
               href={material.url}
               key={`${material.url}-${index}`}
@@ -202,7 +202,7 @@ function renderMessageMaterials(item: ConversationMessage) {
             >
               <img
                 alt={materialLabel(material)}
-                className="aspect-square w-full object-cover transition duration-200 group-hover:scale-105"
+                className="h-full w-full cursor-pointer rounded-xl object-cover"
                 src={material.url}
               />
             </a>
@@ -498,7 +498,7 @@ export function ChatFeed({
                   item.role === "user"
                     ? "border-user-bubble-subtle-border bg-user-bubble text-user-foreground"
                     : "border-border bg-ai-bubble text-ai-foreground"
-                }`}
+                } min-w-0 overflow-hidden`}
               >
                 {renderMessageMaterials(item)}
                 <div className="whitespace-pre-wrap text-sm leading-7">

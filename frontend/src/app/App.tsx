@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  AlertCircle,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
@@ -149,7 +150,7 @@ type PublishResultPayload = {
 
 type PublishToastState = {
   id: number;
-  tone: "success" | "error";
+  tone: "success" | "error" | "warning";
   title: string;
   message: string;
   error?: string;
@@ -158,6 +159,9 @@ type PublishToastState = {
 const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
 const LEGACY_QWEN_MODEL_STORAGE_KEY = "omnimedia_qwen_model_override";
 const XIAOHONGSHU_CREATOR_URL = "https://creator.xiaohongshu.com/publish/publish";
+const MAX_IMAGE_MATERIALS = 9;
+const IMAGE_LIMIT_WARNING_MESSAGE =
+  "为保证解析质量与小红书发布规范，最多支持上传 9 张配图，超出部分已自动忽略。";
 
 function getPlatformDisplayLabel(platform: UiPlatform): string {
   if (platform === "both") {
@@ -2616,8 +2620,27 @@ function App() {
   };
 
   const onFilesSelected = (kind: UploadedMaterialKind, event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []);
+    const selectedFiles = Array.from(event.target.files ?? []);
+    const currentImageCount = uploadedMaterialsRef.current.filter(
+      (item) => item.kind === "image",
+    ).length;
+    const availableImageSlots =
+      kind === "image" ? Math.max(0, MAX_IMAGE_MATERIALS - currentImageCount) : selectedFiles.length;
+    const files =
+      kind === "image" ? selectedFiles.slice(0, availableImageSlots) : selectedFiles;
+
+    if (kind === "image" && selectedFiles.length > files.length) {
+      setStatusText(IMAGE_LIMIT_WARNING_MESSAGE);
+      setPublishToast({
+        id: Date.now(),
+        tone: "warning",
+        title: "图片数量已限制",
+        message: IMAGE_LIMIT_WARNING_MESSAGE,
+      });
+    }
+
     if (files.length === 0) {
+      event.target.value = "";
       return;
     }
 
@@ -3941,13 +3964,17 @@ function App() {
             className={`pointer-events-auto rounded-[28px] border px-4 py-4 shadow-xl backdrop-blur-sm ${
               publishToast.tone === "success"
                 ? "border-success-foreground/20 bg-success-surface text-success-foreground"
-                : "border-danger-foreground/20 bg-danger-surface text-danger-foreground"
+                : publishToast.tone === "warning"
+                  ? "border-warning-foreground/20 bg-warning-surface text-warning-foreground"
+                  : "border-danger-foreground/20 bg-danger-surface text-danger-foreground"
             }`}
           >
             <div className="flex items-start gap-3">
               <div className="mt-0.5 shrink-0">
                 {publishToast.tone === "success" ? (
                   <CheckCircle2 className="h-5 w-5" />
+                ) : publishToast.tone === "warning" ? (
+                  <AlertCircle className="h-5 w-5" />
                 ) : (
                   <X className="h-5 w-5" />
                 )}

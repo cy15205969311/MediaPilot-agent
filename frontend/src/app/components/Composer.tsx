@@ -10,6 +10,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
+import { useMemo } from "react";
 import type { ChangeEvent, KeyboardEvent, RefObject } from "react";
 
 import type {
@@ -80,6 +81,14 @@ export function Composer({
 }: ComposerProps) {
   const isLoading = isStreaming || isUploading;
   const canSubmit = message.trim().length > 0 && !isLoading;
+  const imageMaterials = useMemo(
+    () => uploadedMaterials.filter((item) => item.kind === "image"),
+    [uploadedMaterials],
+  );
+  const nonImageMaterials = useMemo(
+    () => uploadedMaterials.filter((item) => item.kind !== "image"),
+    [uploadedMaterials],
+  );
   const sendButtonLabel = isUploading
     ? "上传中..."
     : isStreaming
@@ -110,6 +119,73 @@ export function Composer({
     event.preventDefault();
     handleSubmit();
   };
+
+  const renderImageCard = (item: UploadedMaterial) => (
+    <div
+      key={item.id}
+      className="relative flex-shrink-0 w-16 h-16 sm:w-[72px] sm:h-[72px] rounded-xl overflow-hidden border border-black/10 dark:border-white/10 shadow-sm transition-transform hover:scale-[1.02] bg-muted"
+      data-testid="composer-uploaded-image"
+    >
+      {item.previewUrl ? (
+        <img
+          alt={item.name}
+          className="h-full w-full object-cover"
+          src={item.previewUrl}
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center bg-card text-muted-foreground">
+          <ImageIcon className="h-6 w-6" />
+        </div>
+      )}
+
+      <button
+        aria-label={`删除图片 ${item.name}`}
+        className="absolute top-1 right-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition hover:bg-black/75"
+        onClick={() => onRemoveMaterial(item.id)}
+        type="button"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+
+  const renderAttachmentCard = (item: UploadedMaterial) => (
+    <div
+      key={item.id}
+      className="flex items-center gap-3 rounded-2xl border border-border bg-muted px-3 py-2 shadow-sm"
+      data-testid="composer-uploaded-material"
+    >
+      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-card text-muted-foreground">
+        {item.kind === "video" ? (
+          <Video className="h-5 w-5" />
+        ) : item.kind === "audio" ? (
+          <Volume2 className="h-5 w-5" />
+        ) : (
+          <FileText className="h-5 w-5" />
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className="truncate text-sm font-medium text-foreground">{item.name}</div>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span>{item.sizeLabel}</span>
+          {renderMaterialStatus(item)}
+        </div>
+        {item.errorMessage ? (
+          <div className="mt-1 text-xs text-danger-foreground">
+            {item.errorMessage}
+          </div>
+        ) : null}
+      </div>
+      <button
+        aria-label={`删除素材 ${item.name}`}
+        className="rounded-lg p-1 text-muted-foreground transition hover:bg-surface-subtle hover:text-foreground"
+        onClick={() => onRemoveMaterial(item.id)}
+        type="button"
+      >
+        <X className="h-4 w-4" />
+      </button>
+    </div>
+  );
 
   return (
     <>
@@ -153,52 +229,9 @@ export function Composer({
           </button>
         </div>
 
-        {uploadedMaterials.length > 0 ? (
+        {nonImageMaterials.length > 0 ? (
           <div className="mb-3 flex flex-wrap gap-3">
-            {uploadedMaterials.map((item) => (
-              <div
-                key={item.id}
-                className="flex items-center gap-3 rounded-2xl border border-border bg-muted px-3 py-2 shadow-sm"
-                data-testid="composer-uploaded-material"
-              >
-                {item.previewUrl ? (
-                  <img
-                    alt={item.name}
-                    className="h-12 w-12 rounded-xl object-cover"
-                    src={item.previewUrl}
-                  />
-                ) : (
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-card text-muted-foreground">
-                    {item.kind === "video" ? (
-                      <Video className="h-5 w-5" />
-                    ) : item.kind === "audio" ? (
-                      <Volume2 className="h-5 w-5" />
-                    ) : (
-                      <FileText className="h-5 w-5" />
-                    )}
-                  </div>
-                )}
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium text-foreground">{item.name}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                    <span>{item.sizeLabel}</span>
-                    {renderMaterialStatus(item)}
-                  </div>
-                  {item.errorMessage ? (
-                    <div className="mt-1 text-xs text-danger-foreground">
-                      {item.errorMessage}
-                    </div>
-                  ) : null}
-                </div>
-                <button
-                  className="rounded-lg p-1 text-muted-foreground transition hover:bg-surface-subtle hover:text-foreground"
-                  onClick={() => onRemoveMaterial(item.id)}
-                  type="button"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
+            {nonImageMaterials.map(renderAttachmentCard)}
           </div>
         ) : null}
 
@@ -229,9 +262,16 @@ export function Composer({
           </div>
         ) : null}
 
-        <div className="relative">
+        <div className="relative overflow-hidden rounded-[28px] border border-border bg-card shadow-sm transition focus-within:border-primary">
+          {imageMaterials.length > 0 ? (
+            <div className="px-4 pt-4">
+              <div className="scrollbar-hide flex flex-row gap-3 overflow-x-auto overscroll-x-contain w-full pb-2 pt-1 px-1">
+                {imageMaterials.map(renderImageCard)}
+              </div>
+            </div>
+          ) : null}
           <textarea
-            className="min-h-32 w-full resize-none rounded-[28px] border border-border bg-card px-5 py-4 pr-20 text-sm leading-7 text-card-foreground shadow-sm outline-none transition focus:border-primary focus:outline-none focus:ring-0"
+            className="min-h-32 w-full resize-none bg-transparent px-5 py-4 pr-20 text-sm leading-7 text-card-foreground outline-none focus:outline-none focus:ring-0"
             data-testid="composer-textarea"
             onChange={(event) => onMessageChange(event.target.value)}
             onKeyDown={handleKeyDown}
