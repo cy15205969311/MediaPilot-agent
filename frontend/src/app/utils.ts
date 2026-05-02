@@ -139,6 +139,9 @@ export function mapMaterialKindToSchema(kind: UploadedMaterialKind) {
   if (kind === "video") {
     return "video_url";
   }
+  if (kind === "audio") {
+    return "audio_url";
+  }
   return "text_link";
 }
 
@@ -150,6 +153,9 @@ export function mapSchemaMaterialToKind(
   }
   if (materialType === "video_url") {
     return "video";
+  }
+  if (materialType === "audio_url") {
+    return "audio";
   }
   return "text";
 }

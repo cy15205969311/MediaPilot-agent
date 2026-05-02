@@ -1,5 +1,7 @@
 import asyncio
 
+import httpx
+
 import pytest
 
 import app.services.providers as providers_module
@@ -143,6 +145,283 @@ def test_compatible_provider_normalizes_legacy_mimo_model_casing():
     assert provider.artifact_model == "mimo-v2-omni"
 
 
+def test_compatible_provider_routes_video_requests_to_mimo_vision_model(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[dict[str, object]] = []
+
+    class FakeDelta:
+        content = "ok"
+
+    class FakeChoice:
+        delta = FakeDelta()
+
+    class FakeChunk:
+        choices = [FakeChoice()]
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self._consumed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._consumed:
+                raise StopAsyncIteration
+            self._consumed = True
+            return FakeChunk()
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            return FakeStream()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    class FakeArtifact:
+        def model_dump(self, mode: str = "json") -> dict[str, object]:
+            return {
+                "artifact_type": "content_draft",
+                "title": "视频草稿",
+                "title_candidates": ["标题一", "标题二", "标题三"],
+                "body": "正文",
+                "platform_cta": "行动引导",
+            }
+
+    async def fake_build_structured_artifact(*args, **kwargs):
+        return FakeArtifact()
+
+    monkeypatch.setattr(
+        providers_module,
+        "_load_thread_history",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        providers_module,
+        "resolve_media_reference",
+        lambda raw_url: f"https://cdn.example.com/{str(raw_url).split('/')[-1]}",
+    )
+
+    provider = providers_module.CompatibleLLMProvider(
+        api_key="compatible-key",
+        base_url="https://example.com/v1",
+        model="mimo-v2.5-pro",
+        vision_model="mimo-v2-omni",
+    )
+    monkeypatch.setattr(provider, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(provider, "_build_structured_artifact", fake_build_structured_artifact)
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-compatible-native-video",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请结合视频生成一段文案",
+            "materials": [
+                {
+                    "type": "video_url",
+                    "url": "/uploads/alice/demo.mp4",
+                    "text": "demo.mp4",
+                }
+            ],
+        }
+    )
+
+    events = asyncio.run(_collect_provider_events(provider, request))
+
+    assert any(event["event"] == "artifact" for event in events)
+    assert calls
+    assert calls[0]["model"] == "mimo-v2-omni"
+    user_content = calls[0]["messages"][-1]["content"]
+    assert isinstance(user_content, list)
+    assert any(
+        part.get("type") == "video_url"
+        and part.get("video_url", {}).get("url") == "https://cdn.example.com/demo.mp4"
+        for part in user_content
+    )
+
+
+def test_compatible_provider_routes_audio_requests_to_mimo_vision_model(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[dict[str, object]] = []
+
+    class FakeDelta:
+        content = "ok"
+
+    class FakeChoice:
+        delta = FakeDelta()
+
+    class FakeChunk:
+        choices = [FakeChoice()]
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self._consumed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._consumed:
+                raise StopAsyncIteration
+            self._consumed = True
+            return FakeChunk()
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            return FakeStream()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    class FakeArtifact:
+        def model_dump(self, mode: str = "json") -> dict[str, object]:
+            return {
+                "artifact_type": "content_draft",
+                "title": "音频草稿",
+                "title_candidates": ["标题一", "标题二", "标题三"],
+                "body": "正文",
+                "platform_cta": "行动引导",
+            }
+
+    async def fake_build_structured_artifact(*args, **kwargs):
+        return FakeArtifact()
+
+    monkeypatch.setattr(
+        providers_module,
+        "_load_thread_history",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        providers_module,
+        "resolve_media_reference",
+        lambda raw_url: f"https://cdn.example.com/{str(raw_url).split('/')[-1]}",
+    )
+
+    provider = providers_module.CompatibleLLMProvider(
+        api_key="compatible-key",
+        base_url="https://example.com/v1",
+        model="mimo-v2.5-pro",
+        vision_model="mimo-v2-omni",
+    )
+    monkeypatch.setattr(provider, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(provider, "_build_structured_artifact", fake_build_structured_artifact)
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-compatible-native-audio",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请结合音频生成一段文案",
+            "materials": [
+                {
+                    "type": "audio_url",
+                    "url": "/uploads/alice/podcast.mp3",
+                    "text": "podcast.mp3",
+                }
+            ],
+        }
+    )
+
+    events = asyncio.run(_collect_provider_events(provider, request))
+
+    assert any(event["event"] == "artifact" for event in events)
+    assert calls
+    assert calls[0]["model"] == "mimo-v2-omni"
+    user_content = calls[0]["messages"][-1]["content"]
+    assert isinstance(user_content, list)
+    assert any(
+        part.get("type") == "input_audio"
+        and part.get("input_audio", {}).get("data") == "https://cdn.example.com/podcast.mp3"
+        for part in user_content
+    )
+
+
+def test_compatible_provider_marks_remote_protocol_disconnect_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeDelta:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeChoice:
+        def __init__(self, content: str) -> None:
+            self.delta = FakeDelta(content)
+
+    class FakeChunk:
+        def __init__(self, content: str) -> None:
+            self.choices = [FakeChoice(content)]
+
+    class FlakyStream:
+        def __init__(self) -> None:
+            self._index = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self._index += 1
+            if self._index == 1:
+                return FakeChunk("partial")
+            raise httpx.RemoteProtocolError("incomplete chunked read")
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            return FlakyStream()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr(
+        providers_module,
+        "_load_thread_history",
+        lambda **kwargs: [],
+    )
+
+    provider = providers_module.CompatibleLLMProvider(
+        api_key="compatible-key",
+        base_url="https://example.com/v1",
+        model="mimo-v2.5-pro",
+        vision_model="mimo-v2-omni",
+    )
+    monkeypatch.setattr(provider, "_get_client", lambda: FakeClient())
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-compatible-remote-disconnect",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请生成一段正文",
+            "materials": [],
+        }
+    )
+
+    events = asyncio.run(_collect_provider_events(provider, request))
+
+    error_event = next(event for event in events if event["event"] == "error")
+    assert error_event["code"] == providers_module.TRANSIENT_PROVIDER_STREAM_ERROR_CODE
+    assert error_event["retriable"] is True
+    assert error_event["provider"] == "compatible"
+    assert error_event["model"] == "mimo-v2.5-pro"
+    assert any(
+        event["event"] == "message" and event.get("delta") == "partial"
+        for event in events
+    )
+
+
 def test_media_agent_workflow_uses_provider_clone_for_model_override():
     seen_models: list[str] = []
 
@@ -234,5 +513,15 @@ async def _collect_workflow_events(
 ) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     async for event in workflow.run(request):
+        events.append(event)
+    return events
+
+
+async def _collect_provider_events(
+    provider: BaseLLMProvider,
+    request: MediaChatRequest,
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    async for event in provider.generate_stream(request):
         events.append(event)
     return events

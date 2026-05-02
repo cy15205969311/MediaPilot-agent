@@ -295,6 +295,38 @@ def test_upload_media_accepts_docx_documents(client: TestClient):
     assert payload["filename"].endswith(".docx")
 
 
+def test_upload_media_accepts_avi_videos(client: TestClient):
+    headers, _ = register_user(client, username="alice-upload-avi")
+
+    response = client.post(
+        "/api/v1/media/upload",
+        headers=headers,
+        files={"file": ("clip.avi", BytesIO(b"fake-avi-bytes"), "video/x-msvideo")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_type"] == "video"
+    assert payload["original_filename"] == "clip.avi"
+    assert payload["filename"].endswith(".avi")
+
+
+def test_upload_media_accepts_mp3_audio(client: TestClient):
+    headers, _ = register_user(client, username="alice-upload-mp3")
+
+    response = client.post(
+        "/api/v1/media/upload",
+        headers=headers,
+        files={"file": ("podcast.mp3", BytesIO(b"fake-mp3-bytes"), "audio/mpeg")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_type"] == "audio"
+    assert payload["original_filename"] == "podcast.mp3"
+    assert payload["filename"].endswith(".mp3")
+
+
 def test_upload_media_uses_oss_storage_backend_when_configured(
     client: TestClient,
     session_factory,
@@ -380,6 +412,7 @@ def test_upload_media_rejects_unsupported_type(client: TestClient):
 
     assert response.status_code == 415
     assert "仅支持上传" in response.json()["detail"]
+    assert "avi" in response.json()["detail"]
 
 
 def test_upload_media_rejects_oversized_file(

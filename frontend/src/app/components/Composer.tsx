@@ -5,7 +5,9 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   Send,
+  StopCircle,
   Video,
+  Volume2,
   X,
 } from "lucide-react";
 import type { ChangeEvent, KeyboardEvent, RefObject } from "react";
@@ -21,11 +23,13 @@ type ComposerProps = {
   uploadedMaterials: UploadedMaterial[];
   imageInputRef: RefObject<HTMLInputElement>;
   videoInputRef: RefObject<HTMLInputElement>;
+  audioInputRef: RefObject<HTMLInputElement>;
   textInputRef: RefObject<HTMLInputElement>;
   isStreaming: boolean;
   isUploading: boolean;
   onMessageChange: (message: string) => void;
   onSubmit: (payload: ComposerSubmitPayload) => void;
+  onStopStreaming: () => void;
   onTriggerFilePicker: (kind: UploadedMaterialKind) => void;
   onRemoveMaterial: (materialId: string) => void;
   onFilesSelected: (kind: UploadedMaterialKind, event: ChangeEvent<HTMLInputElement>) => void;
@@ -63,11 +67,13 @@ export function Composer({
   uploadedMaterials,
   imageInputRef,
   videoInputRef,
+  audioInputRef,
   textInputRef,
   isStreaming,
   isUploading,
   onMessageChange,
   onSubmit,
+  onStopStreaming,
   onTriggerFilePicker,
   onRemoveMaterial,
   onFilesSelected,
@@ -129,6 +135,15 @@ export function Composer({
           </button>
           <button
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
+            data-testid="composer-upload-audio"
+            onClick={() => onTriggerFilePicker("audio")}
+            type="button"
+          >
+            <Volume2 className="h-4 w-4" />
+            上传音频
+          </button>
+          <button
+            className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
             data-testid="composer-upload-text"
             onClick={() => onTriggerFilePicker("text")}
             type="button"
@@ -156,6 +171,8 @@ export function Composer({
                   <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-card text-muted-foreground">
                     {item.kind === "video" ? (
                       <Video className="h-5 w-5" />
+                    ) : item.kind === "audio" ? (
+                      <Volume2 className="h-5 w-5" />
                     ) : (
                       <FileText className="h-5 w-5" />
                     )}
@@ -189,6 +206,26 @@ export function Composer({
           <div className="mb-3 flex items-center gap-2 rounded-2xl border border-warning-foreground/20 bg-warning-surface px-4 py-3 text-sm text-warning-foreground">
             <LoaderCircle className="h-4 w-4 animate-spin" />
             素材正在上传，上传完成后会自动加入本次任务。
+          </div>
+        ) : null}
+
+        {isStreaming ? (
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
+            <div className="min-w-0">
+              <div className="font-semibold">正在生成内容</div>
+              <div className="mt-1 text-xs leading-5">
+                发现提示词写错或方向偏了，可以立即停止，已输出内容会保留在当前对话中。
+              </div>
+            </div>
+            <button
+              className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-danger-foreground px-3 py-2 text-xs font-semibold text-danger-surface transition hover:opacity-90"
+              data-testid="composer-stop-button"
+              onClick={onStopStreaming}
+              type="button"
+            >
+              <StopCircle className="h-4 w-4" />
+              停止生成
+            </button>
           </div>
         ) : null}
 
@@ -237,12 +274,21 @@ export function Composer({
         type="file"
       />
       <input
-        accept="video/*,.mp4,.mov"
+        accept="video/*,.mp4,.mov,.avi,.wmv"
         className="hidden"
         data-testid="composer-video-input"
         multiple
         onChange={(event) => onFilesSelected("video", event)}
         ref={videoInputRef}
+        type="file"
+      />
+      <input
+        accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg"
+        className="hidden"
+        data-testid="composer-audio-input"
+        multiple
+        onChange={(event) => onFilesSelected("audio", event)}
+        ref={audioInputRef}
         type="file"
       />
       <input

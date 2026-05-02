@@ -56,6 +56,8 @@ DEFAULT_QWEN_PRIMARY_MODEL = "qwen-max"
 DEFAULT_QWEN_FALLBACK_MODELS = ("qwen-plus", "qwen-turbo")
 DEFAULT_QWEN_RETRY_ATTEMPTS = 3
 DEFAULT_QWEN_RETRY_BASE_DELAY_SECONDS = 1.0
+TRANSIENT_PROVIDER_STREAM_ERROR_CODE = "PROVIDER_TRANSIENT_STREAM_ERROR"
+DEFAULT_TRANSIENT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 
 ArtifactSchemaType = (
     type[TopicPlanningArtifactPayload]
@@ -66,6 +68,9 @@ ArtifactSchemaType = (
 ConversationMessage = dict[str, object]
 ConversationContentPart = dict[str, object]
 MIMO_NATIVE_VIDEO_MODELS = {"mimo-v2.5", "mimo-v2-omni"}
+MIMO_NATIVE_AUDIO_MODELS = {"mimo-v2-omni"}
+MIMO_NATIVE_VIDEO_FPS = 1
+MIMO_NATIVE_VIDEO_MEDIA_RESOLUTION = "default"
 
 
 class QwenProviderFallbackError(RuntimeError):
@@ -124,6 +129,35 @@ def _supports_native_video_understanding(model_name: str | None) -> bool:
     return normalized in MIMO_NATIVE_VIDEO_MODELS
 
 
+def _supports_native_audio_understanding(model_name: str | None) -> bool:
+    normalized = _normalize_compatible_model_name(model_name)
+    return normalized in MIMO_NATIVE_AUDIO_MODELS
+
+
+def _resolve_compatible_generation_model(
+    *,
+    request: MediaChatRequest,
+    active_model: str | None,
+    multimodal_model: str | None = None,
+) -> str:
+    normalized_active_model = _normalize_compatible_model_name(active_model)
+    normalized_multimodal_model = _normalize_compatible_model_name(multimodal_model)
+
+    if _request_has_video_materials(request):
+        if _supports_native_video_understanding(normalized_active_model):
+            return normalized_active_model
+        if _supports_native_video_understanding(normalized_multimodal_model):
+            return normalized_multimodal_model
+
+    if _request_has_audio_materials(request):
+        if _supports_native_audio_understanding(normalized_active_model):
+            return normalized_active_model
+        if _supports_native_audio_understanding(normalized_multimodal_model):
+            return normalized_multimodal_model
+
+    return normalized_active_model
+
+
 def _request_has_video_materials(request: MediaChatRequest) -> bool:
     return any(
         material.type == MaterialType.VIDEO_URL and bool((material.url or "").strip())
@@ -131,9 +165,45 @@ def _request_has_video_materials(request: MediaChatRequest) -> bool:
     )
 
 
+def _request_has_audio_materials(request: MediaChatRequest) -> bool:
+    return any(
+        material.type == MaterialType.AUDIO_URL and bool((material.url or "").strip())
+        for material in request.materials
+    )
+
+
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
     connect_timeout = min(seconds, 10.0)
     return httpx.Timeout(seconds, connect=connect_timeout)
+
+
+def _is_transient_stream_exception(exc: Exception) -> bool:
+    return isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadTimeout))
+
+
+def _build_transient_stream_error_event(
+    *,
+    provider_name: str,
+    model_name: str,
+    thread_id: str,
+    exc: Exception,
+    retry_delay_seconds: float = DEFAULT_TRANSIENT_PROVIDER_RETRY_DELAY_SECONDS,
+) -> dict[str, object]:
+    logger.warning(
+        "Provider disconnected mid-stream, raising transient error for retry. provider=%s model=%s thread_id=%s error=%s",
+        provider_name,
+        model_name or "<unset>",
+        thread_id,
+        exc,
+    )
+    return _error_event(
+        code=TRANSIENT_PROVIDER_STREAM_ERROR_CODE,
+        message="模型服务在生成过程中网络中断，系统将自动重试。",
+        retriable=True,
+        retry_delay_seconds=max(0.0, float(retry_delay_seconds)),
+        provider=provider_name,
+        model=model_name or "",
+    )
 
 
 class _OpenAIToolBindingAdapter:
@@ -524,26 +594,35 @@ class OpenAIProvider(BaseLLMProvider):
                 user_id=user_id,
                 active_model=self.model,
             )
-            stream = await self._get_client().chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.7,
-                stream=True,
-                timeout=self.request_timeout,
-            )
+            try:
+                stream = await self._get_client().chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.7,
+                    stream=True,
+                    timeout=self.request_timeout,
+                )
 
-            async for chunk in stream:
-                for choice in chunk.choices:
-                    delta = choice.delta.content or ""
-                    if not delta:
-                        continue
-                    streamed_text += delta
-                    yield {
-                        "event": "message",
-                        "delta": delta,
-                        "index": message_index,
-                    }
-                    message_index += 1
+                async for chunk in stream:
+                    for choice in chunk.choices:
+                        delta = choice.delta.content or ""
+                        if not delta:
+                            continue
+                        streamed_text += delta
+                        yield {
+                            "event": "message",
+                            "delta": delta,
+                            "index": message_index,
+                        }
+                        message_index += 1
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout) as exc:
+                yield _build_transient_stream_error_event(
+                    provider_name="openai",
+                    model_name=self.model,
+                    thread_id=request.thread_id,
+                    exc=exc,
+                )
+                return
 
             yield {
                 "event": "tool_call",
@@ -698,6 +777,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
         *,
         model: str | None = None,
         artifact_model: str | None = None,
+        vision_model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         timeout_seconds: float | None = None,
@@ -707,6 +787,9 @@ class CompatibleLLMProvider(BaseLLMProvider):
         )
         self.artifact_model = _normalize_compatible_model_name(
             artifact_model or os.getenv("LLM_ARTIFACT_MODEL", self.model),
+        )
+        self.vision_model = _normalize_compatible_model_name(
+            vision_model or os.getenv("LLM_VISION_MODEL", ""),
         )
         self.api_key = api_key or os.getenv("LLM_API_KEY")
         self.base_url = base_url or os.getenv("LLM_BASE_URL")
@@ -746,33 +829,47 @@ class CompatibleLLMProvider(BaseLLMProvider):
         message_index = 0
 
         try:
+            request_model = _resolve_compatible_generation_model(
+                request=request,
+                active_model=self.model,
+                multimodal_model=self.vision_model,
+            )
             messages = _build_conversation_messages(
                 request,
                 db=db,
                 thread=thread,
                 user_id=user_id,
-                active_model=self.model,
+                active_model=request_model,
             )
-            stream = await self._get_client().chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.7,
-                stream=True,
-                timeout=self.request_timeout,
-            )
+            try:
+                stream = await self._get_client().chat.completions.create(
+                    model=request_model,
+                    messages=messages,
+                    temperature=0.7,
+                    stream=True,
+                    timeout=self.request_timeout,
+                )
 
-            async for chunk in stream:
-                for choice in chunk.choices:
-                    delta = choice.delta.content or ""
-                    if not delta:
-                        continue
-                    streamed_text += delta
-                    yield {
-                        "event": "message",
-                        "delta": delta,
-                        "index": message_index,
-                    }
-                    message_index += 1
+                async for chunk in stream:
+                    for choice in chunk.choices:
+                        delta = choice.delta.content or ""
+                        if not delta:
+                            continue
+                        streamed_text += delta
+                        yield {
+                            "event": "message",
+                            "delta": delta,
+                            "index": message_index,
+                        }
+                        message_index += 1
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout) as exc:
+                yield _build_transient_stream_error_event(
+                    provider_name="compatible",
+                    model_name=request_model,
+                    thread_id=request.thread_id,
+                    exc=exc,
+                )
+                return
 
             yield {
                 "event": "tool_call",
@@ -876,6 +973,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
         return type(self)(
             model=normalized_model,
             artifact_model=normalized_model,
+            vision_model=self.vision_model,
             api_key=self.api_key,
             base_url=self.base_url,
             timeout_seconds=self.timeout_seconds,
@@ -1463,12 +1561,14 @@ def _start_event(request: MediaChatRequest) -> dict[str, object]:
     }
 
 
-def _error_event(*, code: str, message: str) -> dict[str, object]:
-    return {
+def _error_event(*, code: str, message: str, **extra: object) -> dict[str, object]:
+    payload: dict[str, object] = {
         "event": "error",
         "code": code,
         "message": message,
     }
+    payload.update(extra)
+    return payload
 
 
 def _resolve_system_prompt(request: MediaChatRequest, thread: Thread | None) -> str:
@@ -1491,9 +1591,14 @@ def _build_conversation_messages(
         _supports_native_video_understanding(active_model)
         and _request_has_video_materials(request)
     )
+    native_audio_enabled = (
+        _supports_native_audio_understanding(active_model)
+        and _request_has_audio_materials(request)
+    )
     current_user_content = _build_current_user_content(
         request,
         native_video_enabled=native_video_enabled,
+        native_audio_enabled=native_audio_enabled,
     )
 
     messages: list[ConversationMessage] = [
@@ -1519,7 +1624,7 @@ def _build_conversation_messages(
     elif _message_content_has_payload(current_user_content):
         messages.append({"role": "user", "content": current_user_content})
 
-    if request.materials and not native_video_enabled:
+    if request.materials and not native_video_enabled and not native_audio_enabled:
         messages.append(
             {
                 "role": "user",
@@ -1560,8 +1665,9 @@ def _build_current_user_content(
     request: MediaChatRequest,
     *,
     native_video_enabled: bool,
+    native_audio_enabled: bool,
 ) -> str | list[ConversationContentPart]:
-    if not native_video_enabled:
+    if not native_video_enabled and not native_audio_enabled:
         return request.message
 
     content: list[ConversationContentPart] = []
@@ -1571,7 +1677,11 @@ def _build_current_user_content(
     else:
         content.append({"type": "text", "text": "请结合附带视频素材完成当前任务。"})
 
-    supplemental_materials = _serialize_materials(request, include_video_materials=False)
+    supplemental_materials = _serialize_materials(
+        request,
+        include_video_materials=not native_video_enabled,
+        include_audio_materials=not native_audio_enabled,
+    )
     if supplemental_materials.strip() and supplemental_materials != "无":
         content.append(
             {
@@ -1581,11 +1691,16 @@ def _build_current_user_content(
         )
 
     for index, material in enumerate(request.materials, start=1):
-        if material.type != MaterialType.VIDEO_URL or not (material.url or "").strip():
+        if material.type == MaterialType.VIDEO_URL and native_video_enabled and (material.url or "").strip():
+            content.extend(_build_native_video_content_parts(material=material, index=index))
             continue
-        content.extend(_build_native_video_content_parts(material=material, index=index))
+        if material.type == MaterialType.AUDIO_URL and native_audio_enabled and (material.url or "").strip():
+            content.extend(_build_native_audio_content_parts(material=material, index=index))
 
-    if not any(part.get("type") == "video_url" for part in content):
+    if not any(
+        part.get("type") in {"video_url", "input_audio"}
+        for part in content
+    ):
         return content if _message_content_has_payload(content) else request.message
     return content
 
@@ -1609,11 +1724,48 @@ def _build_native_video_content_parts(
         )
         return parts
 
-    parts.append({"type": "video_url", "video_url": {"url": resolved_url}})
+    parts.append(
+        {
+            "type": "video_url",
+            "video_url": {"url": resolved_url},
+            "fps": MIMO_NATIVE_VIDEO_FPS,
+            "media_resolution": MIMO_NATIVE_VIDEO_MEDIA_RESOLUTION,
+        }
+    )
+    return parts
+
+
+def _build_native_audio_content_parts(
+    *,
+    material: MaterialInput,
+    index: int,
+) -> list[ConversationContentPart]:
+    parts: list[ConversationContentPart] = []
+    label = material.text.strip() or f"音频素材 {index}"
+    parts.append({"type": "text", "text": f"{label}：请直接理解这段音频的语义、语气与背景声音。"})
+
+    resolved_url = _resolve_native_audio_material_url(material)
+    if not resolved_url:
+        parts.append(
+            {
+                "type": "text",
+                "text": f"{label} 的可访问音频链接暂时无法解析，请忽略该音频并继续基于其余上下文回答。",
+            }
+        )
+        return parts
+
+    parts.append({"type": "input_audio", "input_audio": {"data": resolved_url}})
     return parts
 
 
 def _resolve_native_video_material_url(material: MaterialInput) -> str:
+    resolved_url = resolve_media_reference(material.url)
+    if resolved_url is None:
+        return ""
+    return str(resolved_url).strip()
+
+
+def _resolve_native_audio_material_url(material: MaterialInput) -> str:
     resolved_url = resolve_media_reference(material.url)
     if resolved_url is None:
         return ""
@@ -1625,6 +1777,7 @@ def _message_content_has_payload(content: str | list[ConversationContentPart]) -
         return any(
             bool(str(item.get("text", "")).strip())
             or bool(str((item.get("video_url") or {}).get("url", "")).strip())
+            or bool(str((item.get("input_audio") or {}).get("data", "")).strip())
             for item in content
             if isinstance(item, dict)
         )
@@ -1730,6 +1883,7 @@ def _serialize_materials(
     request: MediaChatRequest,
     *,
     include_video_materials: bool = True,
+    include_audio_materials: bool = True,
 ) -> str:
     if not request.materials:
         return "无"
@@ -1737,6 +1891,8 @@ def _serialize_materials(
     lines = []
     for index, material in enumerate(request.materials, start=1):
         if not include_video_materials and material.type == MaterialType.VIDEO_URL:
+            continue
+        if not include_audio_materials and material.type == MaterialType.AUDIO_URL:
             continue
         lines.append(
             f"{index}. type={material.type.value}; "

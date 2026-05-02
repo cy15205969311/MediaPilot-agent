@@ -41,6 +41,55 @@ test("creates a new titled conversation from the sidebar modal", async ({ page }
   await expect(page.getByRole("button", { name: new RegExp(threadTitle) })).toBeVisible();
 });
 
+test("binds a knowledge scope from the new thread modal into the chat payload", async ({
+  page,
+}) => {
+  let capturedScope = "";
+
+  await openWorkspace(page, {
+    knowledgeScopes: [
+      {
+        scope: "financial_planner_rag_one",
+        chunk_count: 42,
+        source_count: 1,
+        updated_at: "2026-05-01T03:30:00Z",
+      },
+      {
+        scope: "financial_planner_rag_two",
+        chunk_count: 36,
+        source_count: 1,
+        updated_at: "2026-05-01T03:30:00Z",
+      },
+    ],
+    streamEvents: (payload) => {
+      capturedScope = payload.knowledge_base_scope ?? "";
+      return [
+        {
+          event: "start",
+          thread_id: payload.thread_id,
+          platform: payload.platform,
+          task_type: payload.task_type,
+          materials_count: payload.materials.length,
+        },
+        { event: "message", delta: "已按绑定知识库生成内容。", index: 0 },
+        { event: "done", thread_id: payload.thread_id },
+      ];
+    },
+  });
+
+  await page.getByTestId("sidebar-create-thread").click();
+  await expect(page.getByTestId("new-thread-modal")).toBeVisible();
+  await page
+    .getByTestId("new-thread-knowledge-scope-select")
+    .selectOption("financial_planner_rag_one");
+  await page.getByRole("button", { name: "开始新会话" }).click();
+
+  await page.getByTestId("composer-textarea").fill("请基于当前绑定知识库生成理财规划笔记。");
+  await page.getByTestId("composer-send-button").click();
+
+  await expect.poll(() => capturedScope).toBe("financial_planner_rag_one");
+});
+
 test("loads existing thread history and replays persisted messages on startup", async ({
   page,
 }) => {
@@ -162,6 +211,24 @@ test("renders assistant citations as superscript references with source hints", 
       "火星一号基地贡献了 56.5% 的销量占比，是本季度最核心的增长来源。[1]\n\n参考资料：\n[1] 星际烤肠2026业务盘点.docx",
     created_at: "2026-04-28T08:11:00Z",
   });
+  const citationArtifact = {
+    artifact_type: "content_draft" as const,
+    title: "销量结构复盘",
+    title_candidates: ["本季度增长来源复盘"],
+    body: "火星一号基地贡献了 56.5% 的销量占比，是本季度最核心的增长来源。[1]",
+    platform_cta: "发布前建议复核引用审计面板。",
+    citation_audit: [
+      {
+        citation_index: 1,
+        source: "星际烤肠2026业务盘点.docx",
+        snippet: "火星一号基地贡献了 56.5% 的销量占比，是本季度最核心的增长来源。",
+        relevance_score: 0.92,
+        chunk_index: 0,
+        document_id: "rag-sales-1",
+        scope: "sales_report",
+      },
+    ],
+  };
 
   await openWorkspace(page, {
     threads: [
@@ -185,6 +252,15 @@ test("renders assistant citations as superscript references with source hints", 
             created_at: "2026-04-28T08:10:00Z",
           }),
           assistantMessage,
+          createMockHistoryMessage({
+            id: "history-artifact-citation-1",
+            thread_id: threadId,
+            role: "assistant",
+            message_type: "artifact",
+            content: citationArtifact.title,
+            artifact: citationArtifact,
+            created_at: "2026-04-28T08:11:10Z",
+          }),
         ],
       }),
     },
@@ -197,6 +273,13 @@ test("renders assistant citations as superscript references with source hints", 
   const citation = assistantBubble.locator('[data-testid="chat-citation-1"]').first();
   await expect(citation).toBeVisible();
   await expect(citation).toHaveAttribute("title", "来源：星际烤肠2026业务盘点.docx");
+  await expect(page.getByTestId("citation-audit-panel").first()).toBeVisible();
+  await expect(page.getByTestId("citation-audit-score-1").first()).toContainText(
+    "92% 相关度",
+  );
+  await expect(page.getByTestId("citation-audit-item-1").first()).toContainText(
+    "火星一号基地贡献了 56.5%",
+  );
 });
 
 test("blocks unsupported knowledge uploads and shows an inline error", async ({
@@ -1097,6 +1180,28 @@ test("sends a streamed chat message and renders user thinking progress and AI fe
     page
       .getByTestId("chat-message-assistant")
       .filter({ hasText: "Assistant merged the uploaded material and market signals." }),
+  ).toBeVisible();
+});
+
+test("stops an in-flight streamed chat request without clearing the user message", async ({
+  page,
+}) => {
+  await openWorkspace(page, {
+    responseDelayMsByPath: {
+      "/api/v1/media/chat/stream": 8000,
+    },
+  });
+
+  const composer = page.getByTestId("composer-textarea");
+  await composer.fill("这条生成马上停止。");
+  await page.getByTestId("composer-send-button").click();
+
+  await expect(page.getByTestId("composer-stop-button")).toBeVisible();
+  await page.getByTestId("composer-stop-button").click();
+
+  await expect(page.getByTestId("composer-stop-button")).toHaveCount(0);
+  await expect(
+    page.getByTestId("chat-message-user").filter({ hasText: "这条生成马上停止。" }),
   ).toBeVisible();
 });
 

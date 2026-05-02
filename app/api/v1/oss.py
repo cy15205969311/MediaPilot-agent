@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 UPLOADS_DIR = LOCAL_UPLOADS_DIR
 
 MAX_UPLOAD_SIZE = 15 * 1024 * 1024
+MAX_AUDIO_UPLOAD_SIZE = 100 * 1024 * 1024
+MAX_VIDEO_UPLOAD_SIZE = 300 * 1024 * 1024
 READ_CHUNK_SIZE = 1024 * 1024
 ALLOWED_EXTENSIONS = {
     ".jpg": "image",
@@ -37,6 +39,13 @@ ALLOWED_EXTENSIONS = {
     ".webp": "image",
     ".mp4": "video",
     ".mov": "video",
+    ".avi": "video",
+    ".wmv": "video",
+    ".mp3": "audio",
+    ".wav": "audio",
+    ".flac": "audio",
+    ".m4a": "audio",
+    ".ogg": "audio",
     ".txt": "document",
     ".pdf": "document",
     ".md": "document",
@@ -53,6 +62,15 @@ def secure_filename(filename: str) -> str:
     safe_name = re.sub(r"\s+", "_", safe_name)
     safe_name = re.sub(r"_+", "_", safe_name)
     return safe_name.strip("._")
+
+
+def _resolve_max_upload_size(suffix: str) -> int:
+    normalized_suffix = suffix.lower()
+    if ALLOWED_EXTENSIONS.get(normalized_suffix) == "video":
+        return MAX_VIDEO_UPLOAD_SIZE
+    if ALLOWED_EXTENSIONS.get(normalized_suffix) == "audio":
+        return MAX_AUDIO_UPLOAD_SIZE
+    return MAX_UPLOAD_SIZE
 
 
 @router.post("/upload")
@@ -80,8 +98,12 @@ async def upload_media(
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="仅支持上传 jpg、jpeg、png、webp、mp4、mov、txt、pdf、md、docx 文件。",
+            detail=(
+                "仅支持上传 jpg、jpeg、png、webp、mp4、mov、avi、wmv、mp3、wav、flac、m4a、ogg、"
+                "txt、pdf、md、docx 文件。"
+            ),
         )
+    max_upload_size = _resolve_max_upload_size(suffix)
 
     resolved_thread_id: str | None = None
     if purpose == UploadPurpose.MATERIAL and thread_id:
@@ -116,10 +138,11 @@ async def upload_media(
     try:
         while chunk := await file.read(READ_CHUNK_SIZE):
             total_size += len(chunk)
-            if total_size > MAX_UPLOAD_SIZE:
+            if total_size > max_upload_size:
+                max_size_mb = max_upload_size // (1024 * 1024)
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="上传文件不能超过 15MB。",
+                    detail=f"上传文件不能超过 {max_size_mb}MB。",
                 )
         await file.seek(0)
     except HTTPException:

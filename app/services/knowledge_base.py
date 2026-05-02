@@ -3,7 +3,7 @@ import logging
 import math
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
@@ -183,6 +183,8 @@ class KnowledgeDocument:
     text: str
     created_at: str
     chunk_index: int = 0
+    relevance_score: float = 0.0
+    distance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +279,18 @@ def _embed_text(text: str) -> list[float]:
 
 def _cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(left[index] * right[index] for index in range(min(len(left), len(right))))
+
+
+def _clamp_relevance_score(score: float) -> float:
+    if math.isnan(score) or math.isinf(score):
+        return 0.0
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+def _distance_to_relevance_score(distance: float | None) -> float:
+    if distance is None:
+        return 0.0
+    return _clamp_relevance_score(1.0 - distance)
 
 
 class _HashingEmbeddingFunction:
@@ -722,7 +736,7 @@ class KnowledgeBaseService:
             return ""
 
         sections = [
-            f"[{index}] ({document.source}) {document.text}"
+            f"[{index}] ({document.source}) {round(document.relevance_score * 100)}% 相关度。{document.text}"
             for index, document in enumerate(documents, start=1)
         ]
         return "\n\n".join(sections)
@@ -800,6 +814,8 @@ class KnowledgeBaseService:
                     text=text,
                     created_at=created_at,
                     chunk_index=int(raw_document.get("chunk_index", 0) or 0),
+                    relevance_score=float(raw_document.get("relevance_score", 0.0) or 0.0),
+                    distance=raw_document.get("distance"),
                 )
             return normalized_documents
 
@@ -981,7 +997,10 @@ class KnowledgeBaseService:
             scored_documents.append((score, document))
 
         scored_documents.sort(key=lambda item: item[0], reverse=True)
-        return [document for _, document in scored_documents[:top_k]]
+        return [
+            replace(document, relevance_score=_clamp_relevance_score(score), distance=None)
+            for score, document in scored_documents[:top_k]
+        ]
 
     def _query_documents_from_chroma(
         self,
@@ -1002,7 +1021,7 @@ class KnowledgeBaseService:
                         {"scope": scope},
                     ]
                 },
-                include=["documents", "metadatas"],
+                include=["documents", "metadatas", "distances"],
             )
         except Exception as exc:  # pragma: no cover - defensive fallback
             logger.warning(
@@ -1016,6 +1035,7 @@ class KnowledgeBaseService:
         raw_ids = results.get("ids") or []
         raw_documents = results.get("documents") or []
         raw_metadatas = results.get("metadatas") or []
+        raw_distances = results.get("distances") or []
         ids = raw_ids[0] if raw_ids and isinstance(raw_ids[0], list) else raw_ids
         documents = (
             raw_documents[0]
@@ -1026,6 +1046,11 @@ class KnowledgeBaseService:
             raw_metadatas[0]
             if raw_metadatas and isinstance(raw_metadatas[0], list)
             else raw_metadatas
+        )
+        distances = (
+            raw_distances[0]
+            if raw_distances and isinstance(raw_distances[0], list)
+            else raw_distances
         )
 
         hydrated_documents: list[KnowledgeDocument] = []
@@ -1041,6 +1066,11 @@ class KnowledgeBaseService:
             text = str(raw_document).strip()
             if not text:
                 continue
+            raw_distance = distances[index] if index < len(distances) else None
+            try:
+                distance = float(raw_distance) if raw_distance is not None else None
+            except (TypeError, ValueError):
+                distance = None
             hydrated_documents.append(
                 KnowledgeDocument(
                     document_id=document_id,
@@ -1052,6 +1082,8 @@ class KnowledgeBaseService:
                     text=text,
                     created_at=str(metadata.get("created_at", "")).strip() or utcnow_iso(),
                     chunk_index=int(metadata.get("chunk_index", index) or index),
+                    relevance_score=_distance_to_relevance_score(distance),
+                    distance=distance,
                 )
             )
         return hydrated_documents

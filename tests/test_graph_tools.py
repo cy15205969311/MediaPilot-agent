@@ -107,6 +107,32 @@ async def collect_events(
     return events
 
 
+async def collect_graph_execution(
+    provider: LangGraphProvider,
+    request: MediaChatRequest,
+    *,
+    thread: Thread | None = None,
+):
+    custom_events: list[dict[str, object]] = []
+    final_state: dict[str, object] | None = None
+
+    async for mode, chunk in provider.graph.astream(
+        provider._build_initial_state(request, thread=thread),
+        stream_mode=["custom", "values"],
+    ):
+        if mode == "custom" and isinstance(chunk, dict):
+            payload = chunk.get("payload")
+            if isinstance(payload, dict):
+                custom_events.append(payload)
+        elif mode == "values" and isinstance(chunk, dict):
+            final_state = chunk
+
+    if final_state is None:
+        raise AssertionError("graph execution should yield a final state")
+
+    return custom_events, final_state
+
+
 def test_langgraph_gracefully_degrades_when_inner_provider_artifact_validation_fails():
     request = MediaChatRequest.model_validate(
         {
@@ -516,6 +542,7 @@ def test_langgraph_stops_after_market_tool_for_title_only_request():
     provider = LangGraphProvider(
         inner_provider=inner_provider,
         route_analyzer=no_search,
+        image_prompt_builder=lambda **_: "",
     )
     request = MediaChatRequest.model_validate(
         {
@@ -550,6 +577,7 @@ def test_langgraph_autonomously_considers_business_tools_for_planning_requests()
     provider = LangGraphProvider(
         inner_provider=inner_provider,
         route_analyzer=no_search,
+        image_prompt_builder=lambda **_: "",
     )
     request = MediaChatRequest.model_validate(
         {
@@ -600,6 +628,7 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
                     text="Xiaohongshu food notes should mention price and regional contrast in the opening line.",
                     created_at="2026-04-30T12:00:00Z",
                     chunk_index=0,
+                    relevance_score=0.92,
                 ),
                 KnowledgeDocument(
                     document_id="rag-2",
@@ -609,6 +638,7 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
                     text="Strong store notes should include route efficiency, real budget, and one avoid-pit reminder.",
                     created_at="2026-04-30T12:00:00Z",
                     chunk_index=1,
+                    relevance_score=0.87,
                 ),
                 KnowledgeDocument(
                     document_id="rag-3",
@@ -618,6 +648,7 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
                     text="Use immersive sensory verbs before moving into the call to action.",
                     created_at="2026-04-30T12:00:00Z",
                     chunk_index=0,
+                    relevance_score=0.74,
                 ),
             ]
 
@@ -630,6 +661,7 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
     provider = LangGraphProvider(
         inner_provider=inner_provider,
         route_analyzer=no_search,
+        image_prompt_builder=lambda **_: "",
     )
     request = MediaChatRequest.model_validate(
         {
@@ -663,6 +695,17 @@ def test_langgraph_injects_knowledge_base_context_before_final_generation(monkey
     assert "[1] 餐饮探店方法论.docx" in inner_provider.last_request_system_prompt
     assert "[2] 品牌语气手册.md" in inner_provider.last_request_system_prompt
     assert inner_provider.last_request_system_prompt.count("[1] (餐饮探店方法论.docx)") == 2
+    assert "92% 相关度" in inner_provider.last_request_system_prompt
+
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    assert artifact.citation_audit[0].source == "餐饮探店方法论.docx"
+    assert artifact.citation_audit[0].relevance_score == 0.92
+    assert artifact.citation_audit[0].citation_index == 1
+    assert artifact.citation_audit[1].chunk_index == 1
+    assert artifact.citation_audit[2].source == "品牌语气手册.md"
+
+
 def test_langgraph_attaches_generated_images_to_content_artifact():
     request = MediaChatRequest.model_validate(
         {
@@ -689,8 +732,15 @@ def test_langgraph_attaches_generated_images_to_content_artifact():
             "https://example.com/generated-cover-2.png",
         ]
 
+    async def always_generate_images(request, draft, artifact_candidate):
+        assert request.task_type.value == "content_generation"
+        assert draft
+        assert artifact_candidate is not None
+        return {"needs_image": True}
+
     provider = LangGraphProvider(
         inner_provider=ImageReadyProvider(),
+        image_route_analyzer=always_generate_images,
         image_prompt_builder=fake_prompt_builder,
         image_generator=fake_image_generator,
     )
@@ -711,6 +761,78 @@ def test_langgraph_attaches_generated_images_to_content_artifact():
     ]
 
 
+def test_langgraph_semantic_translation_request_keeps_needs_image_false():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-semantic-translation",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请帮我把下面这段英文翻译成中文：A calm weekly reset helps me focus on what matters most.",
+            "materials": [],
+        }
+    )
+
+    async def unexpected_prompt_builder(*, request, draft, artifact_candidate):
+        raise AssertionError("translation requests should not build an image prompt")
+
+    async def unexpected_image_generator(*, request, prompt, user_id, thread_id):
+        raise AssertionError("translation requests should not trigger image generation")
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        image_prompt_builder=unexpected_prompt_builder,
+        image_generator=unexpected_image_generator,
+    )
+
+    custom_events, final_state = asyncio.run(collect_graph_execution(provider, request))
+
+    assert final_state["needs_image"] is False
+    tool_call_names = [
+        str(event["name"]) for event in custom_events if event.get("event") == "tool_call"
+    ]
+    assert "build_image_prompt" not in tool_call_names
+    assert "generate_cover_images" not in tool_call_names
+
+
+def test_langgraph_semantic_visual_request_sets_needs_image_true():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-semantic-visual",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "帮我写一篇小红书种草图文，并在开头配一张极具赛博朋克风格的极客桌面图。",
+            "materials": [],
+        }
+    )
+
+    async def fake_prompt_builder(*, request, draft, artifact_candidate):
+        assert "赛博朋克" in request.message
+        assert draft
+        assert artifact_candidate is not None
+        return "生成一张赛博朋克风格的极客桌面图，适合作为小红书图文开头配图。"
+
+    async def fake_image_generator(*, request, prompt, user_id, thread_id):
+        assert request.thread_id == thread_id
+        assert "赛博朋克" in prompt
+        return ["https://example.com/cyberpunk-geek-desk.png"]
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        image_prompt_builder=fake_prompt_builder,
+        image_generator=fake_image_generator,
+    )
+
+    custom_events, final_state = asyncio.run(collect_graph_execution(provider, request))
+
+    assert final_state["needs_image"] is True
+    assert final_state["generated_images"] == ["https://example.com/cyberpunk-geek-desk.png"]
+    tool_call_names = [
+        str(event["name"]) for event in custom_events if event.get("event") == "tool_call"
+    ]
+    assert "build_image_prompt" in tool_call_names
+    assert "generate_cover_images" in tool_call_names
+
+
 def test_langgraph_keeps_text_artifact_when_image_generation_fails():
     request = MediaChatRequest.model_validate(
         {
@@ -728,8 +850,15 @@ def test_langgraph_keeps_text_artifact_when_image_generation_fails():
     async def failing_image_generator(*, request, prompt, user_id, thread_id):
         raise RuntimeError("image provider boom")
 
+    async def always_generate_images(request, draft, artifact_candidate):
+        assert request.platform.value == "douyin"
+        assert draft
+        assert artifact_candidate is not None
+        return {"needs_image": True}
+
     provider = LangGraphProvider(
         inner_provider=ImageReadyProvider(),
+        image_route_analyzer=always_generate_images,
         image_prompt_builder=fake_prompt_builder,
         image_generator=failing_image_generator,
     )
@@ -747,4 +876,40 @@ def test_langgraph_keeps_text_artifact_when_image_generation_fails():
     artifact_event = next(event for event in events if event["event"] == "artifact")
     artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
     assert artifact.artifact_type == "content_draft"
+    assert artifact.generated_images == []
+
+
+def test_langgraph_skips_image_generation_for_text_only_publishing_requests():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-image-generation-skip",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "Please translate this copy into Chinese with no image and text only output.",
+            "materials": [],
+        }
+    )
+
+    async def unexpected_prompt_builder(*, request, draft, artifact_candidate):
+        raise AssertionError("text-only requests should not build an image prompt")
+
+    async def unexpected_image_generator(*, request, prompt, user_id, thread_id):
+        raise AssertionError("text-only requests should not trigger image generation")
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        image_prompt_builder=unexpected_prompt_builder,
+        image_generator=unexpected_image_generator,
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    tool_call_names = [
+        str(event["name"]) for event in events if event["event"] == "tool_call"
+    ]
+    assert "build_image_prompt" not in tool_call_names
+    assert "generate_cover_images" not in tool_call_names
+
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
     assert artifact.generated_images == []

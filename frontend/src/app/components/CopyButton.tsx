@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Check, Copy } from "lucide-react";
+import { cleanForPublishing } from "../utils/textUtils";
 
 type CopyButtonProps = {
   text: string;
@@ -195,7 +196,8 @@ function fallbackCopyText(text: string) {
 }
 
 async function writeClipboardContent(text: string) {
-  const html = buildClipboardHtml(text);
+  const cleanedText = cleanForPublishing(text);
+  const html = buildClipboardHtml(cleanedText);
 
   if (
     navigator.clipboard?.write &&
@@ -203,7 +205,7 @@ async function writeClipboardContent(text: string) {
   ) {
     try {
       const clipboardItem = new ClipboardItem({
-        "text/plain": new Blob([text], { type: "text/plain" }),
+        "text/plain": new Blob([cleanedText], { type: "text/plain" }),
         "text/html": new Blob([html], { type: "text/html" }),
       });
       await navigator.clipboard.write([clipboardItem]);
@@ -215,11 +217,11 @@ async function writeClipboardContent(text: string) {
   }
 
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(cleanedText);
     return;
   }
 
-  fallbackCopyText(text);
+  fallbackCopyText(cleanedText);
 }
 
 export function CopyButton({

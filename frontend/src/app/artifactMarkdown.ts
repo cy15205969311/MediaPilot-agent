@@ -1,4 +1,5 @@
 import type { ArtifactPayload } from "./types";
+import { cleanForPublishing } from "./utils/textUtils";
 
 type ArtifactMarkdownOptions = {
   taskLabel?: string;
@@ -13,6 +14,10 @@ function joinSections(sections: string[]): string {
   return `${sections.filter(Boolean).join("\n\n").trim()}\n`;
 }
 
+function cleanMarkdownField(value: string): string {
+  return cleanForPublishing(value);
+}
+
 function buildContentGenerationMarkdown(artifact: ArtifactPayload): string {
   if (artifact.artifact_type !== "content_draft") {
     return "";
@@ -20,7 +25,9 @@ function buildContentGenerationMarkdown(artifact: ArtifactPayload): string {
 
   const titleCandidates =
     artifact.title_candidates.length > 0
-      ? artifact.title_candidates.map((title) => `- ${title}`).join("\n")
+      ? artifact.title_candidates
+          .map((title) => `- ${cleanMarkdownField(title)}`)
+          .join("\n")
       : "- 暂无标题候选";
 
   const generatedImages = artifact.generated_images ?? [];
@@ -35,14 +42,14 @@ function buildContentGenerationMarkdown(artifact: ArtifactPayload): string {
       : "";
 
   return joinSections([
-    `# ${artifact.title}`,
+    `# ${cleanMarkdownField(artifact.title)}`,
     imageSection,
     "## 标题候选",
     titleCandidates,
     "## 正文",
-    artifact.body,
+    cleanMarkdownField(artifact.body),
     "## 平台引导语",
-    artifact.platform_cta,
+    cleanMarkdownField(artifact.platform_cta),
   ]);
 }
 
@@ -54,14 +61,14 @@ function buildTopicPlanningMarkdown(artifact: ArtifactPayload): string {
   const topics = artifact.topics
     .map((topic, index) =>
       [
-        `## 选题 ${index + 1}：${topic.title}`,
-        `- 切入角度：${topic.angle}`,
-        `- 预期目标：${topic.goal}`,
+        `## 选题 ${index + 1}：${cleanMarkdownField(topic.title)}`,
+        `- 切入角度：${cleanMarkdownField(topic.angle)}`,
+        `- 预期目标：${cleanMarkdownField(topic.goal)}`,
       ].join("\n"),
     )
     .join("\n\n");
 
-  return joinSections([`# ${artifact.title}`, topics]);
+  return joinSections([`# ${cleanMarkdownField(artifact.title)}`, topics]);
 }
 
 function buildHotPostAnalysisMarkdown(artifact: ArtifactPayload): string {
@@ -70,16 +77,22 @@ function buildHotPostAnalysisMarkdown(artifact: ArtifactPayload): string {
   }
 
   const analysisDimensions = artifact.analysis_dimensions
-    .map((item) => [`## ${item.dimension}`, item.insight].join("\n\n"))
+    .map((item) =>
+      [`## ${cleanMarkdownField(item.dimension)}`, cleanMarkdownField(item.insight)].join(
+        "\n\n",
+      ),
+    )
     .join("\n\n");
 
   const reusableTemplates =
     artifact.reusable_templates.length > 0
-      ? artifact.reusable_templates.map((template) => `- ${template}`).join("\n")
+      ? artifact.reusable_templates
+          .map((template) => `- ${cleanMarkdownField(template)}`)
+          .join("\n")
       : "- 暂无可复用模板";
 
   return joinSections([
-    `# ${artifact.title}`,
+    `# ${cleanMarkdownField(artifact.title)}`,
     "## 分析维度",
     analysisDimensions,
     "## 可复用表达模板",
@@ -95,15 +108,17 @@ function buildCommentReplyMarkdown(artifact: ArtifactPayload): string {
   const suggestions = artifact.suggestions
     .map((item, index) =>
       joinSections([
-        `## 回复建议 ${index + 1}：${item.comment_type}`,
-        `### 场景\n${item.scenario}`,
-        `### 建议回复\n${item.reply}`,
-        item.compliance_note ? `### 合规提醒\n${item.compliance_note}` : "",
+        `## 回复建议 ${index + 1}：${cleanMarkdownField(item.comment_type)}`,
+        `### 场景\n${cleanMarkdownField(item.scenario)}`,
+        `### 建议回复\n${cleanMarkdownField(item.reply)}`,
+        item.compliance_note
+          ? `### 合规提醒\n${cleanMarkdownField(item.compliance_note)}`
+          : "",
       ]).trim(),
     )
     .join("\n\n");
 
-  return joinSections([`# ${artifact.title}`, suggestions]);
+  return joinSections([`# ${cleanMarkdownField(artifact.title)}`, suggestions]);
 }
 
 export function buildArtifactMarkdown(
@@ -136,7 +151,8 @@ export function downloadArtifactMarkdown(
   artifact: ArtifactPayload,
   markdownContent: string,
 ): string {
-  const filenameBase = sanitizeFilename(artifact.title || "草稿") || "草稿";
+  const filenameBase =
+    sanitizeFilename(cleanMarkdownField(artifact.title || "草稿")) || "草稿";
   const filename = `${filenameBase}.md`;
   const blob = new Blob([markdownContent], {
     type: "text/markdown;charset=utf-8",

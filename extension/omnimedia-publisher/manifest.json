@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "OmniMedia Publisher",
+  "description": "将 OmniMedia 工作台生成的图文内容一键填充到小红书创作者中心。",
+  "version": "0.1.0",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": [
+    "http://localhost:5173/*",
+    "https://creator.xiaohongshu.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:5173/*"],
+      "js": ["bridge.js"]
+    },
+    {
+      "matches": ["https://creator.xiaohongshu.com/*"],
+      "js": ["target_script.js"]
+    }
+  ]
+}

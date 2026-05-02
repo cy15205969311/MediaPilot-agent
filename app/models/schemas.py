@@ -28,6 +28,7 @@ UTCDateTime = Annotated[
 class MaterialType(str, Enum):
     IMAGE = "image"
     VIDEO_URL = "video_url"
+    AUDIO_URL = "audio_url"
     TEXT_LINK = "text_link"
 
 
@@ -177,9 +178,28 @@ class UploadRetentionSummary(SchemaModel):
     )
 
 
+class CitationAuditItem(SchemaModel):
+    citation_index: int = Field(..., ge=1, description="Citation source number shown in text.")
+    source: str = Field(..., description="Source filename.")
+    snippet: str = Field(..., description="Retrieved chunk preview.")
+    relevance_score: float = Field(
+        ...,
+        ge=0,
+        le=1,
+        description="Normalized relevance score between 0 and 1.",
+    )
+    chunk_index: int = Field(default=0, ge=0, description="Chunk index within the source.")
+    document_id: str | None = Field(default=None, description="Knowledge document ID.")
+    scope: str | None = Field(default=None, description="Knowledge-base scope.")
+
+
 class ArtifactPayload(SchemaModel):
     artifact_type: ArtifactType = Field(..., description="Artifact discriminator.")
     title: str = Field(..., description="Artifact title.")
+    citation_audit: list[CitationAuditItem] = Field(
+        default_factory=list,
+        description="Knowledge retrieval audit entries attached by the backend.",
+    )
 
 
 class TopicPlanningItem(SchemaModel):

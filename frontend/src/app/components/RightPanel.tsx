@@ -7,6 +7,7 @@ import type {
   UiTaskType,
 } from "../types";
 import { CommentReplyArtifact } from "./artifacts/CommentReplyArtifact";
+import { CitationAuditPanel } from "./CitationAuditPanel";
 import { ContentGenerationArtifact } from "./artifacts/ContentGenerationArtifact";
 import { HotPostAnalysisArtifact } from "./artifacts/HotPostAnalysisArtifact";
 import { TopicPlanningArtifact } from "./artifacts/TopicPlanningArtifact";
@@ -139,6 +140,12 @@ export function RightPanel({
             </div>
 
             {renderArtifactPanel(platform, taskType, artifact)}
+
+            {artifact?.citation_audit && artifact.citation_audit.length > 0 ? (
+              <div className="mt-4">
+                <CitationAuditPanel items={artifact.citation_audit} />
+              </div>
+            ) : null}
 
             {artifact ? (
               <div className="mt-4 rounded-[28px] border border-border bg-muted p-4">

@@ -123,6 +123,7 @@ import {
   buildArtifactMarkdown,
   downloadArtifactMarkdown,
 } from "./artifactMarkdown";
+import { cleanForPublishing } from "./utils/textUtils";
 
 type AuthMode =
   | "login"
@@ -157,6 +158,9 @@ function getToolCallFallbackMessage(name: string, status: string): string {
     parse_materials: "整理附件素材",
     parse_document: "解析文档内容",
     video_transcription: "转写视频语音",
+    audio_transcription: "转写音频语音",
+    video_validation: "校验视频素材",
+    audio_validation: "校验音频素材",
     ocr: "识别图片文字",
     web_search: "检索全网信息",
     retrieve_knowledge_base: "检索知识库",
@@ -379,11 +383,10 @@ function AuthCard(props: {
             {(["login", "register"] as const).map((item) => (
               <button
                 key={item}
-                className={`flex-1 rounded-xl px-4 py-2 text-sm font-medium transition ${
-                  mode === item
-                    ? "bg-card text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
+                className={`flex-1 rounded-xl px-4 py-2 text-sm font-medium transition ${mode === item
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+                  }`}
                 onClick={() => onModeChange(item)}
                 type="button"
               >
@@ -740,18 +743,26 @@ function NewThreadModal(props: {
   open: boolean;
   title: string;
   systemPrompt: string;
+  knowledgeBaseScope: string;
+  knowledgeScopes: KnowledgeScopeItem[];
+  isLoadingKnowledgeScopes: boolean;
   onClose: () => void;
   onTitleChange: (value: string) => void;
   onSystemPromptChange: (value: string) => void;
+  onKnowledgeBaseScopeChange: (value: string) => void;
   onConfirm: () => void;
 }) {
   const {
     open,
     title,
     systemPrompt,
+    knowledgeBaseScope,
+    knowledgeScopes,
+    isLoadingKnowledgeScopes,
     onClose,
     onTitleChange,
     onSystemPromptChange,
+    onKnowledgeBaseScopeChange,
     onConfirm,
   } = props;
 
@@ -769,7 +780,7 @@ function NewThreadModal(props: {
           <div>
             <div className="text-xl font-semibold text-foreground">新建会话</div>
             <div className="mt-1 text-sm text-muted-foreground">
-              为这次会话设置标题和机器人人设。留空时将使用默认助手。
+              为这次会话设置标题、机器人人设和可选知识库。留空时将使用默认助手。
             </div>
           </div>
           <button
@@ -805,6 +816,31 @@ function NewThreadModal(props: {
               placeholder="请输入你希望我扮演的角色，留空则使用通用助手。"
               value={systemPrompt}
             />
+          </label>
+
+          <label className="block">
+            <div className="mb-2 text-sm font-medium text-card-foreground">
+              关联知识库（可选）
+            </div>
+            <select
+              className="w-full rounded-2xl border border-border bg-input-background px-4 py-3 text-sm text-foreground outline-none transition focus:border-brand/40 focus:ring-4 focus:ring-brand-soft"
+              data-testid="new-thread-knowledge-scope-select"
+              disabled={isLoadingKnowledgeScopes}
+              onChange={(event) => onKnowledgeBaseScopeChange(event.target.value)}
+              value={knowledgeBaseScope}
+            >
+              <option value="">
+                {isLoadingKnowledgeScopes ? "正在加载知识库..." : "不绑定知识库"}
+              </option>
+              {knowledgeScopes.map((scope) => (
+                <option key={scope.scope} value={scope.scope}>
+                  {scope.scope} · {scope.chunk_count} 个切片
+                </option>
+              ))}
+            </select>
+            <div className="mt-2 text-xs leading-5 text-muted-foreground">
+              当前一期采用单选 Scope；如果需要检索多份资料，请把文件上传到同一个 Scope。
+            </div>
           </label>
         </div>
 
@@ -885,7 +921,7 @@ function App() {
     return storedValue.trim();
   });
   const [message, setMessage] = useState(
-    "请帮我策划一篇关于年度资产配置复盘的小红书笔记",
+    "请帮我策划一篇关于xxx的小红书笔记",
   );
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [threads, setThreads] = useState<ThreadItem[]>([]);
@@ -954,6 +990,7 @@ function App() {
   }, [modelOverride]);
 
   const abortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
   const assistantMessageIdRef = useRef<string | null>(null);
   const streamErrorRef = useRef(false);
   const hasInitializedHistoryRef = useRef(false);
@@ -961,6 +998,7 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
+  const audioInputRef = useRef<HTMLInputElement | null>(null);
   const textInputRef = useRef<HTMLInputElement | null>(null);
 
   const isAuthenticated = Boolean(
@@ -1994,7 +2032,10 @@ function App() {
     }
   };
 
-  const handleDeleteTopic = async (topic: TopicItem): Promise<boolean> => {
+  const handleDeleteTopic = async (
+    topic: TopicItem,
+    options?: { silentNotFound?: boolean },
+  ): Promise<boolean> => {
     setIsMutatingTopics(true);
     setMutatingTopicId(topic.id);
 
@@ -2413,6 +2454,10 @@ function App() {
       videoInputRef.current?.click();
       return;
     }
+    if (kind === "audio") {
+      audioInputRef.current?.click();
+      return;
+    }
     textInputRef.current?.click();
   };
 
@@ -2528,19 +2573,19 @@ function App() {
               ? `\n\n原始错误：${event.message.trim()}`
               : "";
 
-        streamErrorRef.current = true;
-        setStatusText(friendlyMessage);
-        removeAssistantPlaceholderIfEmpty();
-        appendSystemMessage({
-          id: createId("provider-error"),
-          role: "error",
-          title: "模型服务异常",
-          content: `${friendlyMessage}${detailText}\n\n错误代码：${event.code}`,
-          createdAt: new Date().toISOString(),
-        });
-        setIsStreaming(false);
-        assistantMessageIdRef.current = null;
-        break;
+          streamErrorRef.current = true;
+          setStatusText(friendlyMessage);
+          removeAssistantPlaceholderIfEmpty();
+          appendSystemMessage({
+            id: createId("provider-error"),
+            role: "error",
+            title: "模型服务异常",
+            content: `${friendlyMessage}${detailText}\n\n错误代码：${event.code}`,
+            createdAt: new Date().toISOString(),
+          });
+          setIsStreaming(false);
+          assistantMessageIdRef.current = null;
+          break;
         }
       case "done":
         if (streamErrorRef.current) {
@@ -2592,6 +2637,7 @@ function App() {
     setDraftKnowledgeBaseScope("");
     setDraftTargetThreadId(null);
     setDraftSourceTopicId(null);
+    void loadKnowledgeScopes();
     setIsNewThreadModalOpen(true);
   };
 
@@ -2602,6 +2648,7 @@ function App() {
     setDraftKnowledgeBaseScope(template.knowledge_base_scope ?? "");
     setDraftTargetThreadId(null);
     setDraftSourceTopicId(null);
+    void loadKnowledgeScopes();
     setIsNewThreadModalOpen(true);
   };
 
@@ -2613,6 +2660,7 @@ function App() {
     setDraftKnowledgeBaseScope("");
     setDraftTargetThreadId(threadId);
     setDraftSourceTopicId(topic.id);
+    void loadKnowledgeScopes();
     setIsNewThreadModalOpen(true);
   };
 
@@ -2714,6 +2762,42 @@ function App() {
     setStatusText(`Markdown 已导出：${downloadedFilename}`);
   };
 
+  const handlePublishToXiaohongshu = () => {
+    if (!artifact || artifact.artifact_type !== "content_draft") {
+      setStatusText("当前还没有可发布到小红书的图文草稿");
+      return;
+    }
+
+    const preferredTitle =
+      artifact.title_candidates.find((candidate) => candidate.trim()) ?? artifact.title;
+    const publishTitle = cleanForPublishing(preferredTitle).trim();
+    const publishContent = cleanForPublishing(
+      [artifact.body, artifact.platform_cta].filter(Boolean).join("\n\n"),
+    );
+    const imageUrls = (artifact.generated_images ?? []).filter((url) => url.trim());
+
+    if (!publishTitle && !publishContent && imageUrls.length === 0) {
+      setStatusText("当前草稿内容为空，暂时无法发送到小红书发布插件");
+      return;
+    }
+
+    window.postMessage(
+      {
+        action: "OMNIMEDIA_PUBLISH",
+        payload: {
+          title: publishTitle,
+          content: publishContent,
+          imageUrls,
+        },
+      },
+      window.location.origin,
+    );
+
+    setStatusText(
+      "已向 OmniMedia Publisher 插件发送发布指令；若浏览器未自动打开小红书，请确认扩展已加载。",
+    );
+  };
+
   const artifactActions: ArtifactAction[] = useMemo(() => {
     const actions: ArtifactAction[] = [
       {
@@ -2756,8 +2840,25 @@ function App() {
       });
     }
 
+    if (
+      artifact?.artifact_type === "content_draft" &&
+      (platform === "xiaohongshu" || platform === "both")
+    ) {
+      actions.push({
+        id: "publish-xiaohongshu",
+        label: "去小红书发布",
+        onClick: handlePublishToXiaohongshu,
+      });
+    }
+
     return actions;
-  }, [artifact, handleExportMarkdown, handleSaveArtifactAsTemplate]);
+  }, [
+    artifact,
+    handleExportMarkdown,
+    handlePublishToXiaohongshu,
+    handleSaveArtifactAsTemplate,
+    platform,
+  ]);
 
   const handleConfirmNewThread = () => {
     const normalizedTitle = draftThreadTitle.trim() || "New thread";
@@ -2828,6 +2929,20 @@ function App() {
     }
 
     return true;
+  };
+
+  const handleStopStreaming = () => {
+    if (!isStreaming || !abortRef.current) {
+      return;
+    }
+
+    stopRequestedRef.current = true;
+    abortRef.current.abort();
+    abortRef.current = null;
+    removeAssistantPlaceholderIfEmpty();
+    setIsStreaming(false);
+    assistantMessageIdRef.current = null;
+    setStatusText("已停止生成，当前已输出内容已保留");
   };
 
   const handleDeleteThread = async (thread: ThreadItem) => {
@@ -2954,6 +3069,7 @@ function App() {
     }
 
     abortRef.current?.abort();
+    stopRequestedRef.current = false;
 
     const isExistingThread = activeThreadId !== "thread-new";
     const nextThreadId = isExistingThread ? activeThreadId : createId("thread");
@@ -3048,7 +3164,11 @@ function App() {
       await loadThreads(nextThreadId, true, activeTopicId);
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        setStatusText("上一项任务已终止");
+        setStatusText(
+          stopRequestedRef.current
+            ? "已停止生成，当前已输出内容已保留"
+            : "上一项任务已终止",
+        );
       } else if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
       } else {
@@ -3071,6 +3191,7 @@ function App() {
       setIsStreaming(false);
       assistantMessageIdRef.current = null;
     } finally {
+      stopRequestedRef.current = false;
       abortRef.current = null;
     }
   };
@@ -3447,7 +3568,7 @@ function App() {
             onLogout={() => void handleLogout()}
             onClose={() => setLeftSidebarOpen(false)}
             onOpenProfile={() => void handleOpenProfile()}
-            onRenameThread={(thread) => void handleRenameThread(thread)}
+            onRenameThread={handleRenameThread}
             onSelectView={handleSelectView}
             onSelectThread={(thread) => {
               setActiveView("chat");
@@ -3502,11 +3623,10 @@ function App() {
 
                     <div className="ml-auto flex items-center gap-3">
                       <div
-                        className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${
-                          isStreaming
-                            ? "bg-warning-surface text-warning-foreground"
-                            : "bg-success-surface text-success-foreground"
-                        }`}
+                        className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${isStreaming
+                          ? "bg-warning-surface text-warning-foreground"
+                          : "bg-success-surface text-success-foreground"
+                          }`}
                         data-testid="workspace-status"
                       >
                         {isStreaming ? (
@@ -3534,11 +3654,10 @@ function App() {
                   </div>
 
                   <div
-                    className={`grid overflow-hidden transition-all duration-300 ease-in-out ${
-                      isWorkspaceHeaderExpanded
-                        ? "mt-4 grid-rows-[1fr] opacity-100"
-                        : "mt-0 grid-rows-[0fr] opacity-0"
-                    }`}
+                    className={`grid overflow-hidden transition-all duration-300 ease-in-out ${isWorkspaceHeaderExpanded
+                      ? "mt-4 grid-rows-[1fr] opacity-100"
+                      : "mt-0 grid-rows-[0fr] opacity-0"
+                      }`}
                   >
                     <div className="min-h-0">
                       <div className="mb-4 text-sm text-muted-foreground">
@@ -3602,6 +3721,7 @@ function App() {
                   <div className="border-t border-border bg-surface-elevated px-4 py-4 backdrop-blur-sm lg:px-6">
                     <Composer
                       imageInputRef={imageInputRef}
+                      audioInputRef={audioInputRef}
                       isStreaming={isStreaming}
                       isUploading={isUploading}
                       message={message}
@@ -3609,6 +3729,7 @@ function App() {
                       onMessageChange={setMessage}
                       onRemoveMaterial={removeMaterial}
                       onSubmit={(payload) => void handleSubmit(payload)}
+                      onStopStreaming={handleStopStreaming}
                       onTriggerFilePicker={triggerFilePicker}
                       textInputRef={textInputRef}
                       uploadedMaterials={uploadedMaterials}
@@ -3623,10 +3744,10 @@ function App() {
                 isLoading={isLoadingDrafts}
                 isMutating={isMutatingDrafts}
                 mutatingMessageId={mutatingDraftMessageId}
-                onClearAllDrafts={() => void handleClearAllDrafts()}
-                onDeleteDraft={(draft) => void handleDeleteDraft(draft)}
-                onDeleteDrafts={(messageIds) => void handleDeleteDrafts(messageIds)}
-                onOpenThread={(draft) => void handleOpenDraftThread(draft)}
+                onClearAllDrafts={handleClearAllDrafts}
+                onDeleteDraft={handleDeleteDraft}
+                onDeleteDrafts={handleDeleteDrafts}
+                onOpenThread={handleOpenDraftThread}
               />
             ) : activeView === "dashboard" ? (
               <DashboardView
@@ -3675,8 +3796,13 @@ function App() {
               />
             ) : (
               <PlaceholderView
-                description={nonChatViewMeta[activeView].description}
-                title={nonChatViewMeta[activeView].title}
+                description={
+                  nonChatViewMeta[activeView as Exclude<WorkspaceView, "chat">]
+                    .description
+                }
+                title={
+                  nonChatViewMeta[activeView as Exclude<WorkspaceView, "chat">].title
+                }
               />
             )}
           </main>
@@ -3704,8 +3830,12 @@ function App() {
       </div>
 
       <NewThreadModal
+        isLoadingKnowledgeScopes={isLoadingKnowledgeScopes}
+        knowledgeBaseScope={draftKnowledgeBaseScope}
+        knowledgeScopes={knowledgeScopes}
         onClose={closeNewThreadModal}
         onConfirm={handleConfirmNewThread}
+        onKnowledgeBaseScopeChange={setDraftKnowledgeBaseScope}
         onSystemPromptChange={setDraftSystemPrompt}
         onTitleChange={setDraftThreadTitle}
         open={isNewThreadModalOpen}

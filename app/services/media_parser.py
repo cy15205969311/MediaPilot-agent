@@ -67,6 +67,31 @@ PDF_EXTENSIONS = {".pdf"}
 DOCX_EXTENSIONS = {".docx"}
 SPREADSHEET_EXTENSIONS = {".csv", ".xlsx"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+MIMO_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".wmv"}
+MIMO_VIDEO_MIME_TYPES = {
+    "video/mp4",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/avi",
+    "video/msvideo",
+    "video/x-ms-wmv",
+    "video/wmv",
+}
+MIMO_VIDEO_MAX_FILE_BYTES = 300 * 1024 * 1024
+MIMO_AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".ogg"}
+MIMO_AUDIO_MIME_TYPES = {
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/wave",
+    "audio/flac",
+    "audio/x-flac",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/ogg",
+}
+MIMO_AUDIO_MAX_FILE_BYTES = 100 * 1024 * 1024
 DEFAULT_TEXT_CHAR_LIMIT = 12000
 DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "whisper-1"
 DEFAULT_DASHSCOPE_TRANSCRIPTION_MODEL = "qwen3-asr-flash"
@@ -93,6 +118,50 @@ class TranscriptionRuntimeConfig:
     base_url: str | None
     model: str
     mode: Literal["audio_transcriptions", "dashscope_chat_completions"]
+
+
+def validate_mimo_video_material(
+    reference: str,
+    *,
+    file_size_bytes: int | None = None,
+    mime_type: str | None = None,
+) -> None:
+    suffix = _resolve_material_suffix(reference)
+    normalized_mime_type = _normalize_mime_type(mime_type)
+
+    if suffix not in MIMO_VIDEO_EXTENSIONS and normalized_mime_type not in MIMO_VIDEO_MIME_TYPES:
+        raise MediaParserError(
+            "MiMo native video understanding only supports mp4, mov, avi, and wmv files.",
+        )
+
+    if file_size_bytes is not None and file_size_bytes > MIMO_VIDEO_MAX_FILE_BYTES:
+        current_size_mb = file_size_bytes / (1024 * 1024)
+        raise MediaParserError(
+            "MiMo native video understanding only supports videos up to 300MB. "
+            f"Current material is about {current_size_mb:.1f}MB.",
+        )
+
+
+def validate_mimo_audio_material(
+    reference: str,
+    *,
+    file_size_bytes: int | None = None,
+    mime_type: str | None = None,
+) -> None:
+    suffix = _resolve_material_suffix(reference)
+    normalized_mime_type = _normalize_mime_type(mime_type)
+
+    if suffix not in MIMO_AUDIO_EXTENSIONS and normalized_mime_type not in MIMO_AUDIO_MIME_TYPES:
+        raise MediaParserError(
+            "MiMo native audio understanding only supports mp3, wav, flac, m4a, and ogg files.",
+        )
+
+    if file_size_bytes is not None and file_size_bytes > MIMO_AUDIO_MAX_FILE_BYTES:
+        current_size_mb = file_size_bytes / (1024 * 1024)
+        raise MediaParserError(
+            "MiMo native audio understanding only supports audio files up to 100MB. "
+            f"Current material is about {current_size_mb:.1f}MB.",
+        )
 
 
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
@@ -227,6 +296,20 @@ async def _resolve_material_to_local(reference: str) -> ResolvedLocalMaterial:
         return ResolvedLocalMaterial(local_path=candidate.resolve())
 
     raise MediaParserError("Unable to locate the material file for parsing.")
+
+
+def _resolve_material_suffix(reference: str) -> str:
+    normalized_reference = normalize_storage_reference(reference) or reference
+    if normalized_reference.startswith("http://") or normalized_reference.startswith("https://"):
+        candidate = urlparse(normalized_reference).path or normalized_reference
+    else:
+        _, object_key = parse_stored_file_path(normalized_reference)
+        candidate = object_key or normalized_reference
+    return Path(unquote(candidate)).suffix.lower()
+
+
+def _normalize_mime_type(mime_type: str | None) -> str:
+    return (mime_type or "").split(";", 1)[0].strip().lower()
 
 
 async def _download_remote_material(url: str) -> ResolvedLocalMaterial:

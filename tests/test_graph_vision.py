@@ -354,10 +354,58 @@ def test_build_conversation_messages_embeds_native_video_parts_for_mimo_models(m
     assert any(
         part.get("type") == "video_url"
         and part.get("video_url", {}).get("url") == "https://cdn.example.com/demo.mp4"
+        and part.get("fps") == 1
+        and part.get("media_resolution") == "default"
         for part in user_content
     )
     assert any(
         part.get("type") == "text" and "brief.pdf" in str(part.get("text", ""))
+        for part in user_content
+    )
+
+
+def test_build_conversation_messages_embeds_native_audio_parts_for_mimo_models(monkeypatch):
+    monkeypatch.setattr(
+        providers_module,
+        "_load_thread_history",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        providers_module,
+        "resolve_media_reference",
+        lambda raw_url: f"https://cdn.example.com/{str(raw_url).split('/')[-1]}",
+    )
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-native-audio-message",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请听完这段播客录音，并帮我提炼出 3 个内容切角。",
+            "materials": [
+                {
+                    "type": "audio_url",
+                    "url": "/uploads/alice/podcast.wav",
+                    "text": "产品播客片段",
+                }
+            ],
+        }
+    )
+
+    messages = providers_module._build_conversation_messages(
+        request,
+        db=None,
+        thread=None,
+        user_id=None,
+        active_model="mimo-v2-omni",
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, list)
+    assert user_content[0] == {"type": "text", "text": request.message}
+    assert any(
+        part.get("type") == "input_audio"
+        and part.get("input_audio", {}).get("data") == "https://cdn.example.com/podcast.wav"
         for part in user_content
     )
 
@@ -403,6 +451,279 @@ def test_langgraph_provider_skips_transcription_for_mimo_native_video_models(mon
     assert skip_events[-1]["status"] == "skipped"
     assert "原生视频理解" in str(skip_events[-1].get("message", ""))
     assert not any(event["event"] == "error" for event in events)
+
+
+def test_langgraph_provider_skips_transcription_when_mimo_vision_model_handles_video(
+    monkeypatch,
+):
+    class NativeVideoThroughVisionProvider(providers_module.CompatibleLLMProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                api_key="compatible-key",
+                base_url="https://example.com/v1",
+                model="mimo-v2.5-pro",
+                vision_model="mimo-v2-omni",
+            )
+            self.last_request_material_types: list[str] = []
+
+        async def generate_stream(self, request, **kwargs):
+            self.last_request_material_types = [material.type.value for material in request.materials]
+            yield {
+                "event": "start",
+                "thread_id": request.thread_id,
+                "platform": request.platform.value,
+                "task_type": request.task_type.value,
+                "materials_count": len(request.materials),
+            }
+            yield {
+                "event": "message",
+                "delta": "宸插熀浜庤棰戠礌鏉愮敓鎴愯崏绋裤€?",
+                "index": 0,
+            }
+            yield {
+                "event": "artifact",
+                "artifact": {
+                    "artifact_type": "content_draft",
+                    "title": "瑙嗛鑽夌",
+                    "title_candidates": ["鏍囬涓€", "鏍囬浜?", "鏍囬涓?"],
+                    "body": "1. 宸茶В鏋愯棰戣鐐筡n2. 宸茬敓鎴愭鏂?",
+                    "platform_cta": "娆㈣繋缁х画浼樺寲銆?",
+                },
+            }
+            yield {"event": "done", "thread_id": request.thread_id}
+
+    async def fail_transcribe(_: str) -> str:
+        raise AssertionError("MiMo video passthrough should not call legacy transcription")
+
+    monkeypatch.setattr(graph_provider_module, "transcribe_video", fail_transcribe)
+
+    inner_provider = NativeVideoThroughVisionProvider()
+    provider = LangGraphProvider(
+        inner_provider=inner_provider,
+        vision_model="mimo-v2-omni",
+    )
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-native-video-via-vision-model",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "璇风洿鎺ョ悊瑙ｅ苟鎻愮偧杩欎釜瑙嗛鐨勬牳蹇冧寒鐐广€?",
+            "materials": [
+                {
+                    "type": "video_url",
+                    "url": "/uploads/alice/demo.mp4",
+                    "text": "demo.mp4",
+                }
+            ],
+        }
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    skip_events = [
+        event
+        for event in events
+        if event["event"] == "tool_call" and event.get("name") == "video_transcription"
+    ]
+
+    assert inner_provider.last_request_material_types == ["video_url"]
+    assert skip_events[-1]["status"] == "skipped"
+    assert "直传视频" in str(skip_events[-1].get("message", ""))
+    assert not any(event["event"] == "error" for event in events)
+
+
+def test_langgraph_provider_skips_transcription_when_mimo_vision_model_handles_audio(
+    monkeypatch,
+):
+    class NativeAudioThroughVisionProvider(providers_module.CompatibleLLMProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                api_key="compatible-key",
+                base_url="https://example.com/v1",
+                model="mimo-v2.5-pro",
+                vision_model="mimo-v2-omni",
+            )
+            self.last_request_material_types: list[str] = []
+
+        async def generate_stream(self, request, **kwargs):
+            self.last_request_material_types = [material.type.value for material in request.materials]
+            yield {
+                "event": "start",
+                "thread_id": request.thread_id,
+                "platform": request.platform.value,
+                "task_type": request.task_type.value,
+                "materials_count": len(request.materials),
+            }
+            yield {
+                "event": "message",
+                "delta": "瀹告彃鐔€娴滈煶棰戠礌鏉愮敓鎴愯崏绋裤€?",
+                "index": 0,
+            }
+            yield {
+                "event": "artifact",
+                "artifact": {
+                    "artifact_type": "content_draft",
+                    "title": "闊抽鑽夌",
+                    "title_candidates": ["鏍囬涓€", "鏍囬浜?", "鏍囬涓?"],
+                    "body": "1. 宸茶В鏋愰煶棰戣鐐筡n2. 宸茬敓鎴愭鏂?",
+                    "platform_cta": "娆㈣繋缁х画浼樺寲銆?",
+                },
+            }
+            yield {"event": "done", "thread_id": request.thread_id}
+
+    async def fail_transcribe(_: str) -> str:
+        raise AssertionError("MiMo audio passthrough should not call legacy transcription")
+
+    monkeypatch.setattr(graph_provider_module, "transcribe_video", fail_transcribe)
+
+    inner_provider = NativeAudioThroughVisionProvider()
+    provider = LangGraphProvider(
+        inner_provider=inner_provider,
+        vision_model="mimo-v2-omni",
+    )
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-native-audio-skip",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请理解这段音频并给我一个摘要。",
+            "materials": [
+                {
+                    "type": "audio_url",
+                    "url": "/uploads/alice/podcast.mp3",
+                    "text": "podcast.mp3",
+                }
+            ],
+        }
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    skip_events = [
+        event
+        for event in events
+        if event["event"] == "tool_call" and event.get("name") == "audio_transcription"
+    ]
+
+    assert inner_provider.last_request_material_types == ["audio_url"]
+    assert skip_events[-1]["status"] == "skipped"
+    assert "原生音频理解" in str(skip_events[-1].get("message", ""))
+    assert not any(event["event"] == "error" for event in events)
+
+
+def test_langgraph_provider_retries_on_transient_provider_stream_error():
+    class FlakyTransientProvider(BaseLLMProvider):
+        def __init__(self) -> None:
+            self.attempt_count = 0
+
+        async def generate_stream(self, request, **kwargs):
+            self.attempt_count += 1
+            yield {
+                "event": "start",
+                "thread_id": request.thread_id,
+                "platform": request.platform.value,
+                "task_type": request.task_type.value,
+                "materials_count": len(request.materials),
+            }
+            if self.attempt_count == 1:
+                yield {
+                    "event": "message",
+                    "delta": "partial draft should be discarded",
+                    "index": 0,
+                }
+                yield {
+                    "event": "error",
+                    "code": providers_module.TRANSIENT_PROVIDER_STREAM_ERROR_CODE,
+                    "message": "network jitter",
+                    "retriable": True,
+                    "retry_delay_seconds": 0.0,
+                }
+                yield {"event": "done", "thread_id": request.thread_id}
+                return
+
+            yield {
+                "event": "message",
+                "delta": "稳定的最终草稿，已经补充了核心观点、执行建议、清晰步骤、风险提醒和明确收尾，同时给出了用户可以直接拿去执行的内容框架，因此足以通过内容审查。",
+                "index": 0,
+            }
+            yield {
+                "event": "artifact",
+                "artifact": {
+                    "artifact_type": "content_draft",
+                    "title": "重试成功草稿",
+                    "title_candidates": ["标题一", "标题二", "标题三"],
+                    "body": "稳定的最终草稿，已经补充了核心观点、执行建议、清晰步骤、风险提醒和明确收尾，同时给出了用户可以直接拿去执行的内容框架，因此足以通过内容审查。",
+                    "platform_cta": "继续优化",
+                },
+            }
+            yield {"event": "done", "thread_id": request.thread_id}
+
+    inner_provider = FlakyTransientProvider()
+    provider = LangGraphProvider(inner_provider=inner_provider)
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-transient-retry",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请生成一段正文",
+            "materials": [],
+        }
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+    final_text = "".join(
+        str(event.get("delta", ""))
+        for event in events
+        if event["event"] == "message"
+    )
+
+    assert inner_provider.attempt_count == 2
+    assert any(
+        event["event"] == "tool_call"
+        and event.get("name") == "review_draft"
+        and event.get("status") == "retry"
+        for event in events
+    )
+    assert any(event["event"] == "artifact" for event in events)
+    assert "稳定的最终草稿" in final_text
+    assert "partial draft should be discarded" not in final_text
+    assert not any(
+        event["event"] == "error"
+        and event.get("code") == providers_module.TRANSIENT_PROVIDER_STREAM_ERROR_CODE
+        for event in events
+    )
+
+
+def test_langgraph_provider_rejects_unsupported_native_video_format():
+    class NativeVideoRecordingProvider(RecordingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = "mimo-v2.5"
+
+    inner_provider = NativeVideoRecordingProvider()
+    provider = LangGraphProvider(inner_provider=inner_provider)
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-native-video-invalid-format",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请分析这个视频。",
+            "materials": [
+                {
+                    "type": "video_url",
+                    "url": "/uploads/alice/demo.mkv",
+                    "text": "demo.mkv",
+                }
+            ],
+        }
+    )
+
+    events = asyncio.run(collect_events(provider, request))
+
+    error_event = next(event for event in events if event["event"] == "error")
+    assert error_event["code"] == "LANGGRAPH_RUNTIME_ERROR"
+    assert "mp4, mov, avi, and wmv" in str(error_event["message"])
+    assert inner_provider.last_request_message == ""
 
 
 def test_langgraph_provider_fails_fast_when_vision_analysis_fails():

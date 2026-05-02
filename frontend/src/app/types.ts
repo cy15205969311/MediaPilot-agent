@@ -51,7 +51,7 @@ export type ThreadItem = {
   isArchived?: boolean;
 };
 
-export type UploadedMaterialKind = "image" | "video" | "text";
+export type UploadedMaterialKind = "image" | "video" | "audio" | "text";
 
 export type UploadedMaterialStatus = "uploading" | "ready" | "error";
 
@@ -83,7 +83,7 @@ export type UploadApiResponse = {
 };
 
 export type MediaChatMaterialPayload = {
-  type: "image" | "video_url" | "text_link";
+  type: "image" | "video_url" | "audio_url" | "text_link";
   text: string;
   url?: string;
 };
@@ -381,15 +381,28 @@ export type TopicPlanningItem = {
   goal: string;
 };
 
-export type TopicPlanningArtifactPayload = {
-  artifact_type: "topic_list";
+export type CitationAuditItem = {
+  citation_index: number;
+  source: string;
+  snippet: string;
+  relevance_score: number;
+  chunk_index: number;
+  document_id?: string | null;
+  scope?: string | null;
+};
+
+export type ArtifactPayloadBase = {
   title: string;
+  citation_audit?: CitationAuditItem[];
+};
+
+export type TopicPlanningArtifactPayload = ArtifactPayloadBase & {
+  artifact_type: "topic_list";
   topics: TopicPlanningItem[];
 };
 
-export type ContentGenerationArtifactPayload = {
+export type ContentGenerationArtifactPayload = ArtifactPayloadBase & {
   artifact_type: "content_draft";
-  title: string;
   title_candidates: string[];
   body: string;
   platform_cta: string;
@@ -401,9 +414,8 @@ export type HotPostAnalysisDimension = {
   insight: string;
 };
 
-export type HotPostAnalysisArtifactPayload = {
+export type HotPostAnalysisArtifactPayload = ArtifactPayloadBase & {
   artifact_type: "hot_post_analysis";
-  title: string;
   analysis_dimensions: HotPostAnalysisDimension[];
   reusable_templates: string[];
 };
@@ -415,9 +427,8 @@ export type CommentReplySuggestion = {
   compliance_note: string;
 };
 
-export type CommentReplyArtifactPayload = {
+export type CommentReplyArtifactPayload = ArtifactPayloadBase & {
   artifact_type: "comment_reply";
-  title: string;
   suggestions: CommentReplySuggestion[];
 };
 
@@ -444,7 +455,7 @@ export type HistoryMaterialItem = {
   id: string;
   thread_id: string;
   message_id?: string | null;
-  type: "image" | "video_url" | "text_link";
+  type: "image" | "video_url" | "audio_url" | "text_link";
   url?: string | null;
   text: string;
   created_at: string;

@@ -20,6 +20,7 @@ import type {
   MediaChatMaterialPayload,
   ToolCallTraceItem,
 } from "../types";
+import { CitationAuditPanel } from "./CitationAuditPanel";
 import { CopyButton } from "./CopyButton";
 import { buildAbsoluteUrl, formatChatTimestamp, getDisplayName } from "../utils";
 
@@ -555,6 +556,13 @@ export function ChatFeed({
                         </a>
                       ))}
                     </div>
+                  </div>
+                ) : null}
+                {item.role === "assistant" &&
+                item.artifact?.citation_audit &&
+                item.artifact.citation_audit.length > 0 ? (
+                  <div className="mt-4">
+                    <CitationAuditPanel compact items={item.artifact.citation_audit} />
                   </div>
                 ) : null}
                 {shouldRenderAssistantActions ? (

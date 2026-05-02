@@ -57,3 +57,27 @@ def test_knowledge_base_retrieve_context_supports_live_chroma_query(
 
     assert "strong hook" in context.lower()
     assert len(direct_documents) >= 1
+
+
+def test_knowledge_base_retrieve_chunks_exposes_relevance_scores(tmp_path: Path):
+    service = KnowledgeBaseService(storage_dir=tmp_path / "knowledge-base", prefer_chroma=False)
+    service.add_documents(
+        "alice",
+        "sales_audit",
+        [
+            "火星一号基地贡献了 56.5% 的销量占比，是本季度最核心的增长来源。",
+            "木星补给站的客单价较高，但复购频次低于其他渠道。",
+        ],
+        source="星际烤肠2026业务盘点.docx",
+    )
+
+    documents = service.retrieve_chunks(
+        "alice",
+        "sales_audit",
+        "火星一号基地 销量占比",
+    )
+
+    assert documents
+    assert documents[0].source == "星际烤肠2026业务盘点.docx"
+    assert 0 < documents[0].relevance_score <= 1
+    assert documents[0].distance is None

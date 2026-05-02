@@ -1,6 +1,7 @@
+import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -116,6 +117,7 @@ def persist_chat_request(
 @router.post("/chat/stream")
 async def stream_media_chat(
     request: MediaChatRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -130,6 +132,7 @@ async def stream_media_chat(
         request.thread_id,
         request.task_type.value,
     )
+    current_user_id = str(current_user.id)
     try:
         thread = persist_chat_request(db, request, current_user)
     except HTTPException:
@@ -142,13 +145,34 @@ async def stream_media_chat(
         ) from exc
 
     logger.info("chat.stream returning StreamingResponse thread_id=%s", request.thread_id)
+
+    async def stream_events():
+        try:
+            async for chunk in media_agent_workflow.stream(
+                request,
+                db=db,
+                thread=thread,
+                user_id=current_user_id,
+            ):
+                if await http_request.is_disconnected():
+                    logger.info(
+                        "客户端已主动取消流式请求 thread_id=%s user_id=%s",
+                        request.thread_id,
+                        current_user_id,
+                    )
+                    break
+                yield chunk
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            logger.info(
+                "客户端已主动取消流式请求 thread_id=%s user_id=%s",
+                request.thread_id,
+                current_user_id,
+            )
+            raise
+
     return StreamingResponse(
-        media_agent_workflow.stream(
-            request,
-            db=db,
-            thread=thread,
-            user_id=current_user.id,
-        ),
+        stream_events(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

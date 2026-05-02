@@ -216,6 +216,56 @@ def test_parse_document_supports_local_upload_xlsx_file(
     assert "Sheet: Campaign Calendar | Row: 2 | platform: douyin, topic: campus vlog, owner: leo" in result
 
 
+def test_validate_mimo_video_material_accepts_supported_extension():
+    media_parser_module.validate_mimo_video_material("/uploads/alice/demo.avi")
+
+
+def test_validate_mimo_video_material_rejects_unsupported_extension():
+    try:
+        media_parser_module.validate_mimo_video_material("/uploads/alice/demo.mkv")
+    except MediaParserError as exc:
+        assert "mp4, mov, avi, and wmv" in str(exc)
+    else:  # pragma: no cover - explicit failure branch
+        raise AssertionError("Unsupported native video format should be rejected.")
+
+
+def test_validate_mimo_video_material_rejects_oversized_video():
+    try:
+        media_parser_module.validate_mimo_video_material(
+            "/uploads/alice/demo.mp4",
+            file_size_bytes=(301 * 1024 * 1024),
+        )
+    except MediaParserError as exc:
+        assert "300MB" in str(exc)
+    else:  # pragma: no cover - explicit failure branch
+        raise AssertionError("Oversized native video should be rejected.")
+
+
+def test_validate_mimo_audio_material_accepts_supported_extension():
+    media_parser_module.validate_mimo_audio_material("/uploads/alice/podcast.wav")
+
+
+def test_validate_mimo_audio_material_rejects_unsupported_extension():
+    try:
+        media_parser_module.validate_mimo_audio_material("/uploads/alice/voice.amr")
+    except MediaParserError as exc:
+        assert "mp3, wav, flac, m4a, and ogg" in str(exc)
+    else:  # pragma: no cover - explicit failure branch
+        raise AssertionError("Unsupported native audio format should be rejected.")
+
+
+def test_validate_mimo_audio_material_rejects_oversized_audio():
+    try:
+        media_parser_module.validate_mimo_audio_material(
+            "/uploads/alice/podcast.mp3",
+            file_size_bytes=(101 * 1024 * 1024),
+        )
+    except MediaParserError as exc:
+        assert "100MB" in str(exc)
+    else:  # pragma: no cover - explicit failure branch
+        raise AssertionError("Oversized native audio should be rejected.")
+
+
 def test_request_audio_transcription_uses_dashscope_chat_path_when_only_llm_gateway_is_configured(
     tmp_path: Path,
     monkeypatch,

@@ -29,11 +29,13 @@ from openai import (
     RateLimitError,
 )
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import load_environment
-from app.db.models import Thread
+from app.db.models import Thread, UploadRecord
 from app.models.schemas import (
+    CitationAuditItem,
     CommentReplyArtifactPayload,
     CommentReplySuggestion,
     ContentGenerationArtifactPayload,
@@ -57,7 +59,13 @@ from app.services.knowledge_base import (
     normalize_knowledge_base_scope,
 )
 from app.services.image_generation import DashScopeImageGenerationService
-from app.services.media_parser import MediaParserError, parse_document, transcribe_video
+from app.services.media_parser import (
+    MediaParserError,
+    parse_document,
+    transcribe_video,
+    validate_mimo_audio_material,
+    validate_mimo_video_material,
+)
 from app.services.persistence import extract_upload_relative_path
 from app.services.providers import (
     BaseLLMProvider,
@@ -65,6 +73,8 @@ from app.services.providers import (
     MockLLMProvider,
     OpenAIProvider,
     QwenLLMProvider,
+    _resolve_compatible_generation_model,
+    _supports_native_audio_understanding,
     _is_dashscope_compatible_base_url,
     _supports_native_video_understanding,
 )
@@ -80,6 +90,10 @@ ImagePromptBuilder = Callable[
 ImageGenerator = Callable[
     [MediaChatRequest, str, str | None, str],
     Awaitable[list[str]] | list[str],
+]
+ImageRouteAnalyzer = Callable[
+    [MediaChatRequest, str, dict[str, object] | None],
+    Awaitable["ImageRouteDecision | dict[str, object]"],
 ]
 
 
@@ -148,8 +162,79 @@ def _resolve_vision_model(explicit_model: str | None) -> str:
     return "gpt-4o-mini"
 
 
-def _supports_native_video_material_passthrough(inner_provider: BaseLLMProvider) -> bool:
-    return _supports_native_video_understanding(getattr(inner_provider, "model", ""))
+def _resolve_inner_provider_generation_model_for_request(
+    inner_provider: BaseLLMProvider,
+    request: MediaChatRequest,
+    *,
+    vision_model: str | None = None,
+) -> str:
+    model_name = str(getattr(inner_provider, "model", "") or "")
+    if isinstance(inner_provider, CompatibleLLMProvider) and not isinstance(
+        inner_provider,
+        QwenLLMProvider,
+    ):
+        return _resolve_compatible_generation_model(
+            request=request,
+            active_model=model_name,
+            multimodal_model=vision_model or getattr(inner_provider, "vision_model", ""),
+        )
+    return model_name
+
+
+def _supports_native_video_material_passthrough(
+    inner_provider: BaseLLMProvider,
+    request: MediaChatRequest,
+    *,
+    vision_model: str | None = None,
+) -> bool:
+    resolved_model = _resolve_inner_provider_generation_model_for_request(
+        inner_provider,
+        request,
+        vision_model=vision_model,
+    )
+    return _supports_native_video_understanding(resolved_model)
+
+
+def _supports_native_audio_material_passthrough(
+    inner_provider: BaseLLMProvider,
+    request: MediaChatRequest,
+    *,
+    vision_model: str | None = None,
+) -> bool:
+    resolved_model = _resolve_inner_provider_generation_model_for_request(
+        inner_provider,
+        request,
+        vision_model=vision_model,
+    )
+    return _supports_native_audio_understanding(resolved_model)
+
+
+def _resolve_material_upload_metadata(
+    material: MaterialInput,
+    *,
+    db: Session | None,
+    user_id: str | None,
+) -> tuple[int | None, str | None]:
+    if db is None or not (material.url or "").strip():
+        return None, None
+
+    normalized_reference = normalize_storage_reference(material.url)
+    if normalized_reference is None:
+        return None, None
+
+    statement = select(UploadRecord.file_size, UploadRecord.mime_type).where(
+        UploadRecord.file_path == normalized_reference,
+    )
+    if user_id:
+        statement = statement.where(UploadRecord.user_id == user_id)
+
+    row = db.execute(statement).first()
+    if row is None:
+        return None, None
+
+    file_size = int(row[0]) if row[0] is not None else None
+    mime_type = str(row[1]) if row[1] is not None else None
+    return file_size, mime_type
 
 
 class GraphState(TypedDict, total=False):
@@ -170,6 +255,7 @@ class GraphState(TypedDict, total=False):
     user_id: str | None
     needs_ocr: bool
     needs_search: bool
+    needs_image: bool
     next_route: str
     messages: list[BaseMessage]
     pending_tool_calls: list[dict[str, object]]
@@ -177,6 +263,7 @@ class GraphState(TypedDict, total=False):
     business_tool_iteration: int
     knowledge_base_scope: str
     knowledge_base_context: str
+    knowledge_base_citation_audit: list[dict[str, object]]
     artifact_fallback_reason: str | None
     image_generation_prompt: str
     generated_images: list[str]
@@ -185,6 +272,10 @@ class GraphState(TypedDict, total=False):
 class SearchRouteDecision(BaseModel):
     needs_search: bool = False
     search_query: str = ""
+
+
+class ImageRouteDecision(BaseModel):
+    needs_image: bool = False
 
 
 def create_langgraph_inner_provider() -> BaseLLMProvider:
@@ -222,6 +313,7 @@ class LangGraphProvider(BaseLLMProvider):
         inner_provider: BaseLLMProvider | None = None,
         *,
         route_analyzer: Callable[[MediaChatRequest], Awaitable[SearchRouteDecision | dict[str, object]]] | None = None,
+        image_route_analyzer: ImageRouteAnalyzer | None = None,
         vision_analyzer: Callable[[MediaChatRequest], Awaitable[list[str]]] | None = None,
         search_analyzer: Callable[..., Awaitable[object]] | None = None,
         image_prompt_builder: ImagePromptBuilder | None = None,
@@ -234,6 +326,7 @@ class LangGraphProvider(BaseLLMProvider):
         load_environment()
         self.inner_provider = inner_provider or create_langgraph_inner_provider()
         self.route_analyzer = route_analyzer
+        self.image_route_analyzer = image_route_analyzer
         self.vision_analyzer = vision_analyzer
         self.search_analyzer = search_analyzer
         self.image_service = DashScopeImageGenerationService()
@@ -275,6 +368,7 @@ class LangGraphProvider(BaseLLMProvider):
         return type(self)(
             inner_provider=next_inner_provider,
             route_analyzer=self.route_analyzer,
+            image_route_analyzer=self.image_route_analyzer,
             vision_analyzer=self.vision_analyzer,
             search_analyzer=self.search_analyzer,
             image_prompt_builder=self.image_prompt_builder,
@@ -329,35 +423,12 @@ class LangGraphProvider(BaseLLMProvider):
             "materials_count": len(request.materials),
         }
 
-        initial_state: GraphState = {
-            "request": request,
-            "materials_parsed": [],
-            "ocr_clues": [],
-            "search_query": "",
-            "search_results": "",
-            "current_draft": "",
-            "current_step": "router",
-            "validation_errors": [],
-            "retry_count": 0,
-            "artifact_candidate": None,
-            "artifact": None,
-            "error": None,
-            "db": db,
-            "thread": thread,
-            "user_id": user_id or (thread.user_id if thread is not None else None),
-            "needs_ocr": False,
-            "needs_search": False,
-            "next_route": "parse_materials_node",
-            "messages": [],
-            "pending_tool_calls": [],
-            "business_tool_results": [],
-            "business_tool_iteration": 0,
-            "knowledge_base_scope": "",
-            "knowledge_base_context": "",
-            "artifact_fallback_reason": None,
-            "image_generation_prompt": "",
-            "generated_images": [],
-        }
+        initial_state = self._build_initial_state(
+            request,
+            db=db,
+            thread=thread,
+            user_id=user_id,
+        )
 
         try:
             async for mode, chunk in self.graph.astream(
@@ -379,6 +450,46 @@ class LangGraphProvider(BaseLLMProvider):
             }
 
         yield {"event": "done", "thread_id": request.thread_id}
+
+    def _build_initial_state(
+        self,
+        request: MediaChatRequest,
+        *,
+        db: Session | None = None,
+        thread: Thread | None = None,
+        user_id: str | None = None,
+    ) -> GraphState:
+        return {
+            "request": request,
+            "materials_parsed": [],
+            "ocr_clues": [],
+            "search_query": "",
+            "search_results": "",
+            "current_draft": "",
+            "current_step": "router",
+            "validation_errors": [],
+            "retry_count": 0,
+            "artifact_candidate": None,
+            "artifact": None,
+            "error": None,
+            "db": db,
+            "thread": thread,
+            "user_id": user_id or (thread.user_id if thread is not None else None),
+            "needs_ocr": False,
+            "needs_search": False,
+            "needs_image": False,
+            "next_route": "parse_materials_node",
+            "messages": [],
+            "pending_tool_calls": [],
+            "business_tool_results": [],
+            "business_tool_iteration": 0,
+            "knowledge_base_scope": "",
+            "knowledge_base_context": "",
+            "knowledge_base_citation_audit": [],
+            "artifact_fallback_reason": None,
+            "image_generation_prompt": "",
+            "generated_images": [],
+        }
 
     def _build_graph(self):
         graph = StateGraph(GraphState)
@@ -470,7 +581,16 @@ class LangGraphProvider(BaseLLMProvider):
         request = state["request"]
         parsed_materials, needs_ocr = _parse_materials(request)
         enriched_materials = list(parsed_materials)
-        native_video_enabled = _supports_native_video_material_passthrough(self.inner_provider)
+        native_video_enabled = _supports_native_video_material_passthrough(
+            self.inner_provider,
+            request,
+            vision_model=self.vision_model,
+        )
+        native_audio_enabled = _supports_native_audio_material_passthrough(
+            self.inner_provider,
+            request,
+            vision_model=self.vision_model,
+        )
 
         for material in request.materials:
             if material.type == MaterialType.TEXT_LINK and material.url:
@@ -514,6 +634,41 @@ class LangGraphProvider(BaseLLMProvider):
             if material.type == MaterialType.VIDEO_URL and material.url:
                 source_name = _resolve_material_source_name(material)
                 if native_video_enabled:
+                    file_size_bytes, mime_type = _resolve_material_upload_metadata(
+                        material,
+                        db=state.get("db"),
+                        user_id=state.get("user_id"),
+                    )
+                    try:
+                        validate_mimo_video_material(
+                            material.url,
+                            file_size_bytes=file_size_bytes,
+                            mime_type=mime_type,
+                        )
+                    except MediaParserError as exc:
+                        logger.warning(
+                            "Native video validation failed thread_id=%s source=%s error=%s",
+                            request.thread_id,
+                            source_name,
+                            exc,
+                        )
+                        _emit_tool_call(
+                            writer,
+                            name="video_validation",
+                            status="failed",
+                            message=f"Video material validation failed: {source_name}. {exc}",
+                        )
+                        raise
+                    logger.info(
+                        "Skipping video transcription, routing to native MiMo video engine. thread_id=%s source=%s model=%s",
+                        request.thread_id,
+                        source_name,
+                        _resolve_inner_provider_generation_model_for_request(
+                            self.inner_provider,
+                            request,
+                            vision_model=self.vision_model,
+                        ),
+                    )
                     _emit_tool_call(
                         writer,
                         name="video_transcription",
@@ -558,6 +713,87 @@ class LangGraphProvider(BaseLLMProvider):
                         f'<video_transcript source="{escaped_source_name}">\n'
                         f"{transcript}\n"
                         "</video_transcript>"
+                    )
+
+            if material.type == MaterialType.AUDIO_URL and material.url:
+                source_name = _resolve_material_source_name(material)
+                if native_audio_enabled:
+                    file_size_bytes, mime_type = _resolve_material_upload_metadata(
+                        material,
+                        db=state.get("db"),
+                        user_id=state.get("user_id"),
+                    )
+                    try:
+                        validate_mimo_audio_material(
+                            material.url,
+                            file_size_bytes=file_size_bytes,
+                            mime_type=mime_type,
+                        )
+                    except MediaParserError as exc:
+                        logger.warning(
+                            "Native audio validation failed thread_id=%s source=%s error=%s",
+                            request.thread_id,
+                            source_name,
+                            exc,
+                        )
+                        _emit_tool_call(
+                            writer,
+                            name="audio_validation",
+                            status="failed",
+                            message=f"Audio material validation failed: {source_name}. {exc}",
+                        )
+                        raise
+
+                    logger.info(
+                        "Skipping audio transcription, routing to native MiMo audio engine. thread_id=%s source=%s",
+                        request.thread_id,
+                        source_name,
+                    )
+                    _emit_tool_call(
+                        writer,
+                        name="audio_transcription",
+                        status="skipped",
+                        message=(
+                            f"\u5f53\u524d\u6a21\u578b\u652f\u6301\u539f\u751f\u97f3\u9891\u7406\u89e3\uff0c"
+                            f"\u5df2\u8df3\u8fc7\u8f6c\u5199\u5e76\u76f4\u4f20\u97f3\u9891\uff1a{source_name}"
+                        ),
+                    )
+                    continue
+
+                _emit_tool_call(
+                    writer,
+                    name="audio_transcription",
+                    status="processing",
+                    message=f"正在对音频素材进行语音转写：{source_name}",
+                )
+                try:
+                    transcript = await transcribe_video(material.url)
+                except MediaParserError as exc:
+                    logger.warning(
+                        "Audio transcription failed thread_id=%s source=%s error=%s",
+                        request.thread_id,
+                        source_name,
+                        exc,
+                    )
+                    _emit_tool_call(
+                        writer,
+                        name="audio_transcription",
+                        status="failed",
+                        message=f"音频转写失败：{source_name}，{exc}",
+                    )
+                    enriched_materials.append(f"音频素材《{source_name}》转写失败：{exc}")
+                else:
+                    _emit_tool_call(
+                        writer,
+                        name="audio_transcription",
+                        status="completed",
+                        message=f"音频转写完成：{source_name}",
+                    )
+                    escaped_source_name = _escape_context_attribute(source_name)
+                    enriched_materials.append(
+                        f'<audio_transcript source="{escaped_source_name}">\n'
+                        f"{transcript}\n"
+                        "</audio_transcript>"
                     )
 
         _emit_tool_call(
@@ -749,6 +985,7 @@ class LangGraphProvider(BaseLLMProvider):
 
         knowledge_base_scope = _resolve_knowledge_base_scope_from_state(state)
         knowledge_base_context = str(state.get("knowledge_base_context", "") or "").strip()
+        knowledge_base_citation_audit = list(state.get("knowledge_base_citation_audit", []))
         if knowledge_base_scope and not knowledge_base_context:
             _emit_tool_call(
                 writer,
@@ -769,6 +1006,9 @@ class LangGraphProvider(BaseLLMProvider):
                     knowledge_base_context = _build_knowledge_base_context_from_documents(
                         knowledge_documents,
                     ).strip()
+                    knowledge_base_citation_audit = _build_citation_audit_from_documents(
+                        knowledge_documents,
+                    )
                 else:  # pragma: no cover - backward compatibility path
                     retrieve_context = knowledge_service.retrieve_context
                     if len(inspect.signature(retrieve_context).parameters) >= 4:
@@ -794,6 +1034,7 @@ class LangGraphProvider(BaseLLMProvider):
                     retrieved_chunk_count = len(
                         [section for section in knowledge_base_context.split("\n\n") if section.strip()]
                     )
+                    knowledge_base_citation_audit = []
             except Exception as exc:  # pragma: no cover - defensive fallback
                 logger.warning(
                     "knowledge base retrieval failed thread_id=%s scope=%s error=%s",
@@ -871,6 +1112,14 @@ class LangGraphProvider(BaseLLMProvider):
 
             if event_name == "error":
                 latest_error = event
+                if _is_retryable_provider_error(event):
+                    logger.warning(
+                        "langgraph transient provider error captured thread_id=%s code=%s retry_count=%s",
+                        state["request"].thread_id,
+                        event.get("code"),
+                        state.get("retry_count", 0),
+                    )
+                    continue
                 if _should_gracefully_degrade_provider_error(
                     event,
                     current_draft="".join(draft_parts),
@@ -891,8 +1140,9 @@ class LangGraphProvider(BaseLLMProvider):
             "error": latest_error,
             "messages": updated_messages,
             "knowledge_base_scope": knowledge_base_scope,
-            "knowledge_base_context": knowledge_base_context,
-            "artifact_fallback_reason": artifact_fallback_reason,
+                    "knowledge_base_context": knowledge_base_context,
+                    "knowledge_base_citation_audit": knowledge_base_citation_audit,
+                    "artifact_fallback_reason": artifact_fallback_reason,
             "current_step": "generate_draft:completed",
         }
 
@@ -992,6 +1242,76 @@ class LangGraphProvider(BaseLLMProvider):
         )
 
         if state.get("error") is not None:
+            if _is_retryable_provider_error(state.get("error")):
+                retry_count = state.get("retry_count", 0)
+                provider_error_text = _format_provider_error_for_validation(state.get("error"))
+                if retry_count < 2:
+                    retry_delay_seconds = _resolve_retryable_provider_delay_seconds(
+                        state.get("error"),
+                        retry_count=retry_count,
+                    )
+                    _emit_tool_call(
+                        writer,
+                        name="review_draft",
+                        status="retry",
+                        message=(
+                            "模型生成过程中发生网络抖动，系统正在自动重试。"
+                            if retry_delay_seconds <= 0
+                            else f"模型生成过程中发生网络抖动，系统将在 {retry_delay_seconds:.0f} 秒后自动重试。"
+                        ),
+                    )
+                    if retry_delay_seconds > 0:
+                        await asyncio.sleep(retry_delay_seconds)
+                    return await self._build_review_exit_update(
+                        state,
+                        next_route="generate_draft_node",
+                        current_step="review:provider_retry",
+                        extra_updates={
+                            "retry_count": retry_count + 1,
+                            "error": None,
+                            "current_draft": "",
+                            "artifact_candidate": None,
+                            "artifact_fallback_reason": None,
+                        },
+                    )
+
+                if state.get("current_draft", "").strip():
+                    merged_issues = _merge_validation_errors(
+                        state.get("validation_errors", []),
+                        [provider_error_text] if provider_error_text else [],
+                    )
+                    _emit_tool_call(
+                        writer,
+                        name="review_draft",
+                        status="max_retries",
+                        message="模型生成网络异常且已达到重试上限，当前将保留已生成正文并降级整理产物。",
+                    )
+                    _stream_message_chunks(writer, state.get("current_draft", ""))
+                    return await self._build_review_exit_update(
+                        state,
+                        next_route="format_artifact_node",
+                        current_step="review:provider_retry_exhausted_fallback",
+                        extra_updates={
+                            "validation_errors": merged_issues,
+                            "error": None,
+                            "artifact_fallback_reason": state.get("artifact_fallback_reason")
+                            or "provider_stream_retry_exhausted",
+                        },
+                    )
+
+                _emit_tool_call(
+                    writer,
+                    name="review_draft",
+                    status="max_retries",
+                    message="模型生成网络异常且已达到重试上限，本次任务未能完成。",
+                )
+                writer({"payload": state["error"]})
+                return await self._build_review_exit_update(
+                    state,
+                    next_route="format_artifact_node",
+                    current_step="review:provider_retry_exhausted",
+                )
+
             if _should_gracefully_degrade_provider_error(
                 state.get("error"),
                 current_draft=state.get("current_draft", ""),
@@ -1009,20 +1329,24 @@ class LangGraphProvider(BaseLLMProvider):
                     message="结构化结果校验失败，已保留正文并降级为基础产物。",
                 )
                 _stream_message_chunks(writer, state.get("current_draft", ""))
-                return {
-                    "validation_errors": merged_issues,
-                    "error": None,
-                    "next_route": "format_artifact_node",
-                    "artifact_fallback_reason": state.get("artifact_fallback_reason")
-                    or "provider_structuring_error",
-                    "current_step": "review:provider_error_fallback",
-                }
+                return await self._build_review_exit_update(
+                    state,
+                    next_route="format_artifact_node",
+                    current_step="review:provider_error_fallback",
+                    extra_updates={
+                        "validation_errors": merged_issues,
+                        "error": None,
+                        "artifact_fallback_reason": state.get("artifact_fallback_reason")
+                        or "provider_structuring_error",
+                    },
+                )
 
             _emit_tool_call(writer, name="review_draft", status="skipped")
-            return {
-                "next_route": "format_artifact_node",
-                "current_step": "review:skipped",
-            }
+            return await self._build_review_exit_update(
+                state,
+                next_route="format_artifact_node",
+                current_step="review:skipped",
+            )
 
         _emit_tool_call(writer, name="review_draft", status="processing")
         review_issues = _review_draft(state)
@@ -1035,43 +1359,66 @@ class LangGraphProvider(BaseLLMProvider):
             )
             if retry_count < 2:
                 _emit_tool_call(writer, name="review_draft", status="retry")
-                return {
-                    "validation_errors": merged_issues,
-                    "retry_count": retry_count + 1,
-                    "next_route": "generate_draft_node",
-                    "current_step": "review:retry",
-                }
+                return await self._build_review_exit_update(
+                    state,
+                    next_route="generate_draft_node",
+                    current_step="review:retry",
+                    extra_updates={
+                        "validation_errors": merged_issues,
+                        "retry_count": retry_count + 1,
+                    },
+                )
 
             _emit_tool_call(writer, name="review_draft", status="max_retries")
             _stream_message_chunks(writer, state.get("current_draft", ""))
-            return {
-                "validation_errors": merged_issues,
-                "next_route": "format_artifact_node",
-                "current_step": "review:max_retries",
-            }
+            return await self._build_review_exit_update(
+                state,
+                next_route="format_artifact_node",
+                current_step="review:max_retries",
+                extra_updates={"validation_errors": merged_issues},
+            )
 
         _emit_tool_call(writer, name="review_draft", status="passed")
         _stream_message_chunks(writer, state.get("current_draft", ""))
-        return {
-            "next_route": "format_artifact_node",
-            "current_step": "review:passed",
-        }
+        return await self._build_review_exit_update(
+            state,
+            next_route="format_artifact_node",
+            current_step="review:passed",
+        )
+
+    async def _build_review_exit_update(
+        self,
+        state: GraphState,
+        *,
+        next_route: str,
+        current_step: str,
+        extra_updates: dict[str, object] | None = None,
+    ) -> GraphState:
+        updates: GraphState = dict(extra_updates or {})
+        updates["next_route"] = next_route
+        updates["current_step"] = current_step
+        if next_route == "format_artifact_node":
+            updates["needs_image"] = (await self._decide_image_route(state)).needs_image
+        else:
+            updates["needs_image"] = False
+        return updates
 
     def _route_after_review(self, state: GraphState) -> str:
         next_route = state.get("next_route", "format_artifact_node")
         resolved_route = next_route
-        if next_route == "format_artifact_node" and _should_generate_cover_images(state):
+        if next_route == "format_artifact_node" and state.get("needs_image", False):
             resolved_route = "generate_image_node"
         logger.info(
-            "langgraph route=after_review thread_id=%s next=%s",
+            "langgraph route=after_review thread_id=%s next=%s needs_image=%s",
             state["request"].thread_id,
             resolved_route,
+            state.get("needs_image", False),
         )
         return resolved_route
 
     async def _generate_image_node(self, state: GraphState) -> GraphState:
         request = state["request"]
-        if not _should_generate_cover_images(state):
+        if not state.get("needs_image", False) or not _is_image_generation_eligible(state):
             return {"current_step": "generate_image:ineligible"}
 
         writer = get_stream_writer()
@@ -1249,6 +1596,9 @@ class LangGraphProvider(BaseLLMProvider):
         artifact_payload: dict[str, object] | None = None
         artifact_fallback_reason = str(state.get("artifact_fallback_reason") or "").strip()
         generated_images = _normalize_generated_images(state.get("generated_images"))
+        citation_audit = _normalize_citation_audit_payload(
+            state.get("knowledge_base_citation_audit", []),
+        )
 
         candidate = state.get("artifact_candidate")
         if isinstance(candidate, dict):
@@ -1280,6 +1630,9 @@ class LangGraphProvider(BaseLLMProvider):
                 generated_images=generated_images,
             )
             artifact_payload = artifact.model_dump(mode="json")
+
+        if citation_audit:
+            artifact_payload["citation_audit"] = citation_audit
 
         writer(
             {
@@ -1418,6 +1771,121 @@ class LangGraphProvider(BaseLLMProvider):
         if not content.strip():
             return _build_heuristic_search_route_decision(request)
         return _coerce_search_route_decision(content, request)
+
+    async def _decide_image_route(self, state: GraphState) -> ImageRouteDecision:
+        if not _is_image_generation_eligible(state):
+            return ImageRouteDecision(needs_image=False)
+
+        request = state["request"]
+        artifact_candidate = state.get("artifact_candidate")
+        normalized_candidate = artifact_candidate if isinstance(artifact_candidate, dict) else None
+        draft_text = state.get("current_draft", "").strip() or str(
+            (normalized_candidate or {}).get("body", ""),
+        ).strip()
+
+        if self.image_route_analyzer is not None:
+            result = await self.image_route_analyzer(
+                request,
+                draft_text,
+                normalized_candidate,
+            )
+            return _coerce_image_route_decision(result, state)
+
+        try:
+            return await self._request_image_route_decision(
+                state,
+                draft_text=draft_text,
+                artifact_candidate=normalized_candidate,
+            )
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Image route LLM decision failed for thread_id=%s, falling back to heuristic: %s",
+                request.thread_id,
+                exc,
+            )
+            return _build_heuristic_image_route_decision(state)
+
+    async def _request_image_route_decision(
+        self,
+        state: GraphState,
+        *,
+        draft_text: str,
+        artifact_candidate: dict[str, object] | None,
+    ) -> ImageRouteDecision:
+        if isinstance(self.inner_provider, CompatibleLLMProvider):
+            if not self.inner_provider.api_key or not self.inner_provider.base_url:
+                return _build_heuristic_image_route_decision(state)
+            client = self.inner_provider._get_client()
+            model = self.inner_provider.model
+            timeout = self.inner_provider.request_timeout
+        elif isinstance(self.inner_provider, OpenAIProvider):
+            if not self.inner_provider.api_key:
+                return _build_heuristic_image_route_decision(state)
+            client = self.inner_provider._get_client()
+            model = self.inner_provider.model
+            timeout = self.inner_provider.request_timeout
+        else:
+            return _build_heuristic_image_route_decision(state)
+
+        request = state["request"]
+        review_prompt = _resolve_review_prompt(state)
+        image_material_count = sum(
+            1 for material in request.materials if material.type == MaterialType.IMAGE
+        )
+        material_summaries = [
+            (
+                f"- {material.type.value}: "
+                f"{(material.text or '').strip()[:120] or (material.url or '').strip()[:120]}"
+            )
+            for material in request.materials[:3]
+        ]
+        generated_image_count = len(
+            _normalize_generated_images(
+                (artifact_candidate or {}).get("generated_images"),
+            )
+        )
+        draft_preview = draft_text[:1200]
+        title_preview = str((artifact_candidate or {}).get("title", "")).strip()[:200]
+
+        messages = [
+            {"role": "system", "content": _build_image_route_decision_system_prompt()},
+            {
+                "role": "user",
+                "content": (
+                    f"task_type: {request.task_type.value}\n"
+                    f"platform: {request.platform.value}\n"
+                    f"user_request: {request.message}\n"
+                    f"review_prompt: {review_prompt}\n"
+                    f"material_count: {len(request.materials)}\n"
+                    f"image_material_count: {image_material_count}\n"
+                    f"generated_image_count: {generated_image_count}\n"
+                    f"artifact_title: {title_preview}\n"
+                    f"draft_preview:\n{draft_preview}\n"
+                    "material_preview:\n"
+                    + ("\n".join(material_summaries) if material_summaries else "<none>")
+                ),
+            },
+        ]
+
+        request_kwargs: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0,
+            "timeout": timeout,
+        }
+
+        try:
+            response = await client.chat.completions.create(
+                **request_kwargs,
+                response_format={"type": "json_object"},
+            )
+        except BadRequestError:
+            response = await client.chat.completions.create(**request_kwargs)
+
+        content = response.choices[0].message.content or ""
+        if not content.strip():
+            return _build_heuristic_image_route_decision(state)
+        return _coerce_image_route_decision(content, state)
 
     async def _extract_ocr_clues(
         self,
@@ -1688,6 +2156,7 @@ def _parse_materials(request: MediaChatRequest) -> tuple[list[str], bool]:
         label = {
             MaterialType.IMAGE: "图片素材",
             MaterialType.VIDEO_URL: "视频素材",
+            MaterialType.AUDIO_URL: "音频素材",
             MaterialType.TEXT_LINK: "文本素材",
         }.get(material.type, "素材")
 
@@ -2366,17 +2835,114 @@ def _resolve_review_prompt(state: GraphState) -> str:
     return ""
 
 
-def _should_generate_cover_images(state: GraphState) -> bool:
+def _build_image_route_decision_system_prompt() -> str:
+    return (
+        "You are an intent router for a multimodal publishing workflow.\n"
+        "Decide whether the system should trigger NEW image generation after the draft review step.\n"
+        "Return only a JSON object with one boolean field: needs_image.\n"
+        "Set needs_image to true only when the user clearly wants a newly generated image, cover, "
+        "illustration, poster, thumbnail, or a publish-ready visual asset.\n"
+        "Set needs_image to false for translation, rewriting, proofreading, Q&A, calculations, "
+        "summaries, analysis, comment replies, or other text-only editing tasks.\n"
+        "If the user already supplied enough images and did not ask for a new generated image, prefer false.\n"
+        "Be conservative. If uncertain, return false."
+    )
+
+
+def _is_image_generation_eligible(state: GraphState) -> bool:
     request = state["request"]
     if request.task_type != TaskType.CONTENT_GENERATION:
         return False
     if request.platform not in {Platform.XIAOHONGSHU, Platform.DOUYIN}:
         return False
 
+    existing_generated_images = _normalize_generated_images(state.get("generated_images"))
+    if existing_generated_images:
+        return False
+
+    artifact_candidate = state.get("artifact_candidate")
+    if isinstance(artifact_candidate, dict) and _normalize_generated_images(
+        artifact_candidate.get("generated_images"),
+    ):
+        return False
+
     draft_text = state.get("current_draft", "").strip() or str(
-        (state.get("artifact_candidate") or {}).get("body", ""),
+        (artifact_candidate or {}).get("body", ""),
     ).strip()
     return bool(draft_text)
+
+
+def _build_heuristic_image_route_decision(state: GraphState) -> ImageRouteDecision:
+    if not _is_image_generation_eligible(state):
+        return ImageRouteDecision(needs_image=False)
+
+    request = state["request"]
+    message = request.message.strip().lower()
+    explicit_negative_keywords = (
+        "不要配图",
+        "无需配图",
+        "无图",
+        "纯文字",
+        "只要文案",
+        "不要图片",
+        "text only",
+        "no image",
+        "no images",
+        "without image",
+    )
+    if any(keyword in message for keyword in explicit_negative_keywords):
+        return ImageRouteDecision(needs_image=False)
+
+    explicit_positive_keywords = (
+        "配图",
+        "图文",
+        "带图",
+        "封面",
+        "首图",
+        "插图",
+        "海报",
+        "画图",
+        "出图",
+        "生成图片",
+        "生成一张图",
+        "配一张图",
+        "illustration",
+        "cover",
+        "thumbnail",
+        "poster",
+        "generate image",
+        "draw",
+    )
+    if any(keyword in message for keyword in explicit_positive_keywords):
+        return ImageRouteDecision(needs_image=True)
+
+    image_material_count = sum(
+        1 for material in request.materials if material.type == MaterialType.IMAGE
+    )
+    if image_material_count > 0:
+        return ImageRouteDecision(needs_image=False)
+
+    return ImageRouteDecision(needs_image=False)
+
+
+def _coerce_image_route_decision(
+    payload: ImageRouteDecision | dict[str, object] | str,
+    state: GraphState,
+) -> ImageRouteDecision:
+    if isinstance(payload, ImageRouteDecision):
+        decision = payload
+    elif isinstance(payload, str):
+        try:
+            decision = ImageRouteDecision.model_validate_json(payload)
+        except ValidationError:
+            decision = ImageRouteDecision.model_validate(json.loads(payload))
+    else:
+        decision = ImageRouteDecision.model_validate(payload)
+
+    if not _is_image_generation_eligible(state):
+        return ImageRouteDecision(needs_image=False)
+
+    return ImageRouteDecision(needs_image=decision.needs_image)
 
 
 def _resolve_knowledge_base_scope_from_state(state: GraphState) -> str:
@@ -2414,7 +2980,9 @@ def _build_knowledge_base_context_from_documents(
             continue
 
         source_index = source_index_map.setdefault(source_name, len(source_index_map) + 1)
-        chunk_sections.append(f"[{source_index}] ({source_name}) {chunk_text}")
+        relevance_score = _coerce_relevance_score(getattr(document, "relevance_score", 0.0))
+        score_label = f"{round(relevance_score * 100)}% 相关度"
+        chunk_sections.append(f"[{source_index}] ({source_name}) {score_label}。{chunk_text}")
 
     if not chunk_sections:
         return ""
@@ -2430,6 +2998,58 @@ def _build_knowledge_base_context_from_documents(
         + "\n\n【引用来源】\n"
         + "\n".join(reference_lines)
     ).strip()
+
+
+def _coerce_relevance_score(value: object) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+def _build_citation_audit_from_documents(
+    documents: list[object],
+) -> list[dict[str, object]]:
+    source_index_map: dict[str, int] = {}
+    audit_items: list[dict[str, object]] = []
+
+    for document in documents:
+        source_name = str(getattr(document, "source", "") or "").strip() or "uploaded_text"
+        chunk_text = str(getattr(document, "text", "") or "").strip()
+        if not chunk_text:
+            continue
+
+        citation_index = source_index_map.setdefault(source_name, len(source_index_map) + 1)
+        audit_item = CitationAuditItem(
+            citation_index=citation_index,
+            source=source_name,
+            snippet=chunk_text[:600],
+            relevance_score=_coerce_relevance_score(
+                getattr(document, "relevance_score", 0.0),
+            ),
+            chunk_index=max(0, int(getattr(document, "chunk_index", 0) or 0)),
+            document_id=str(getattr(document, "document_id", "") or "") or None,
+            scope=str(getattr(document, "scope", "") or "") or None,
+        )
+        audit_items.append(audit_item.model_dump(mode="json"))
+
+    return audit_items
+
+
+def _normalize_citation_audit_payload(raw_items: object) -> list[dict[str, object]]:
+    if not isinstance(raw_items, list):
+        return []
+
+    normalized_items: list[dict[str, object]] = []
+    for raw_item in raw_items:
+        try:
+            normalized_items.append(
+                CitationAuditItem.model_validate(raw_item).model_dump(mode="json"),
+            )
+        except ValidationError:
+            continue
+    return normalized_items
 
 
 def _ensure_knowledge_base_context_has_source_registry(context: str) -> str:
@@ -2616,6 +3236,11 @@ def _build_fallback_artifact(
     )
 
 
+RETRYABLE_PROVIDER_ERROR_CODES = {
+    "PROVIDER_TRANSIENT_STREAM_ERROR",
+}
+
+
 GRACEFUL_ARTIFACT_ERROR_CODES = {
     "OPENAI_JSON_DECODE_ERROR",
     "OPENAI_ARTIFACT_VALIDATION_ERROR",
@@ -2624,6 +3249,37 @@ GRACEFUL_ARTIFACT_ERROR_CODES = {
     "QWEN_JSON_DECODE_ERROR",
     "QWEN_ARTIFACT_VALIDATION_ERROR",
 }
+
+
+def _is_retryable_provider_error(error: dict[str, object] | None) -> bool:
+    if not isinstance(error, dict):
+        return False
+
+    if bool(error.get("retriable")):
+        return True
+
+    error_code = str(error.get("code", "")).strip().upper()
+    return error_code in RETRYABLE_PROVIDER_ERROR_CODES
+
+
+def _resolve_retryable_provider_delay_seconds(
+    error: dict[str, object] | None,
+    *,
+    retry_count: int,
+) -> float:
+    if not isinstance(error, dict):
+        return 0.0
+
+    raw_base_delay = error.get("retry_delay_seconds", 1.0)
+    try:
+        base_delay = float(raw_base_delay)
+    except (TypeError, ValueError):
+        base_delay = 1.0
+
+    if base_delay <= 0:
+        return 0.0
+
+    return min(base_delay * (2 ** max(0, retry_count)), 2.0)
 
 
 def _should_gracefully_degrade_provider_error(
