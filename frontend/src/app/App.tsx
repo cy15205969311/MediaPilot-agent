@@ -140,8 +140,24 @@ type TemplateCreationRequest = {
   payload: TemplateCreatePayload;
 };
 
+type PublishResultPayload = {
+  status?: string;
+  message?: string;
+  error?: string;
+  taskId?: string;
+};
+
+type PublishToastState = {
+  id: number;
+  tone: "success" | "error";
+  title: string;
+  message: string;
+  error?: string;
+};
+
 const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
 const LEGACY_QWEN_MODEL_STORAGE_KEY = "omnimedia_qwen_model_override";
+const XIAOHONGSHU_CREATOR_URL = "https://creator.xiaohongshu.com/publish/publish";
 
 function getPlatformDisplayLabel(platform: UiPlatform): string {
   if (platform === "both") {
@@ -935,6 +951,7 @@ function App() {
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
   const [toolCallTimeline, setToolCallTimeline] = useState<ToolCallTraceItem[]>([]);
   const [statusText, setStatusText] = useState("等待新的内容任务");
+  const [publishToast, setPublishToast] = useState<PublishToastState | null>(null);
   const [activeThreadTitle, setActiveThreadTitle] = useState("New thread");
   const [activeThreadId, setActiveThreadId] = useState("thread-new");
   const [activeSystemPrompt, setActiveSystemPrompt] = useState("");
@@ -1005,6 +1022,9 @@ function App() {
     currentUser && (getStoredToken() || getStoredRefreshToken()),
   );
   const currentDisplayName = useMemo(() => getDisplayName(currentUser), [currentUser]);
+  const openXiaohongshuCreatorCenter = () => {
+    window.open(XIAOHONGSHU_CREATOR_URL, "_blank", "noopener,noreferrer");
+  };
 
   const handleAuthModeChange = (mode: AuthMode) => {
     setAuthMode(mode);
@@ -1037,6 +1057,91 @@ function App() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  useEffect(() => {
+    // 中文注释：接收 bridge.js 从扩展回传的发布结果，并同步到工作台状态与全局提示。
+    const handlePublisherMessage = (event: MessageEvent) => {
+      if (event.source !== window || event.origin !== window.location.origin) {
+        return;
+      }
+
+      const data = event.data;
+      if (!data || typeof data !== "object") {
+        return;
+      }
+
+      const publishEvent = data as {
+        source?: string;
+        action?: string;
+        payload?: PublishResultPayload;
+      };
+
+      if (
+        publishEvent.source !== "omnimedia-publisher" ||
+        publishEvent.action !== "PUBLISH_RESULT" ||
+        !publishEvent.payload
+      ) {
+        return;
+      }
+
+      const status =
+        typeof publishEvent.payload.status === "string" ? publishEvent.payload.status : "";
+      const messageText =
+        typeof publishEvent.payload.message === "string" && publishEvent.payload.message.trim()
+          ? publishEvent.payload.message.trim()
+          : "";
+      const errorCode =
+        typeof publishEvent.payload.error === "string" ? publishEvent.payload.error : undefined;
+
+      if (status === "queued") {
+        setStatusText(messageText || "已打开小红书发布页，发布辅助面板会自动弹出，请手动复制粘贴。");
+        return;
+      }
+
+      if (status === "success") {
+        const successMessage = "小红书发布辅助面板已打开，请手动复制粘贴。";
+        setStatusText(messageText || successMessage);
+        setPublishToast({
+          id: Date.now(),
+          tone: "success",
+          title: "发布辅助已就绪",
+          message: successMessage,
+        });
+        return;
+      }
+
+      if (status === "error") {
+        const errorMessage =
+          errorCode === "NEED_LOGIN"
+            ? "请先登录小红书创作者中心"
+            : messageText || "小红书发布流程出现异常，请稍后重试。";
+        setStatusText(errorMessage);
+        setPublishToast({
+          id: Date.now(),
+          tone: "error",
+          title: errorCode === "NEED_LOGIN" ? "需要登录" : "发布失败",
+          message: errorMessage,
+          error: errorCode,
+        });
+      }
+    };
+
+    window.addEventListener("message", handlePublisherMessage);
+    return () => window.removeEventListener("message", handlePublisherMessage);
+  }, []);
+
+  useEffect(() => {
+    if (!publishToast || publishToast.error === "NEED_LOGIN") {
+      return;
+    }
+
+    const timeoutMs = publishToast.tone === "success" ? 4000 : 6000;
+    const timerId = window.setTimeout(() => {
+      setPublishToast((current) => (current?.id === publishToast.id ? null : current));
+    }, timeoutMs);
+
+    return () => window.clearTimeout(timerId);
+  }, [publishToast]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -2783,6 +2888,7 @@ function App() {
 
     window.postMessage(
       {
+        type: "@@OMNIMEDIA/PUBLISH_TASK",
         action: "OMNIMEDIA_PUBLISH",
         payload: {
           title: publishTitle,
@@ -3828,6 +3934,54 @@ function App() {
           ) : null}
         </div>
       </div>
+
+      {publishToast ? (
+        <div className="pointer-events-none fixed right-4 top-20 z-[80] w-[min(92vw,24rem)]">
+          <div
+            className={`pointer-events-auto rounded-[28px] border px-4 py-4 shadow-xl backdrop-blur-sm ${
+              publishToast.tone === "success"
+                ? "border-success-foreground/20 bg-success-surface text-success-foreground"
+                : "border-danger-foreground/20 bg-danger-surface text-danger-foreground"
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 shrink-0">
+                {publishToast.tone === "success" ? (
+                  <CheckCircle2 className="h-5 w-5" />
+                ) : (
+                  <X className="h-5 w-5" />
+                )}
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold">{publishToast.title}</div>
+                <div className="mt-1 text-sm leading-6">{publishToast.message}</div>
+
+                {publishToast.error === "NEED_LOGIN" ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      className="inline-flex items-center rounded-full border border-current/20 bg-white/10 px-3 py-1.5 text-xs font-medium transition hover:bg-white/20"
+                      onClick={openXiaohongshuCreatorCenter}
+                      type="button"
+                    >
+                      去登录小红书
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              <button
+                aria-label="关闭发布提示"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-black/5 transition hover:bg-black/10"
+                onClick={() => setPublishToast(null)}
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <NewThreadModal
         isLoadingKnowledgeScopes={isLoadingKnowledgeScopes}

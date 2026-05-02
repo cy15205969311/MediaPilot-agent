@@ -1,11 +1,14 @@
 {
   "manifest_version": 3,
   "name": "OmniMedia Publisher",
-  "description": "将 OmniMedia 工作台生成的图文内容一键填充到小红书创作者中心。",
+  "description": "将 OmniMedia 工作台生成的图文内容带到小红书创作者中心，提供安全的一键复制辅助。",
   "version": "0.1.0",
-  "permissions": ["tabs", "scripting", "storage"],
+  "permissions": ["tabs", "scripting", "storage", "clipboardWrite"],
   "host_permissions": [
     "http://localhost:5173/*",
+    "http://127.0.0.1:5173/*",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
     "https://creator.xiaohongshu.com/*"
   ],
   "background": {
@@ -13,7 +16,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://localhost:5173/*"],
+      "matches": [
+        "http://localhost:5173/*",
+        "http://127.0.0.1:5173/*",
+        "http://localhost:8000/*",
+        "http://127.0.0.1:8000/*"
+      ],
       "js": ["bridge.js"]
     },
     {

@@ -1,273 +1,215 @@
 (function targetPublisher() {
   const FILL_ACTION = "OMNIMEDIA_FILL_XIAOHONGSHU";
-  const TARGET_READY_ACTION = "OMNIMEDIA_TARGET_READY";
+  const TARGET_SCRIPT_READY_TYPE = "TARGET_SCRIPT_READY";
+  const COPY_PANEL_ID = "omnimedia-publisher-copy-panel";
 
-  const TITLE_SELECTORS = [
-    'input[placeholder*="\u6807\u9898"]',
-    'textarea[placeholder*="\u6807\u9898"]',
-    '.c-input_inner input',
-    '.c-input_inner textarea',
-    '[class*="title"] input',
-    '[class*="title"] textarea',
-  ];
+  let activeTaskId = null;
+  let hasRequestedPendingTask = false;
 
-  const CONTENT_SELECTORS = [
-    '[contenteditable="true"][data-placeholder*="\u6b63\u6587"]',
-    '[contenteditable="true"][placeholder*="\u6b63\u6587"]',
-    '.ql-editor',
-    '#editor [contenteditable="true"]',
-    '[class*="editor"] [contenteditable="true"]',
-    '[class*="post-content"] [contenteditable="true"]',
-    '[role="textbox"][contenteditable="true"]',
-  ];
-
-  const IMAGE_INPUT_SELECTORS = [
-    'input[type="file"][accept*="image"]',
-    'input[type="file"]',
-  ];
-
-  const IMAGE_DROPZONE_SELECTORS = [
-    '[class*="upload-drag"]',
-    '[class*="upload"]',
-    '[class*="drag"]',
-    '[data-testid*="upload"]',
-  ];
-
-  function sleep(ms) {
-    return new Promise((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
-  }
-
-  function isVisible(element) {
-    if (!(element instanceof HTMLElement)) {
-      return false;
-    }
-
-    const style = window.getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }
-
-  function queryFirst(selectors) {
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      if (element) {
-        return element;
-      }
-    }
-
-    return null;
-  }
-
-  function queryFirstVisible(selectors) {
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      if (element && isVisible(element)) {
-        return element;
-      }
-    }
-
-    return null;
-  }
-
-  async function waitForElement(selectors, timeoutMs = 20000) {
-    const startedAt = Date.now();
-
-    while (Date.now() - startedAt < timeoutMs) {
-      const element = queryFirstVisible(selectors);
-      if (element) {
-        return element;
-      }
-      await sleep(300);
-    }
-
-    throw new Error(`Target element not found: ${selectors.join(", ")}`);
-  }
-
-  function dispatchTextEvents(element) {
-    element.dispatchEvent(
-      new InputEvent("input", {
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-    element.dispatchEvent(new Event("blur", { bubbles: true }));
-  }
-
-  function setNativeInputValue(element, value) {
-    const prototype = Object.getPrototypeOf(element);
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
-
-    if (descriptor?.set) {
-      descriptor.set.call(element, value);
+  function log(step, detail) {
+    if (detail === undefined) {
+      console.log(`[OmniMedia Publisher] ${step}`);
       return;
     }
-
-    element.value = value;
+    console.log(`[OmniMedia Publisher] ${step}`, detail);
   }
 
-  async function fillTitle(title) {
-    if (!title) {
-      return;
+  function cleanLLMText(text) {
+    if (typeof text !== "string") {
+      return "";
     }
 
-    const titleElement = await waitForElement(TITLE_SELECTORS);
-
-    if (titleElement instanceof HTMLInputElement || titleElement instanceof HTMLTextAreaElement) {
-      titleElement.focus();
-      setNativeInputValue(titleElement, title);
-      dispatchTextEvents(titleElement);
-      return;
-    }
-
-    if (titleElement instanceof HTMLElement) {
-      titleElement.focus();
-      titleElement.innerText = title;
-      dispatchTextEvents(titleElement);
-    }
+    return text
+      .replace(/\\n/g, "\n")
+      .replace(/^#+\s+/gm, "")
+      .replace(/\*\*/g, "")
+      .replace(/\*/g, "")
+      .replace(/\\\[/g, "[")
+      .replace(/\\\]/g, "]")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
   }
 
-  function replaceContentEditableText(element, content) {
-    element.focus();
-
-    const selection = window.getSelection();
-    if (selection) {
-      selection.removeAllRanges();
-      const range = document.createRange();
-      range.selectNodeContents(element);
-      selection.addRange(range);
-    }
-
-    if (document.execCommand) {
-      document.execCommand("selectAll", false);
-      document.execCommand("insertText", false, content);
-    } else {
-      element.innerText = content;
-    }
-
-    if (element.innerText !== content) {
-      element.innerText = content;
-    }
-  }
-
-  async function fillContent(content) {
-    if (!content) {
-      return;
-    }
-
-    const editorElement = await waitForElement(CONTENT_SELECTORS);
-
-    if (editorElement instanceof HTMLInputElement || editorElement instanceof HTMLTextAreaElement) {
-      editorElement.focus();
-      setNativeInputValue(editorElement, content);
-      dispatchTextEvents(editorElement);
-      return;
-    }
-
-    if (editorElement instanceof HTMLElement) {
-      replaceContentEditableText(editorElement, content);
-      dispatchTextEvents(editorElement);
-    }
-  }
-
-  function inferFileExtension(url, mimeType) {
-    const mimeMap = {
-      "image/jpeg": "jpg",
-      "image/png": "png",
-      "image/webp": "webp",
-      "image/gif": "gif",
+  function normalizeCopyPanelPayload(payload) {
+    return {
+      title: cleanLLMText(payload?.title),
+      content: cleanLLMText(payload?.content),
+      imageUrls: Array.isArray(payload?.imageUrls)
+        ? payload.imageUrls.filter((item) => typeof item === "string" && item.trim())
+        : [],
     };
-
-    if (mimeType && mimeMap[mimeType]) {
-      return mimeMap[mimeType];
-    }
-
-    const matched = url.match(/\.([a-zA-Z0-9]+)(?:$|\?)/);
-    return matched?.[1]?.toLowerCase() ?? "png";
   }
 
-  async function fetchImageAsFile(url, index) {
-    const response = await fetch(url, {
-      mode: "cors",
-      credentials: "omit",
-    });
-
-    if (!response.ok) {
-      throw new Error(`Image download failed: ${response.status} ${response.statusText}`);
-    }
-
-    const blob = await response.blob();
-    const extension = inferFileExtension(url, blob.type);
-
-    return new File([blob], `omnimedia-image-${index + 1}.${extension}`, {
-      type: blob.type || "image/png",
-      lastModified: Date.now(),
-    });
-  }
-
-  function buildDataTransfer(files) {
-    const dataTransfer = new DataTransfer();
-
-    files.forEach((file) => {
-      dataTransfer.items.add(file);
-    });
-
-    return dataTransfer;
-  }
-
-  function assignFilesToInput(input, dataTransfer) {
-    try {
-      input.files = dataTransfer.files;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
-    } catch (error) {
-      console.warn("[OmniMedia Publisher] File input upload failed, fallback to drag-and-drop", error);
+  async function copyTextToClipboard(text) {
+    if (!text) {
       return false;
     }
+
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (error) {
+        console.warn("[OmniMedia Publisher] Clipboard API copy failed, fallback to execCommand", error);
+      }
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+
+    try {
+      return document.execCommand("copy");
+    } finally {
+      textarea.remove();
+    }
   }
 
-  function dispatchDropToZone(dropZone, dataTransfer) {
-    ["dragenter", "dragover", "drop"].forEach((eventName) => {
-      const event = new DragEvent(eventName, {
-        bubbles: true,
-        cancelable: true,
+  function setButtonFeedback(button, text) {
+    const originalText = button.textContent;
+    button.textContent = text;
+    window.setTimeout(() => {
+      button.textContent = originalText;
+    }, 1200);
+  }
+
+  function createCopyButton(label, text) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.style.width = "100%";
+    button.style.border = "0";
+    button.style.borderRadius = "6px";
+    button.style.padding = "10px 12px";
+    button.style.background = "#111827";
+    button.style.color = "#ffffff";
+    button.style.fontSize = "14px";
+    button.style.fontWeight = "600";
+    button.style.cursor = text ? "pointer" : "not-allowed";
+    button.style.opacity = text ? "1" : "0.45";
+    button.disabled = !text;
+
+    button.addEventListener("click", () => {
+      void copyTextToClipboard(text).then((copied) => {
+        setButtonFeedback(button, copied ? "已复制" : "复制失败");
       });
-      Object.defineProperty(event, "dataTransfer", {
-        value: dataTransfer,
-      });
-      dropZone.dispatchEvent(event);
     });
+
+    return button;
   }
 
-  async function uploadImages(imageUrls) {
-    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
-      return;
-    }
+  function createPanelSection(label, value, buttonText) {
+    const section = document.createElement("section");
+    section.style.display = "grid";
+    section.style.gap = "8px";
 
-    const files = [];
-    for (let index = 0; index < imageUrls.length; index += 1) {
-      files.push(await fetchImageAsFile(imageUrls[index], index));
-    }
+    const heading = document.createElement("div");
+    heading.textContent = label;
+    heading.style.fontSize = "13px";
+    heading.style.fontWeight = "700";
+    heading.style.color = "#111827";
 
-    const dataTransfer = buildDataTransfer(files);
-    const fileInput = queryFirst(IMAGE_INPUT_SELECTORS);
+    const preview = document.createElement("div");
+    preview.textContent = value || "暂无内容";
+    preview.style.maxHeight = label === "正文" ? "180px" : "92px";
+    preview.style.overflow = "auto";
+    preview.style.whiteSpace = "pre-wrap";
+    preview.style.wordBreak = "break-all";
+    preview.style.border = "1px solid #e5e7eb";
+    preview.style.borderRadius = "6px";
+    preview.style.padding = "10px";
+    preview.style.background = "#f9fafb";
+    preview.style.color = value ? "#1f2937" : "#9ca3af";
+    preview.style.fontSize = "13px";
+    preview.style.lineHeight = "1.5";
 
-    if (fileInput instanceof HTMLInputElement && assignFilesToInput(fileInput, dataTransfer)) {
-      return;
-    }
-
-    const dropZone = await waitForElement(IMAGE_DROPZONE_SELECTORS);
-    dispatchDropToZone(dropZone, dataTransfer);
+    section.append(heading, preview, createCopyButton(buttonText, value));
+    return section;
   }
 
-  async function fillPublishForm(payload) {
-    await fillTitle(payload.title ?? "");
-    await sleep(200);
-    await fillContent(payload.content ?? "");
-    await sleep(200);
-    await uploadImages(payload.imageUrls ?? []);
+  function renderCopyPanel(payload) {
+    const normalizedPayload = normalizeCopyPanelPayload(payload);
+    const existingPanel = document.getElementById(COPY_PANEL_ID);
+    if (existingPanel) {
+      existingPanel.remove();
+    }
+
+    const panel = document.createElement("aside");
+    panel.id = COPY_PANEL_ID;
+    panel.style.position = "fixed";
+    panel.style.top = "88px";
+    panel.style.right = "24px";
+    panel.style.zIndex = "2147483647";
+    panel.style.width = "340px";
+    panel.style.maxWidth = "calc(100vw - 32px)";
+    panel.style.maxHeight = "calc(100vh - 120px)";
+    panel.style.overflow = "auto";
+    panel.style.display = "grid";
+    panel.style.gap = "14px";
+    panel.style.padding = "16px";
+    panel.style.border = "1px solid #d1d5db";
+    panel.style.borderRadius = "8px";
+    panel.style.background = "#ffffff";
+    panel.style.boxShadow = "0 18px 45px rgba(15, 23, 42, 0.18)";
+    panel.style.fontFamily =
+      "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
+    const header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.justifyContent = "space-between";
+    header.style.gap = "10px";
+
+    const title = document.createElement("div");
+    title.textContent = "OmniMedia 发布辅助";
+    title.style.fontSize = "15px";
+    title.style.fontWeight = "800";
+    title.style.color = "#111827";
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.textContent = "关闭";
+    closeButton.style.border = "1px solid #d1d5db";
+    closeButton.style.borderRadius = "6px";
+    closeButton.style.padding = "6px 8px";
+    closeButton.style.background = "#ffffff";
+    closeButton.style.color = "#374151";
+    closeButton.style.cursor = "pointer";
+    closeButton.addEventListener("click", () => {
+      panel.remove();
+    });
+
+    header.append(title, closeButton);
+
+    const status = document.createElement("div");
+    status.textContent = "请在小红书页面手动切换到上传图文后粘贴内容。";
+    status.style.fontSize = "12px";
+    status.style.lineHeight = "1.5";
+    status.style.color = "#6b7280";
+
+    const imageText = normalizedPayload.imageUrls.join("\n");
+    panel.append(
+      header,
+      status,
+      createPanelSection("标题", normalizedPayload.title, "复制标题"),
+      createPanelSection("正文", normalizedPayload.content, "复制正文"),
+    );
+
+    if (normalizedPayload.imageUrls.length > 0) {
+      panel.append(createPanelSection("图片链接", imageText, "复制图片链接"));
+    }
+
+    document.body.appendChild(panel);
+    log("半自动复制面板已打开", {
+      titleLength: normalizedPayload.title.length,
+      contentLength: normalizedPayload.content.length,
+      imageCount: normalizedPayload.imageUrls.length,
+    });
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -275,33 +217,60 @@
       return false;
     }
 
-    fillPublishForm(message.payload ?? {})
-      .then(() => {
-        sendResponse({
-          ok: true,
-        });
-      })
-      .catch((error) => {
-        console.error("[OmniMedia Publisher] Failed to fill Xiaohongshu publish form", error);
+    activeTaskId = typeof message.taskId === "string" ? message.taskId : null;
+    sendResponse({
+      status: "received",
+      message: "Task started",
+      taskId: activeTaskId,
+    });
 
-        sendResponse({
-          ok: false,
-          error: error instanceof Error ? error.message : "Fill failed",
-        });
-      });
+    log("收到发布任务", {
+      taskId: activeTaskId,
+      imageCount: Array.isArray(message.payload?.imageUrls)
+        ? message.payload.imageUrls.length
+        : 0,
+    });
 
-    return true;
+    try {
+      renderCopyPanel(message.payload ?? {});
+    } catch (error) {
+      console.error("[OmniMedia Publisher] Failed to render copy panel", error);
+    } finally {
+      activeTaskId = null;
+    }
+
+    return false;
   });
 
-  function notifyReady() {
-    chrome.runtime.sendMessage({
-      action: TARGET_READY_ACTION,
-    });
+  function requestPendingTask() {
+    if (hasRequestedPendingTask) {
+      return;
+    }
+
+    hasRequestedPendingTask = true;
+    console.log("[OmniMedia Publisher] Content script injected, requesting task...");
+
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: TARGET_SCRIPT_READY_TYPE,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[OmniMedia Publisher] Failed to request pending task",
+              chrome.runtime.lastError,
+            );
+            return;
+          }
+
+          console.log("[OmniMedia Publisher] Ready signal sent", response ?? {});
+        },
+      );
+    } catch (error) {
+      console.warn("[OmniMedia Publisher] Ready handshake failed", error);
+    }
   }
 
-  if (document.readyState === "complete" || document.readyState === "interactive") {
-    notifyReady();
-  } else {
-    window.addEventListener("DOMContentLoaded", notifyReady, { once: true });
-  }
+  requestPendingTask();
 })();

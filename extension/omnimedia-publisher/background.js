@@ -1,8 +1,24 @@
 const PUBLISH_ACTION = "OMNIMEDIA_PUBLISH";
-const TARGET_READY_ACTION = "OMNIMEDIA_TARGET_READY";
+const TARGET_SCRIPT_READY_TYPE = "TARGET_SCRIPT_READY";
 const FILL_ACTION = "OMNIMEDIA_FILL_XIAOHONGSHU";
+const PUBLISH_STATUS_TYPE = "OMNIMEDIA_PUBLISH_STATUS";
 const TASKS_STORAGE_KEY = "omnimedia_publish_tasks";
+const READY_TABS_STORAGE_KEY = "omnimedia_ready_tabs";
 const XIAOHONGSHU_PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish";
+const WORKSPACE_URL_PREFIXES = [
+  "http://localhost:5173/",
+  "http://127.0.0.1:5173/",
+  "http://localhost:8000/",
+  "http://127.0.0.1:8000/",
+];
+
+function createResponse(success, message, extra = {}) {
+  return {
+    success,
+    message,
+    ...extra,
+  };
+}
 
 async function getStoredTasks() {
   const result = await chrome.storage.local.get(TASKS_STORAGE_KEY);
@@ -12,6 +28,17 @@ async function getStoredTasks() {
 async function setStoredTasks(tasks) {
   await chrome.storage.local.set({
     [TASKS_STORAGE_KEY]: tasks,
+  });
+}
+
+async function getReadyTabs() {
+  const result = await chrome.storage.local.get(READY_TABS_STORAGE_KEY);
+  return result[READY_TABS_STORAGE_KEY] ?? {};
+}
+
+async function setReadyTabs(readyTabs) {
+  await chrome.storage.local.set({
+    [READY_TABS_STORAGE_KEY]: readyTabs,
   });
 }
 
@@ -25,6 +52,25 @@ async function removeTask(taskId) {
   const tasks = await getStoredTasks();
   delete tasks[taskId];
   await setStoredTasks(tasks);
+}
+
+async function markTabReady(tabId) {
+  const readyTabs = await getReadyTabs();
+  readyTabs[String(tabId)] = {
+    readyAt: Date.now(),
+  };
+  await setReadyTabs(readyTabs);
+}
+
+async function clearTabReady(tabId) {
+  const readyTabs = await getReadyTabs();
+  delete readyTabs[String(tabId)];
+  await setReadyTabs(readyTabs);
+}
+
+async function isTabReady(tabId) {
+  const readyTabs = await getReadyTabs();
+  return Boolean(readyTabs[String(tabId)]);
 }
 
 async function findTaskByTabId(tabId) {
@@ -53,11 +99,67 @@ function normalizePayload(payload) {
   };
 }
 
+function isWorkspaceTab(tab) {
+  return (
+    typeof tab?.url === "string" &&
+    WORKSPACE_URL_PREFIXES.some((prefix) => tab.url.startsWith(prefix))
+  );
+}
+
+async function findWorkspaceTab() {
+  const activeTabs = await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+  });
+  const activeWorkspaceTab = activeTabs.find(isWorkspaceTab);
+
+  if (activeWorkspaceTab?.id) {
+    return activeWorkspaceTab;
+  }
+
+  const allTabs = await chrome.tabs.query({});
+  return allTabs.find((tab) => tab.active && isWorkspaceTab(tab)) ?? allTabs.find(isWorkspaceTab) ?? null;
+}
+
+async function forwardPublishStatus(message) {
+  const workspaceTab = await findWorkspaceTab();
+
+  if (!workspaceTab?.id) {
+    console.warn("[OmniMedia Publisher] Workspace tab not found for publish status", message);
+    return createResponse(false, "未找到工作台页面，无法回传发布状态。");
+  }
+
+  try {
+    const response = await chrome.tabs.sendMessage(workspaceTab.id, {
+      type: PUBLISH_STATUS_TYPE,
+      status: message.status,
+      message: message.message,
+      error: message.error,
+      taskId: message.taskId,
+    });
+
+    if (!response?.success) {
+      return createResponse(
+        false,
+        response?.message ?? "工作台未确认收到发布状态。",
+      );
+    }
+
+    return createResponse(true, "发布状态已转发到工作台。");
+  } catch (error) {
+    console.warn("[OmniMedia Publisher] Failed to forward publish status", error);
+    return createResponse(
+      false,
+      error instanceof Error ? error.message : "发布状态转发失败。",
+    );
+  }
+}
+
 async function dispatchTaskToTab(tabId) {
   const task = await findTaskByTabId(tabId);
 
   if (!task || task.status === "dispatching") {
-    return false;
+    return createResponse(false, "当前标签页没有待下发任务。");
   }
 
   try {
@@ -73,13 +175,17 @@ async function dispatchTaskToTab(tabId) {
       payload: task.payload,
     });
 
-    if (!response?.ok) {
-      throw new Error(response?.error ?? "Target tab rejected the publish task.");
+    const accepted = response?.success || response?.status === "received";
+    if (!accepted) {
+      throw new Error(response?.message ?? "Target tab rejected the publish task.");
     }
 
     await removeTask(task.id);
+    await clearTabReady(tabId);
 
-    return true;
+    return createResponse(true, response.message ?? "发布任务已完成。", {
+      taskId: task.id,
+    });
   } catch (error) {
     await saveTask({
       ...task,
@@ -88,14 +194,25 @@ async function dispatchTaskToTab(tabId) {
       retryCount: (task.retryCount ?? 0) + 1,
     });
     console.warn("[OmniMedia Publisher] Failed to dispatch task to target tab", error);
-    return false;
+    return createResponse(
+      false,
+      error instanceof Error ? error.message : "向内容脚本下发任务失败。",
+      {
+        errorCode: "TASK_DISPATCH_FAILED",
+        taskId: task.id,
+      },
+    );
   }
 }
 
 async function queuePublishTask(payload) {
   const normalizedPayload = normalizePayload(payload);
 
-  if (!normalizedPayload.title && !normalizedPayload.content && normalizedPayload.imageUrls.length === 0) {
+  if (
+    !normalizedPayload.title &&
+    !normalizedPayload.content &&
+    normalizedPayload.imageUrls.length === 0
+  ) {
     throw new Error("Publish payload is empty.");
   }
 
@@ -114,6 +231,10 @@ async function queuePublishTask(payload) {
 
   await saveTask(task);
 
+  if (tab.id && (await isTabReady(tab.id))) {
+    void dispatchTaskToTab(tab.id);
+  }
+
   return {
     taskId: task.id,
     tabId: tab.id,
@@ -122,43 +243,76 @@ async function queuePublishTask(payload) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.action === PUBLISH_ACTION) {
-    queuePublishTask(message.payload)
+    void queuePublishTask(message.payload)
       .then((result) => {
-        sendResponse({
-          ok: true,
-          ...result,
-        });
+        sendResponse(
+          createResponse(true, "发布辅助任务已入队，正在打开小红书发布页。", result),
+        );
       })
       .catch((error) => {
         console.error("[OmniMedia Publisher] Failed to create publish task", error);
-        sendResponse({
-          ok: false,
-          error: error instanceof Error ? error.message : "Failed to create publish task",
-        });
+        sendResponse(
+          createResponse(
+            false,
+            error instanceof Error ? error.message : "发布任务创建失败。",
+            {
+              errorCode: "QUEUE_FAILED",
+            },
+          ),
+        );
       });
 
     return true;
   }
 
-  if (message?.action === TARGET_READY_ACTION && sender.tab?.id) {
-    void dispatchTaskToTab(sender.tab.id);
+  if (message?.type === TARGET_SCRIPT_READY_TYPE && sender.tab?.id) {
+    const tabId = sender.tab.id;
+    sendResponse(
+      createResponse(true, "已收到内容脚本 READY 信号，后台将尝试下发发布辅助任务。"),
+    );
+
+    void (async () => {
+      try {
+        await markTabReady(tabId);
+      } catch (error) {
+        console.warn("[OmniMedia Publisher] Failed to process ready handshake", error);
+        return;
+      }
+
+      const dispatchResult = await dispatchTaskToTab(tabId);
+      if (!dispatchResult.success && dispatchResult.message !== "当前标签页没有待下发任务。") {
+        console.warn(
+          "[OmniMedia Publisher] Task dispatch after READY was not successful",
+          dispatchResult,
+        );
+      }
+    })();
+
+    return false;
+  }
+
+  if (message?.type === PUBLISH_STATUS_TYPE) {
+    sendResponse(createResponse(true, "发布状态已收到，后台将尝试转发。"));
+
+    void forwardPublishStatus(message)
+      .then((result) => {
+        if (!result.success) {
+          console.warn("[OmniMedia Publisher] Publish status forwarding was not successful", result);
+        }
+      })
+      .catch((error) => {
+        console.warn("[OmniMedia Publisher] Unexpected status forwarding failure", error);
+      });
+
     return false;
   }
 
   return false;
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status !== "complete") {
-    return;
-  }
-
-  void dispatchTaskToTab(tabId);
-});
-
 chrome.tabs.onRemoved.addListener((tabId) => {
-  findTaskByTabId(tabId)
-    .then((task) => {
+  Promise.all([findTaskByTabId(tabId), clearTabReady(tabId)])
+    .then(([task]) => {
       if (task?.id) {
         return removeTask(task.id);
       }
