@@ -10,7 +10,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { ChangeEvent, KeyboardEvent, RefObject } from "react";
 
 import type {
@@ -18,6 +18,7 @@ import type {
   UploadedMaterial,
   UploadedMaterialKind,
 } from "../types";
+import { ImagePreviewModal } from "./ImagePreviewModal";
 
 type ComposerProps = {
   message: string;
@@ -79,6 +80,10 @@ export function Composer({
   onRemoveMaterial,
   onFilesSelected,
 }: ComposerProps) {
+  const [previewData, setPreviewData] = useState<{
+    images: string[];
+    startIndex: number;
+  } | null>(null);
   const isLoading = isStreaming || isUploading;
   const canSubmit = message.trim().length > 0 && !isLoading;
   const imageMaterials = useMemo(
@@ -88,6 +93,13 @@ export function Composer({
   const nonImageMaterials = useMemo(
     () => uploadedMaterials.filter((item) => item.kind !== "image"),
     [uploadedMaterials],
+  );
+  const imagePreviewUrls = useMemo(
+    () =>
+      imageMaterials
+        .map((item) => item.previewUrl)
+        .filter((url): url is string => Boolean(url)),
+    [imageMaterials],
   );
   const sendButtonLabel = isUploading
     ? "上传中..."
@@ -120,18 +132,45 @@ export function Composer({
     handleSubmit();
   };
 
-  const renderImageCard = (item: UploadedMaterial) => (
+  const openImagePreview = (startIndex: number) => {
+    if (imagePreviewUrls.length === 0) {
+      return;
+    }
+
+    const normalizedStartIndex =
+      imageMaterials
+        .slice(0, startIndex + 1)
+        .filter((item) => Boolean(item.previewUrl)).length - 1;
+
+    if (normalizedStartIndex < 0) {
+      return;
+    }
+
+    setPreviewData({
+      images: imagePreviewUrls,
+      startIndex: normalizedStartIndex,
+    });
+  };
+
+  const renderImageCard = (item: UploadedMaterial, index: number) => (
     <div
       key={item.id}
       className="relative flex-shrink-0 w-16 h-16 sm:w-[72px] sm:h-[72px] rounded-xl overflow-hidden border border-black/10 dark:border-white/10 shadow-sm transition-transform hover:scale-[1.02] bg-muted"
       data-testid="composer-uploaded-image"
     >
       {item.previewUrl ? (
-        <img
-          alt={item.name}
-          className="h-full w-full object-cover"
-          src={item.previewUrl}
-        />
+        <button
+          aria-label={`预览图片 ${item.name}`}
+          className="h-full w-full cursor-pointer bg-transparent p-0 transition-opacity hover:opacity-80"
+          onClick={() => openImagePreview(index)}
+          type="button"
+        >
+          <img
+            alt={item.name}
+            className="h-full w-full object-cover"
+            src={item.previewUrl}
+          />
+        </button>
       ) : (
         <div className="flex h-full w-full items-center justify-center bg-card text-muted-foreground">
           <ImageIcon className="h-6 w-6" />
@@ -266,7 +305,7 @@ export function Composer({
           {imageMaterials.length > 0 ? (
             <div className="px-4 pt-4">
               <div className="scrollbar-hide flex flex-row gap-3 overflow-x-auto overscroll-x-contain w-full pb-2 pt-1 px-1">
-                {imageMaterials.map(renderImageCard)}
+                {imageMaterials.map((item, index) => renderImageCard(item, index))}
               </div>
             </div>
           ) : null}
@@ -340,6 +379,13 @@ export function Composer({
         ref={textInputRef}
         type="file"
       />
+      {previewData ? (
+        <ImagePreviewModal
+          images={previewData.images}
+          initialIndex={previewData.startIndex}
+          onClose={() => setPreviewData(null)}
+        />
+      ) : null}
     </>
   );
 }

@@ -22,6 +22,7 @@ import type {
 } from "../types";
 import { CitationAuditPanel } from "./CitationAuditPanel";
 import { CopyButton } from "./CopyButton";
+import { ImagePreviewModal } from "./ImagePreviewModal";
 import { buildAbsoluteUrl, formatChatTimestamp, getDisplayName } from "../utils";
 
 type ChatFeedProps = {
@@ -170,7 +171,10 @@ function renderTextWithCitations(content: string) {
   return nodes;
 }
 
-function renderMessageMaterials(item: ConversationMessage) {
+function renderMessageMaterials(
+  item: ConversationMessage,
+  onOpenPreview: (images: string[], startIndex: number) => void,
+) {
   const materials = item.materials ?? [];
   if (materials.length === 0) {
     return null;
@@ -183,29 +187,32 @@ function renderMessageMaterials(item: ConversationMessage) {
     (material) => material.type !== "image" || !material.url,
   );
   const isUser = item.role === "user";
+  const imageUrls = imageMaterials
+    .map((material) => material.url)
+    .filter((url): url is string => Boolean(url));
 
   return (
     <div className="mb-3 space-y-2">
       {imageMaterials.length > 0 ? (
         <div className="scrollbar-hide flex max-w-full flex-row gap-2 overflow-x-auto overscroll-x-contain pb-2 snap-x">
           {imageMaterials.map((material, index) => (
-            <a
-              className={`group h-16 w-16 flex-shrink-0 snap-start overflow-hidden rounded-xl border border-black/5 shadow-sm transition-opacity hover:opacity-80 dark:border-white/10 ${
+            <button
+              aria-label={`预览图片 ${materialLabel(material)}`}
+              className={`group h-16 w-16 flex-shrink-0 snap-start overflow-hidden rounded-xl border border-black/5 bg-transparent p-0 shadow-sm transition-opacity hover:opacity-80 dark:border-white/10 ${
                 isUser
                   ? "bg-user-bubble-subtle"
                   : "bg-muted"
               }`}
-              href={material.url}
               key={`${material.url}-${index}`}
-              rel="noreferrer"
-              target="_blank"
+              onClick={() => onOpenPreview(imageUrls, index)}
+              type="button"
             >
               <img
                 alt={materialLabel(material)}
-                className="h-full w-full cursor-pointer rounded-xl object-cover"
+                className="h-full w-full cursor-pointer rounded-xl object-cover transition-opacity hover:opacity-80"
                 src={material.url}
               />
-            </a>
+            </button>
           ))}
         </div>
       ) : null}
@@ -391,6 +398,10 @@ export function ChatFeed({
     ? buildAbsoluteUrl(currentUser.avatar_url)
     : "";
   const [hasUserAvatarError, setHasUserAvatarError] = useState(false);
+  const [previewData, setPreviewData] = useState<{
+    images: string[];
+    startIndex: number;
+  } | null>(null);
 
   useEffect(() => {
     setHasUserAvatarError(false);
@@ -401,6 +412,13 @@ export function ChatFeed({
   const latestAssistantMessageId = [...messages]
     .reverse()
     .find((item) => item.role === "assistant")?.id;
+  const openImagePreview = (images: string[], startIndex: number) => {
+    if (images.length === 0) {
+      return;
+    }
+
+    setPreviewData({ images, startIndex });
+  };
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
@@ -500,7 +518,7 @@ export function ChatFeed({
                     : "border-border bg-ai-bubble text-ai-foreground"
                 } min-w-0 overflow-hidden`}
               >
-                {renderMessageMaterials(item)}
+                {renderMessageMaterials(item, openImagePreview)}
                 <div className="whitespace-pre-wrap text-sm leading-7">
                   {item.content ? (
                     item.role === "assistant" ? (
@@ -535,17 +553,19 @@ export function ChatFeed({
                       data-testid="chat-artifact-image-gallery"
                     >
                       {artifactGeneratedImages.map((imageUrl, index) => (
-                        <a
+                        <button
+                          aria-label={`预览 AI 生成图片 ${index + 1}`}
                           key={`${imageUrl}-${index}`}
-                          className="group overflow-hidden rounded-lg border border-border/60 bg-card/70 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                          className="group overflow-hidden rounded-lg border border-border/60 bg-card/70 p-0 text-left shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md"
                           data-testid={`chat-artifact-image-card-${index + 1}`}
-                          href={imageUrl}
-                          rel="noreferrer"
-                          target="_blank"
+                          onClick={() =>
+                            openImagePreview(artifactGeneratedImages, index)
+                          }
+                          type="button"
                         >
                           <img
                             alt={`AI generated image ${index + 1}`}
-                            className={`w-full object-cover transition duration-200 group-hover:scale-[1.02] ${
+                            className={`w-full cursor-pointer object-cover transition duration-200 group-hover:scale-[1.02] ${
                               artifactGeneratedImages.length === 1
                                 ? "aspect-[4/5]"
                                 : "aspect-square"
@@ -553,7 +573,7 @@ export function ChatFeed({
                             loading="lazy"
                             src={imageUrl}
                           />
-                        </a>
+                        </button>
                       ))}
                     </div>
                   </div>
@@ -641,6 +661,13 @@ export function ChatFeed({
       ) : null}
 
       <div ref={endRef} />
+      {previewData ? (
+        <ImagePreviewModal
+          images={previewData.images}
+          initialIndex={previewData.startIndex}
+          onClose={() => setPreviewData(null)}
+        />
+      ) : null}
     </div>
   );
 }
