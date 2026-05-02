@@ -876,13 +876,13 @@ function App() {
   const [taskType, setTaskType] = useState<UiTaskType>("content_generation");
   const [modelOverride, setModelOverride] = useState<string>(() => {
     if (typeof window === "undefined") {
-      return "dashscope:qwen-max";
+      return "";
     }
     const storedValue =
       window.localStorage.getItem(MODEL_OVERRIDE_STORAGE_KEY) ??
       window.localStorage.getItem(LEGACY_QWEN_MODEL_STORAGE_KEY) ??
       "";
-    return storedValue.trim() || "dashscope:qwen-max";
+    return storedValue.trim();
   });
   const [message, setMessage] = useState(
     "请帮我策划一篇关于年度资产配置复盘的小红书笔记",
@@ -942,7 +942,15 @@ function App() {
   const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
 
   useEffect(() => {
-    window.localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, modelOverride);
+    const normalizedModelOverride = modelOverride.trim();
+    if (!normalizedModelOverride) {
+      window.localStorage.removeItem(MODEL_OVERRIDE_STORAGE_KEY);
+      window.localStorage.removeItem(LEGACY_QWEN_MODEL_STORAGE_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, normalizedModelOverride);
+    window.localStorage.removeItem(LEGACY_QWEN_MODEL_STORAGE_KEY);
   }, [modelOverride]);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -3027,7 +3035,7 @@ function App() {
       task_type: backendTaskType,
       message: trimmedMessage,
       materials: requestMaterials,
-      model_override: modelOverride,
+      model_override: modelOverride.trim() || null,
       ...(activeSystemPrompt.trim() ? { system_prompt: activeSystemPrompt.trim() } : {}),
       ...(activeKnowledgeBaseScope.trim()
         ? { knowledge_base_scope: activeKnowledgeBaseScope.trim() }

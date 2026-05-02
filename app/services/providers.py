@@ -106,6 +106,13 @@ def _normalize_provider_scoped_model_override(
     return model_name.strip()
 
 
+def _normalize_compatible_model_name(model_name: str | None) -> str:
+    normalized = (model_name or "").strip()
+    if normalized.lower().startswith("mimo-"):
+        return normalized.lower()
+    return normalized
+
+
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
     connect_timeout = min(seconds, 10.0)
     return httpx.Timeout(seconds, connect=connect_timeout)
@@ -676,8 +683,12 @@ class CompatibleLLMProvider(BaseLLMProvider):
         base_url: str | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
-        self.model = model or os.getenv("LLM_MODEL", "qwen3.5-flash")
-        self.artifact_model = artifact_model or os.getenv("LLM_ARTIFACT_MODEL", self.model)
+        self.model = _normalize_compatible_model_name(
+            model or os.getenv("LLM_MODEL", "qwen3.5-flash"),
+        )
+        self.artifact_model = _normalize_compatible_model_name(
+            artifact_model or os.getenv("LLM_ARTIFACT_MODEL", self.model),
+        )
         self.api_key = api_key or os.getenv("LLM_API_KEY")
         self.base_url = base_url or os.getenv("LLM_BASE_URL")
         self.timeout_seconds = timeout_seconds or float(
@@ -833,7 +844,22 @@ class CompatibleLLMProvider(BaseLLMProvider):
         )
 
     def clone_with_model_override(self, model_override: str | None) -> BaseLLMProvider:
-        return self
+        normalized_model = _normalize_compatible_model_name(
+            _normalize_provider_scoped_model_override(
+                model_override,
+                accepted_provider_keys=("compatible", "xiaomi"),
+            )
+        )
+        if not normalized_model or normalized_model == self.model:
+            return self
+
+        return type(self)(
+            model=normalized_model,
+            artifact_model=normalized_model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+        )
 
     async def _build_structured_artifact(
         self,

@@ -74,6 +74,45 @@ function groupProviderModels(
     }));
 }
 
+function findModelSelection(
+  providers: ModelProvider[],
+  value: string | null,
+): { provider: ModelProvider; model: ModelDetail } | null {
+  const normalizedValue = (value ?? "").trim();
+  if (!normalizedValue) {
+    return null;
+  }
+
+  for (const provider of providers) {
+    for (const model of provider.models) {
+      if (model.id === normalizedValue || model.model === normalizedValue) {
+        return { provider, model };
+      }
+    }
+  }
+
+  return null;
+}
+
+function getPreferredConfiguredModel(providers: ModelProvider[]): ModelDetail | null {
+  for (const provider of providers) {
+    if (provider.status !== "configured") {
+      continue;
+    }
+
+    const defaultModel = provider.models.find((model) => model.is_default);
+    if (defaultModel) {
+      return defaultModel;
+    }
+
+    if (provider.models.length > 0) {
+      return provider.models[0];
+    }
+  }
+
+  return null;
+}
+
 export function ModelSelector(props: ModelSelectorProps) {
   const { value, onChange } = props;
   const [providers, setProviders] = useState<ModelProvider[]>([]);
@@ -108,6 +147,28 @@ export function ModelSelector(props: ModelSelectorProps) {
   }, []);
 
   useEffect(() => {
+    if (isLoading || errorText || providers.length === 0) {
+      return;
+    }
+
+    const selected = findModelSelection(providers, value);
+    if (selected && selected.provider.status === "configured") {
+      return;
+    }
+
+    const fallbackModel = getPreferredConfiguredModel(providers);
+    if (!fallbackModel) {
+      return;
+    }
+
+    if (selected?.model.id === fallbackModel.id || value === fallbackModel.id) {
+      return;
+    }
+
+    onChange(fallbackModel.id);
+  }, [errorText, isLoading, onChange, providers, value]);
+
+  useEffect(() => {
     if (!isOpen) {
       return;
     }
@@ -132,20 +193,7 @@ export function ModelSelector(props: ModelSelectorProps) {
   }, [isOpen]);
 
   const selectedModel = useMemo(() => {
-    const normalizedValue = (value ?? "").trim();
-    if (!normalizedValue) {
-      return null;
-    }
-
-    for (const provider of providers) {
-      for (const model of provider.models) {
-        if (model.id === normalizedValue || model.model === normalizedValue) {
-          return { provider, model };
-        }
-      }
-    }
-
-    return null;
+    return findModelSelection(providers, value);
   }, [providers, value]);
 
   const filteredProviders = useMemo(() => {
@@ -212,7 +260,7 @@ export function ModelSelector(props: ModelSelectorProps) {
                 选择推理模型
               </div>
               <div className="mt-1 text-sm text-muted-foreground">
-                当前优先接入阿里百炼目录，并保留后端自动降级兜底。
+                当前展示已配置的后端模型目录，并保留运行时切换与兜底能力。
               </div>
             </div>
           </div>

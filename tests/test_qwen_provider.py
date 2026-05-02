@@ -117,6 +117,32 @@ def test_qwen_provider_clone_accepts_dashscope_prefixed_model_override():
     assert cloned.artifact_model == "qwen-max"
 
 
+def test_compatible_provider_clone_accepts_prefixed_model_override():
+    provider = providers_module.CompatibleLLMProvider(
+        api_key="compatible-key",
+        base_url="https://example.com/v1",
+        model="legacy-compatible-model",
+    )
+
+    cloned = provider.clone_with_model_override("compatible:mimo-v2.5-pro")
+
+    assert isinstance(cloned, providers_module.CompatibleLLMProvider)
+    assert cloned.model == "mimo-v2.5-pro"
+    assert cloned.artifact_model == "mimo-v2.5-pro"
+
+
+def test_compatible_provider_normalizes_legacy_mimo_model_casing():
+    provider = providers_module.CompatibleLLMProvider(
+        api_key="compatible-key",
+        base_url="https://example.com/v1",
+        model="MiMo-V2.5-Pro",
+        artifact_model="MiMo-V2-Omni",
+    )
+
+    assert provider.model == "mimo-v2.5-pro"
+    assert provider.artifact_model == "mimo-v2-omni"
+
+
 def test_media_agent_workflow_uses_provider_clone_for_model_override():
     seen_models: list[str] = []
 
@@ -179,6 +205,27 @@ def test_media_agent_workflow_routes_dashscope_override_to_qwen_inner_provider()
     assert isinstance(effective_provider.inner_provider, providers_module.QwenLLMProvider)
     assert effective_provider.inner_provider.model == "qwen2.5"
     assert effective_provider.inner_provider.artifact_model == "qwen2.5"
+
+
+def test_media_agent_workflow_routes_xiaomi_override_to_compatible_inner_provider():
+    workflow = MediaAgentWorkflow(
+        provider=LangGraphProvider(
+            inner_provider=providers_module.CompatibleLLMProvider(
+                api_key="compatible-key",
+                base_url="https://example.com/v1",
+                model="legacy-compatible-model",
+            )
+        )
+    )
+
+    effective_provider = workflow._resolve_effective_provider("xiaomi:MiMo-V2-Omni")
+
+    assert isinstance(effective_provider, LangGraphProvider)
+    assert effective_provider is not workflow.provider
+    assert isinstance(workflow.provider.inner_provider, providers_module.CompatibleLLMProvider)
+    assert isinstance(effective_provider.inner_provider, providers_module.CompatibleLLMProvider)
+    assert effective_provider.inner_provider.model == "mimo-v2-omni"
+    assert effective_provider.inner_provider.artifact_model == "mimo-v2-omni"
 
 
 async def _collect_workflow_events(

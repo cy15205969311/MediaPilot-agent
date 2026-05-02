@@ -41,6 +41,9 @@ GROUP_ORDER = (
 )
 
 MODEL_PRIORITY = {
+    "mimo-v2.5-pro": 0,
+    "mimo-v2.5": 1,
+    "mimo-v2-omni": 2,
     "qwen-max": 0,
     "qwen-plus": 1,
     "qwen-turbo": 2,
@@ -57,6 +60,39 @@ MODEL_PRIORITY = {
     "wan2.6-t2v": 13,
     "wan2.7-t2v": 14,
 }
+
+TEXT_MODEL_GROUP = "\u5927\u8bed\u8a00\u6a21\u578b"
+OMNI_MODEL_GROUP = "\u5168\u6a21\u6001"
+TAG_FLAGSHIP = "\u65d7\u8230"
+TAG_PRODUCTIVITY = "\u751f\u4ea7\u529b"
+TAG_FAST = "\u9ad8\u901f"
+TAG_MULTIMODAL = "\u591a\u6a21\u6001"
+TAG_VISION = "\u89c6\u89c9"
+STATUS_CONFIGURED_LABEL = "\u5df2\u914d\u7f6e"
+STATUS_UNCONFIGURED_LABEL = "\u9700\u8981\u914d\u7f6e"
+DASHSCOPE_PROVIDER_LABEL = "\u963f\u91cc\u767e\u70bc (DashScope)"
+MIMO_PROVIDER_LABEL = "\u5c0f\u7c73 MiMo (Compatible API)"
+
+_MIMO_MODEL_SPECS = (
+    {
+        "model": "mimo-v2.5-pro",
+        "name": "MiMo V2.5 Pro",
+        "group": TEXT_MODEL_GROUP,
+        "tags": (TAG_FLAGSHIP, TAG_PRODUCTIVITY),
+    },
+    {
+        "model": "mimo-v2.5",
+        "name": "MiMo V2.5",
+        "group": TEXT_MODEL_GROUP,
+        "tags": (TAG_FAST,),
+    },
+    {
+        "model": "mimo-v2-omni",
+        "name": "MiMo V2 Omni",
+        "group": OMNI_MODEL_GROUP,
+        "tags": (TAG_MULTIMODAL, TAG_VISION),
+    },
+)
 
 _DASHSCOPE_MODEL_IDS = (
     "cosyvoice-v1",
@@ -454,6 +490,39 @@ def _resolve_dashscope_default_model() -> str:
     return default_model.strip() or DEFAULT_QWEN_PRIMARY_MODEL
 
 
+def _resolve_compatible_default_model() -> str:
+    default_model = (
+        os.getenv("LLM_MODEL", "").strip()
+        or os.getenv("LLM_ARTIFACT_MODEL", "").strip()
+        or "mimo-v2.5-pro"
+    )
+    if ":" in default_model:
+        _, _, default_model = default_model.partition(":")
+    normalized = default_model.strip()
+    if normalized.lower().startswith("mimo-"):
+        return normalized.lower()
+    return normalized or "mimo-v2.5-pro"
+
+
+def _resolve_langgraph_inner_provider_key() -> str:
+    configured_inner_provider = os.getenv("LANGGRAPH_INNER_PROVIDER", "").strip().lower()
+    if configured_inner_provider:
+        return configured_inner_provider
+
+    if os.getenv("QWEN_API_KEY", "").strip() or os.getenv("QWEN_BASE_URL", "").strip():
+        return "qwen"
+    if _is_dashscope_compatible_base_url(os.getenv("LLM_BASE_URL")) and os.getenv(
+        "LLM_API_KEY",
+        "",
+    ).strip():
+        return "qwen"
+    if os.getenv("LLM_API_KEY", "").strip() and os.getenv("LLM_BASE_URL", "").strip():
+        return "compatible"
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        return "openai"
+    return "mock"
+
+
 def _dashscope_is_configured() -> bool:
     if os.getenv("QWEN_API_KEY", "").strip():
         return True
@@ -469,6 +538,43 @@ def _dashscope_is_configured() -> bool:
     )
 
 
+def _compatible_is_configured() -> bool:
+    llm_api_key = os.getenv("LLM_API_KEY", "").strip()
+    llm_base_url = os.getenv("LLM_BASE_URL", "").strip()
+    if not llm_api_key or not llm_base_url:
+        return False
+    if _is_dashscope_compatible_base_url(llm_base_url):
+        return False
+
+    provider_name = os.getenv("OMNIMEDIA_LLM_PROVIDER", "").strip().lower()
+    if provider_name in {"compatible", "xiaomi", "auto"}:
+        return True
+    if provider_name in {"langgraph", "graph"}:
+        return _resolve_langgraph_inner_provider_key() in {"compatible", "xiaomi"}
+    return False
+
+
+def _resolve_active_provider_key() -> str:
+    provider_name = os.getenv("OMNIMEDIA_LLM_PROVIDER", "").strip().lower()
+    if provider_name in {"qwen", "dashscope"}:
+        return "dashscope"
+    if provider_name in {"compatible", "xiaomi"}:
+        return "compatible"
+    if provider_name in {"langgraph", "graph"}:
+        inner_provider = _resolve_langgraph_inner_provider_key()
+        if inner_provider in {"qwen", "dashscope"}:
+            return "dashscope"
+        if inner_provider in {"compatible", "xiaomi"}:
+            return "compatible"
+        return ""
+    if provider_name == "auto":
+        if _dashscope_is_configured():
+            return "dashscope"
+        if _compatible_is_configured():
+            return "compatible"
+    return ""
+
+
 def _model_sort_key(model: RegisteredModel) -> tuple[int, int, str]:
     try:
         group_index = GROUP_ORDER.index(model.group)
@@ -478,7 +584,100 @@ def _model_sort_key(model: RegisteredModel) -> tuple[int, int, str]:
     return (group_index, priority, model.name.lower())
 
 
+def _build_registered_model(
+    *,
+    provider_key: str,
+    model_name: str,
+    default_model: str,
+    name: str | None = None,
+    group: str | None = None,
+    tags: tuple[str, ...] | None = None,
+) -> RegisteredModel:
+    resolved_group = group or _infer_model_group(model_name)
+    resolved_tags = (
+        _unique_tags([resolved_group, *tags])
+        if tags is not None
+        else _infer_model_tags(model_name)
+    )
+    return RegisteredModel(
+        id=f"{provider_key}:{model_name}",
+        model=model_name,
+        name=name or _format_model_display_name(model_name),
+        group=resolved_group,
+        tags=resolved_tags,
+        is_default=model_name == default_model,
+    )
+
+
+def _build_dashscope_provider() -> RegisteredProvider:
+    configured = _dashscope_is_configured()
+    default_model = _resolve_dashscope_default_model()
+    models = tuple(
+        sorted(
+            (
+                _build_registered_model(
+                    provider_key="dashscope",
+                    model_name=model_name,
+                    default_model=default_model,
+                )
+                for model_name in _DASHSCOPE_MODEL_IDS
+            ),
+            key=_model_sort_key,
+        ),
+    )
+    return RegisteredProvider(
+        provider_key="dashscope",
+        provider=DASHSCOPE_PROVIDER_LABEL,
+        status="configured" if configured else "unconfigured",
+        status_label=STATUS_CONFIGURED_LABEL if configured else STATUS_UNCONFIGURED_LABEL,
+        models=models,
+    )
+
+
+def _build_compatible_provider() -> RegisteredProvider:
+    configured = _compatible_is_configured()
+    default_model = _resolve_compatible_default_model()
+    models = tuple(
+        sorted(
+            (
+                _build_registered_model(
+                    provider_key="compatible",
+                    model_name=spec["model"],
+                    default_model=default_model,
+                    name=spec["name"],
+                    group=spec["group"],
+                    tags=spec["tags"],
+                )
+                for spec in _MIMO_MODEL_SPECS
+            ),
+            key=_model_sort_key,
+        ),
+    )
+    return RegisteredProvider(
+        provider_key="compatible",
+        provider=MIMO_PROVIDER_LABEL,
+        status="configured" if configured else "unconfigured",
+        status_label=STATUS_CONFIGURED_LABEL if configured else STATUS_UNCONFIGURED_LABEL,
+        models=models,
+    )
+
+
 def get_available_model_providers() -> tuple[RegisteredProvider, ...]:
+    providers_by_key = {
+        "compatible": _build_compatible_provider(),
+        "dashscope": _build_dashscope_provider(),
+    }
+
+    active_provider_key = _resolve_active_provider_key()
+    preferred_order = (
+        ("compatible", "dashscope")
+        if active_provider_key == "compatible"
+        else ("dashscope", "compatible")
+    )
+    return tuple(providers_by_key[key] for key in preferred_order)
+
+
+def _get_legacy_available_model_providers() -> tuple[RegisteredProvider, ...]:
     configured = _dashscope_is_configured()
     default_model = _resolve_dashscope_default_model()
     models = tuple(

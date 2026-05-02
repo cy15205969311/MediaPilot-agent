@@ -2400,6 +2400,44 @@ def test_available_models_endpoint_returns_dashscope_registry(
     assert any(model["group"] == "大语言模型" for model in dashscope_provider["models"])
 
 
+def test_available_models_endpoint_returns_mimo_registry_for_compatible_provider(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OMNIMEDIA_LLM_PROVIDER", "langgraph")
+    monkeypatch.setenv("LANGGRAPH_INNER_PROVIDER", "compatible")
+    monkeypatch.setenv("LLM_API_KEY", "mimo-test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "mimo-v2.5-pro")
+    monkeypatch.setenv("LLM_ARTIFACT_MODEL", "mimo-v2.5-pro")
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    headers = register_user(client, username="alice-mimo-model-registry")
+
+    response = client.get("/api/v1/models/available", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    compatible_provider = next(
+        item for item in payload["items"] if item["provider_key"] == "compatible"
+    )
+
+    assert compatible_provider["provider"] == "小米 MiMo (Compatible API)"
+    assert compatible_provider["status"] == "configured"
+    assert [model["model"] for model in compatible_provider["models"]] == [
+        "mimo-v2.5-pro",
+        "mimo-v2.5",
+        "mimo-v2-omni",
+    ]
+    assert [model["name"] for model in compatible_provider["models"]] == [
+        "MiMo V2.5 Pro",
+        "MiMo V2.5",
+        "MiMo V2 Omni",
+    ]
+    assert compatible_provider["models"][0]["is_default"] is True
+    assert compatible_provider["models"][0]["tags"] == ["大语言模型", "旗舰", "生产力"]
+    assert compatible_provider["models"][2]["group"] == "全模态"
+
+
 def test_thread_history_returns_user_message_image_material(client: TestClient):
     headers = register_user(client, username="alice-image-history")
     image_url = "https://media-bucket.oss-cn-hangzhou.aliyuncs.com/uploads/alice/sample.jpg"

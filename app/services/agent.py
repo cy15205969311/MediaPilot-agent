@@ -12,6 +12,7 @@ from app.services.graph import LangGraphProvider
 from app.services.persistence import ARTIFACT_TYPE_ADAPTER, persist_assistant_output
 from app.services.providers import (
     BaseLLMProvider,
+    CompatibleLLMProvider,
     MockLLMProvider,
     OpenAIProvider,
     QwenLLMProvider,
@@ -197,6 +198,11 @@ def _build_provider_from_prefix(
     actual_model: str,
 ) -> BaseLLMProvider | None:
     normalized_model = actual_model.strip()
+    if provider_prefix in {"compatible", "xiaomi"} and normalized_model:
+        return CompatibleLLMProvider(
+            model=normalized_model,
+            artifact_model=normalized_model,
+        )
     if provider_prefix in {"qwen", "dashscope"} and normalized_model:
         return QwenLLMProvider(
             model=normalized_model,
