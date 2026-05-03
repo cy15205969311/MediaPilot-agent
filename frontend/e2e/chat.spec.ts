@@ -1097,6 +1097,50 @@ test("refreshes active sessions and revokes a non-current device", async ({ page
   await expect(page.getByTestId("session-card-session-current")).toBeVisible();
 });
 
+test("deduplicates duplicate devices and revokes the latest session id", async ({ page }) => {
+  await openWorkspace(page, {
+    sessions: [
+      createMockSession({
+        id: "session-current",
+        device_info: "Chrome on Windows",
+        ip_address: "192.168.0.8",
+        is_current: true,
+        last_seen_at: "2026-04-28T09:00:00Z",
+      }),
+      createMockSession({
+        id: "session-dup-old",
+        device_info: "Chrome on Windows",
+        ip_address: "203.0.113.24",
+        created_at: "2026-04-28T06:00:00Z",
+        last_seen_at: "2026-04-28T07:00:00Z",
+      }),
+      createMockSession({
+        id: "session-dup-new",
+        device_info: "Chrome on Windows",
+        ip_address: "203.0.113.24",
+        created_at: "2026-04-28T07:30:00Z",
+        last_seen_at: "2026-04-28T08:30:00Z",
+      }),
+    ],
+  });
+
+  await page.getByTestId("sidebar-open-profile").click();
+  await expect(page.getByTestId("user-profile-modal")).toBeVisible();
+  await page.getByTestId("user-profile-tab-sessions").click();
+
+  await expect(
+    page.getByTestId("session-card-session-current").locator(".bg-success-surface"),
+  ).toBeVisible();
+  await expect(page.getByTestId("session-card-session-dup-new")).toBeVisible();
+  await expect(page.getByTestId("session-card-session-dup-old")).toBeHidden();
+
+  await page.getByTestId("session-revoke-session-dup-new").click();
+
+  await expect(page.getByTestId("session-card-session-dup-new")).toBeHidden();
+  await expect(page.getByTestId("session-card-session-dup-old")).toBeVisible();
+  await expect(page.getByTestId("session-card-session-current")).toBeVisible();
+});
+
 test("updates the password in-session and prunes revoked devices", async ({ page }) => {
   await openWorkspace(page, {
     sessions: [

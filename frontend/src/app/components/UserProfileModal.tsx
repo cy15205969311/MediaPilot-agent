@@ -1,5 +1,8 @@
 import {
   Camera,
+  Chrome,
+  Compass,
+  Globe,
   LoaderCircle,
   LockKeyhole,
   Monitor,
@@ -7,8 +10,9 @@ import {
   Shield,
   Trash2,
   X,
+  type LucideIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import type {
   AuthSessionItem,
@@ -38,6 +42,184 @@ type UserProfileModalProps = {
 };
 
 type ModalTab = "profile" | "sessions" | "security";
+
+type SessionDeviceSummary = {
+  browser: string;
+  os: string;
+  ip: string;
+  compositeKey: string;
+};
+
+type DeduplicatedSession = {
+  session: AuthSessionItem;
+  browser: string;
+  os: string;
+  ip: string;
+  activityTime: number;
+  loginTime: number;
+  compositeKey: string;
+};
+
+const BROWSER_RULES: Array<{ marker: RegExp; label: string }> = [
+  { marker: /edge|edg\//i, label: "Edge" },
+  { marker: /chrome/i, label: "Chrome" },
+  { marker: /firefox/i, label: "Firefox" },
+  { marker: /safari/i, label: "Safari" },
+  { marker: /testclient/i, label: "TestClient" },
+  { marker: /curl/i, label: "curl" },
+];
+
+const OS_RULES: Array<{ marker: RegExp; label: string }> = [
+  { marker: /windows/i, label: "Windows" },
+  { marker: /mac\s?os|macos/i, label: "macOS" },
+  { marker: /iphone|ios/i, label: "iOS" },
+  { marker: /ipad|ipados/i, label: "iPadOS" },
+  { marker: /android/i, label: "Android" },
+  { marker: /linux/i, label: "Linux" },
+];
+
+function parseSessionTimeValue(rawValue: string | null | undefined): number {
+  const normalizedValue = rawValue?.trim();
+  if (!normalizedValue) {
+    return 0;
+  }
+
+  if (/^-?\d+(\.\d+)?$/.test(normalizedValue)) {
+    const numericValue = Number(normalizedValue);
+    if (!Number.isFinite(numericValue) || numericValue <= 0) {
+      return 0;
+    }
+
+    return numericValue < 1e12 ? numericValue * 1000 : numericValue;
+  }
+
+  const parsedValue = Date.parse(normalizedValue);
+  return Number.isNaN(parsedValue) ? 0 : parsedValue;
+}
+
+function formatSessionTimestamp(rawValue: string | null | undefined): string {
+  const parsedValue = parseSessionTimeValue(rawValue);
+  if (parsedValue <= 0) {
+    return "";
+  }
+
+  return formatChatTimestamp(new Date(parsedValue).toISOString());
+}
+
+function detectSessionLabel(
+  rawValue: string | null | undefined,
+  rules: Array<{ marker: RegExp; label: string }>,
+  fallbackLabel: string,
+): string {
+  const normalizedValue = rawValue?.trim();
+  if (!normalizedValue) {
+    return fallbackLabel;
+  }
+
+  const matchedRule = rules.find((rule) => rule.marker.test(normalizedValue));
+  return matchedRule?.label ?? fallbackLabel;
+}
+
+function buildSessionDeviceSummary(session: AuthSessionItem): SessionDeviceSummary {
+  const browser = detectSessionLabel(session.device_info, BROWSER_RULES, "Unknown browser");
+  const os = detectSessionLabel(session.device_info, OS_RULES, "Unknown OS");
+  const ip = session.ip_address?.trim() || "Unknown IP";
+
+  return {
+    browser,
+    os,
+    ip,
+    compositeKey: `${os}-${browser}-${ip}`,
+  };
+}
+
+function getSessionLoginTime(session: AuthSessionItem): number {
+  return parseSessionTimeValue(session.created_at);
+}
+
+function getSessionActivityTime(session: AuthSessionItem): number {
+  const lastSeenTime = parseSessionTimeValue(session.last_seen_at);
+  return lastSeenTime > 0 ? lastSeenTime : getSessionLoginTime(session);
+}
+
+function getSessionActivityLabel(session: AuthSessionItem): string {
+  return (
+    formatSessionTimestamp(session.last_seen_at) ||
+    formatSessionTimestamp(session.created_at) ||
+    "未知"
+  );
+}
+
+function getBrowserIcon(browser: string): LucideIcon {
+  switch (browser) {
+    case "Chrome":
+      return Chrome;
+    case "Safari":
+      return Compass;
+    case "Firefox":
+    case "Edge":
+      return Globe;
+    default:
+      return Monitor;
+  }
+}
+
+function isNewerSession(
+  candidate: DeduplicatedSession,
+  existing: DeduplicatedSession,
+): boolean {
+  if (candidate.activityTime !== existing.activityTime) {
+    return candidate.activityTime > existing.activityTime;
+  }
+
+  if (candidate.loginTime !== existing.loginTime) {
+    return candidate.loginTime > existing.loginTime;
+  }
+
+  if (candidate.session.is_current !== existing.session.is_current) {
+    return candidate.session.is_current;
+  }
+
+  return candidate.session.id.localeCompare(existing.session.id) > 0;
+}
+
+function deduplicateSessions(sessions: AuthSessionItem[]): DeduplicatedSession[] {
+  const sessionMap = new Map<string, DeduplicatedSession>();
+
+  for (const session of sessions) {
+    const summary = buildSessionDeviceSummary(session);
+    const candidate: DeduplicatedSession = {
+      session,
+      browser: summary.browser,
+      os: summary.os,
+      ip: summary.ip,
+      compositeKey: summary.compositeKey,
+      activityTime: getSessionActivityTime(session),
+      loginTime: getSessionLoginTime(session),
+    };
+    const existing = sessionMap.get(candidate.compositeKey);
+
+    if (!existing || isNewerSession(candidate, existing)) {
+      sessionMap.set(candidate.compositeKey, candidate);
+    }
+  }
+
+  return Array.from(sessionMap.values()).sort((left, right) => {
+    if (right.activityTime !== left.activityTime) {
+      return right.activityTime - left.activityTime;
+    }
+
+    if (right.session.is_current !== left.session.is_current) {
+      return Number(right.session.is_current) - Number(left.session.is_current);
+    }
+
+    if (right.loginTime !== left.loginTime) {
+      return right.loginTime - left.loginTime;
+    }
+
+    return right.session.id.localeCompare(left.session.id);
+  });
+}
 
 export function UserProfileModal({
   open,
@@ -84,6 +266,8 @@ export function UserProfileModal({
     setConfirmPassword("");
     setIsUploadingAvatar(false);
   }, [open, user]);
+
+  const deduplicatedSessions = useMemo(() => deduplicateSessions(sessions), [sessions]);
 
   if (!open) {
     return null;
@@ -359,16 +543,19 @@ export function UserProfileModal({
               </div>
             ) : null}
 
-            {!isLoadingSessions && sessions.length === 0 ? (
+            {!isLoadingSessions && deduplicatedSessions.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-border bg-surface-muted px-4 py-6 text-sm text-muted-foreground">
                 当前没有可展示的活跃设备记录。
               </div>
             ) : null}
 
-            {!isLoadingSessions && sessions.length > 0 ? (
+            {!isLoadingSessions && deduplicatedSessions.length > 0 ? (
               <div className="space-y-3">
-                {sessions.map((session) => (
-                  <div
+                {deduplicatedSessions.map(({ session, browser, os, ip }) => {
+                  const BrowserIcon = getBrowserIcon(browser);
+
+                  return (
+                    <div
                     key={session.id}
                     className="rounded-2xl border border-border bg-card p-4"
                     data-testid={`session-card-${session.id}`}
@@ -377,10 +564,10 @@ export function UserProfileModal({
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <div className="inline-flex items-center gap-2 text-sm font-medium text-card-foreground">
-                            <Monitor className="h-4 w-4 text-muted-foreground" />
-                            <span className="truncate">
+                            <BrowserIcon className="h-4 w-4 text-muted-foreground" />
+                            <span className="truncate">{browser}{/*
                               {session.device_info || "未知设备"}
-                            </span>
+                            */}</span>
                           </div>
                           {session.is_current ? (
                             <span className="rounded-full bg-success-surface px-2.5 py-1 text-xs font-medium text-success-foreground">
@@ -390,6 +577,26 @@ export function UserProfileModal({
                         </div>
 
                         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                          <span>{`OS: ${os}`}</span>
+                          <span>{`IP: ${ip}`}</span>
+                          <span>{`Last active: ${getSessionActivityLabel(session)}`}</span>
+                          <span>
+                            Expires:
+                            {formatSessionTimestamp(session.expires_at) || "Unknown"}
+                          </span>
+                        </div>
+
+                        {/* <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                          <span>绯荤粺锛?{os}</span>
+                          <span>IP锛?{ip}</span>
+                          <span>鏈€杩戞椿璺冿細{getSessionActivityLabel(session)}</span>
+                          <span>
+                            杩囨湡鏃堕棿锛?
+                            {formatSessionTimestamp(session.expires_at) || "鏈煡"}
+                          </span>
+                        </div> */}
+
+                        {/* <div className="hidden">
                           <span>IP：{session.ip_address || "未知"}</span>
                           <span>
                             最近活跃：
@@ -399,7 +606,7 @@ export function UserProfileModal({
                             过期时间：
                             {formatChatTimestamp(session.expires_at) || "未知"}
                           </span>
-                        </div>
+                        </div> */}
                       </div>
 
                       <button
@@ -413,7 +620,8 @@ export function UserProfileModal({
                       </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ) : null}
           </div>
