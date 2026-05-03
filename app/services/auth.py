@@ -2,6 +2,7 @@ import os
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Sequence
 from uuid import uuid4
 
 import jwt
@@ -582,3 +583,24 @@ def get_current_user(
 
     logger.info("auth.get_current_user resolved user_id=%s", user.id)
     return user
+
+
+def RequireRole(allowed_roles: Sequence[str]) -> Callable[[User], User]:
+    allowed_role_set = {role.strip() for role in allowed_roles if role.strip()}
+
+    def dependency(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.status == "frozen":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="账号已被冻结",
+            )
+
+        if current_user.role not in allowed_role_set:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="权限不足",
+            )
+
+        return current_user
+
+    return dependency

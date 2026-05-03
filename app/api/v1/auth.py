@@ -80,6 +80,9 @@ def _build_user_profile(user: User) -> UserProfile:
         nickname=user.nickname,
         bio=user.bio,
         avatar_url=resolve_media_reference(user.avatar_url),
+        role=user.role,
+        status=user.status,
+        token_balance=user.token_balance,
         created_at=user.created_at,
     )
 

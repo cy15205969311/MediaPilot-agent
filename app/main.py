@@ -13,6 +13,7 @@ from app.config import load_environment
 load_environment()
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.admin_users import router as admin_users_router
 from app.api.v1.chat import router as media_chat_router
 from app.api.v1.dashboard import router as media_dashboard_router
 from app.api.v1.history import router as media_history_router
@@ -21,7 +22,8 @@ from app.api.v1.models import router as model_registry_router
 from app.api.v1.oss import UPLOADS_DIR, router as media_upload_router
 from app.api.v1.templates import router as media_templates_router
 from app.api.v1.topics import router as media_topics_router
-from app.db.database import engine
+from app.api.v1.users import router as users_router
+from app.db.database import engine, run_startup_migrations
 from app.db.models import Base
 from app.services.scheduler import (
     create_scheduler,
@@ -33,7 +35,9 @@ APP_LOGGER_NAME = "app"
 STREAM_TRACE_PATHS = frozenset({"/api/v1/media/chat/stream"})
 DEFAULT_LOCAL_DEV_CORS_ORIGINS = [
     "http://localhost:5173",
+    "http://localhost:5174",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
 ]
 logger = logging.getLogger(f"{APP_LOGGER_NAME}.main")
 
@@ -77,6 +81,7 @@ configure_application_logging()
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
+    run_startup_migrations()
     scheduler = create_scheduler()
     scheduler.start()
     await run_oss_lifecycle_rollout_job()
@@ -96,6 +101,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+    # Keep local client/admin origins explicit in development.
+    # In production, prefer setting CORS_ALLOWED_ORIGINS per environment
+    # instead of opening wildcard origins.
     allow_origins=load_cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
@@ -161,6 +169,8 @@ async def root() -> dict[str, str]:
 
 
 app.include_router(auth_router)
+app.include_router(admin_users_router)
+app.include_router(users_router)
 app.include_router(media_chat_router)
 app.include_router(media_dashboard_router)
 app.include_router(media_history_router)

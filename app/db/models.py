@@ -72,6 +72,9 @@ class User(Base):
     nickname: Mapped[str | None] = mapped_column(String(64), nullable=True)
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    role: Mapped[str] = mapped_column(String(32), default="user", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    token_balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     password_changed_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime(),
         default=utcnow,
@@ -102,6 +105,52 @@ class User(Base):
     refresh_sessions: Mapped[list["RefreshSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
+    )
+    token_transactions: Mapped[list["TokenTransaction"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="TokenTransaction.user_id",
+    )
+    operated_token_transactions: Mapped[list["TokenTransaction"]] = relationship(
+        back_populates="operator",
+        foreign_keys="TokenTransaction.operator_id",
+    )
+
+
+class TokenTransaction(Base):
+    __tablename__ = "token_transactions"
+
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid4().hex,
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    transaction_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    remark: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    operator_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utcnow,
+        nullable=False,
+    )
+
+    user: Mapped[User] = relationship(
+        back_populates="token_transactions",
+        foreign_keys=[user_id],
+    )
+    operator: Mapped[User | None] = relationship(
+        back_populates="operated_token_transactions",
+        foreign_keys=[operator_id],
     )
 
 

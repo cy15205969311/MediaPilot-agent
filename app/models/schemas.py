@@ -82,6 +82,19 @@ class TaskType(str, Enum):
     COMMENT_REPLY = "comment_reply"
 
 
+class UserRole(str, Enum):
+    SUPER_ADMIN = "super_admin"
+    ADMIN = "admin"
+    OPERATOR = "operator"
+    PREMIUM = "premium"
+    USER = "user"
+
+
+class UserAccountStatus(str, Enum):
+    ACTIVE = "active"
+    FROZEN = "frozen"
+
+
 class ArtifactType(str, Enum):
     TOPIC_LIST = "topic_list"
     CONTENT_DRAFT = "content_draft"
@@ -276,6 +289,12 @@ class UserProfile(SchemaModel):
     nickname: str | None = Field(default=None, description="Display nickname.")
     bio: str | None = Field(default=None, description="Profile bio.")
     avatar_url: str | None = Field(default=None, description="Resolved profile avatar delivery URL.")
+    role: UserRole = Field(default=UserRole.USER, description="User role.")
+    status: UserAccountStatus = Field(
+        default=UserAccountStatus.ACTIVE,
+        description="User account status.",
+    )
+    token_balance: int = Field(default=0, description="Remaining token balance.")
     created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
 
 
@@ -368,6 +387,50 @@ class AuthSessionsResponse(SchemaModel):
 class SessionRevokeResponse(SchemaModel):
     id: str = Field(..., description="Revoked session ID.")
     revoked: bool = Field(default=True, description="Revocation result.")
+
+
+class AdminUserListItem(SchemaModel):
+    id: str = Field(..., description="User ID.")
+    username: str = Field(..., description="Username.")
+    nickname: str | None = Field(default=None, description="Display nickname.")
+    role: UserRole = Field(..., description="Role assigned to the user.")
+    status: UserAccountStatus = Field(..., description="Current account status.")
+    token_balance: int = Field(..., description="Current token balance.")
+    created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+
+
+class AdminUserListResponse(SchemaModel):
+    items: list[AdminUserListItem] = Field(default_factory=list, description="Users.")
+    total: int = Field(..., description="Total user count after filtering.")
+    skip: int = Field(..., description="Current offset.")
+    limit: int = Field(..., description="Current page size.")
+
+
+class AdminUserStatusUpdateRequest(SchemaModel):
+    status: UserAccountStatus = Field(..., description="Target account status.")
+
+
+class AdminUserPasswordResetResponse(SchemaModel):
+    user_id: str = Field(..., description="Target user ID.")
+    new_password: str = Field(..., description="Generated plaintext password.")
+    revoked_sessions: int = Field(
+        default=0,
+        description="Number of active sessions revoked after reset.",
+    )
+
+
+class AdminUserTokenUpdateRequest(SchemaModel):
+    amount: int = Field(..., description="Signed token delta applied to the user.")
+    remark: str = Field(..., min_length=1, max_length=255, description="Admin remark.")
+
+
+class AdminUserTokenUpdateResponse(SchemaModel):
+    user_id: str = Field(..., description="Target user ID.")
+    token_balance: int = Field(..., description="Updated token balance.")
+    transaction_id: str = Field(..., description="Created token transaction ID.")
+    amount: int = Field(..., description="Applied delta.")
+    transaction_type: str = Field(..., description="Derived transaction type.")
+    remark: str = Field(..., description="Admin remark recorded in the ledger.")
 
 
 class ThreadSummaryItem(SchemaModel):
