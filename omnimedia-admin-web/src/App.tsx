@@ -6,7 +6,6 @@ import {
   FileText,
   HardDrive,
   Settings,
-  Wallet,
   XCircle,
 } from "lucide-react";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -19,6 +18,7 @@ import { ToastViewport } from "./components/ToastViewport";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
 import { AdminRolesPage } from "./pages/AdminRolesPage";
+import { AdminTokensPage } from "./pages/AdminTokensPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { Login } from "./pages/Login";
 import type { AdminToast, AuthenticatedUser } from "./types";
@@ -165,21 +165,7 @@ function App() {
             <Route path="/roles" element={<AdminRolesPage onToast={pushToast} />} />
             <Route
               path="/tokens"
-              element={
-                <AdminPlaceholderPage
-                  badge="Balance Ledger"
-                  ctaLabel="打开用户中心"
-                  ctaTo="/users"
-                  description="Token 流水页适合承接充值记录、扣减明细、按用户筛选和运营备注检索，后续可以直接接入后台台账接口。"
-                  highlights={[
-                    "建议记录操作人、原因、前后余额和事务 ID，方便审计与追踪。",
-                    "可以在这里收口额度变更明细，而不是继续分散在用户页面。",
-                    "如果后端新增专门的台账接口，这个模块可以无缝接入。",
-                  ]}
-                  icon={<Wallet className="h-6 w-6" />}
-                  title="Token 流水模块即将接入"
-                />
-              }
+              element={<AdminTokensPage onToast={pushToast} />}
             />
             <Route
               path="/audit"

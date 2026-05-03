@@ -23,7 +23,7 @@ The repository contains one shared backend and two web clients:
 
 - `app/`: shared `FastAPI` backend for auth, sessions, streaming chat, thread history, uploads, knowledge base, topics, templates, dashboards, admin operations, and token ledgers
 - `frontend/`: creator workspace for generation, drafting, multimodal input, asset viewing, history, profile management, and security settings
-- `omnimedia-admin-web/`: admin console for privileged users and back-office operators, including user governance, RBAC, route-aware workspaces, dashboard views, token operations, and session activity telemetry
+- `omnimedia-admin-web/`: admin console for privileged users and back-office operators, including user governance, RBAC, route-aware workspaces, dashboard views, live token-ledger analytics, and session activity telemetry
 - `extension/`: reserved area for browser-extension or external publishing integrations
 
 Default local infrastructure:
@@ -340,6 +340,9 @@ Current default workspaces:
 - `admin` -> `/dashboard`
 - `operator` -> `/users`
 - `finance` -> `/tokens`
+- `/tokens` is now a live ledger workspace for `super_admin` and `finance`.
+- the route is backed by `GET /api/v1/admin/transactions` and `GET /api/v1/admin/transactions/stats`
+- the page supports debounced user-keyword filtering, previous/next pagination, and real KPI cards
 
 ### 7.12 Admin role-summary aggregation
 
@@ -361,7 +364,7 @@ The current access policy is:
 | Dashboard `/dashboard` | yes | yes | no | no |
 | User Center `/users` | yes | yes | yes | no |
 | Roles `/roles` | yes | no | no | no |
-| Token Ledger `/tokens` | yes | yes | no | yes |
+| Token Ledger `/tokens` | yes | no | no | yes |
 | Audit `/audit` | yes | yes | no | no |
 | Templates `/templates` | yes | yes | yes | no |
 | Storage `/storage` | yes | yes | no | no |
@@ -375,6 +378,7 @@ Notes:
 
 - `finance` is currently a read-oriented back-office role for ledger and financial visibility
 - `admin` remains a compatible high-privilege role for governance and billing exemptions, but it is not allowed to edit system RBAC definitions
+- the live token-ledger workspace is intentionally restricted to `super_admin` and `finance`; `admin` retains governance powers but is no longer routed into financial-ledger screens
 - the visible RBAC cards currently focus on built-in system-management roles such as super admin, operator, and finance; `admin` is still a valid persisted role and can still be assigned from the user center
 
 ### 7.14 Creator upload capture UX
@@ -447,6 +451,7 @@ Current route modules under `app/api/v1/` include:
 - `oss.py`
 - `admin_users.py`
 - `admin_dashboard.py`
+- `admin_tokens.py`
 
 ### 8.2 Layering rules
 
@@ -508,6 +513,8 @@ Avoid pushing long-lived business orchestration and complex data-access code int
 - `PATCH /api/v1/admin/users/{user_id}/role`
 - `GET /api/v1/admin/roles/summary`
 - `GET /api/v1/admin/dashboard`
+- `GET /api/v1/admin/transactions`
+- `GET /api/v1/admin/transactions/stats`
 
 ## 10. Validation Checklist
 
@@ -534,6 +541,7 @@ Validate the parts you actually changed before you push.
    - `super_admin` cannot change another `super_admin`
 6. Open the RBAC page and confirm that member counts come from the real summary endpoint instead of mock constants.
 7. Confirm that `super_admin` rows remain protected from freeze, password reset, and token adjustment actions.
+8. Open `/tokens` as `finance` or `super_admin` and confirm that KPI cards come from the live stats endpoint, keyword filtering is debounced, and pagination keeps row counts aligned with the backend total.
 
 ### 10.3 Billing and multimodal validation
 

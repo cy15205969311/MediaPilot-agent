@@ -75,8 +75,8 @@ export const adminNavigation: AdminNavigationItem[] = [
     description: "余额与消耗审计",
     to: "/tokens",
     icon: Activity,
-    status: "in-progress",
-    allowedRoles: ["super_admin", "admin", "finance"],
+    status: "ready",
+    allowedRoles: ["super_admin", "finance"],
   },
   {
     key: "audit",

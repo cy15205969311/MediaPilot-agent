@@ -78,6 +78,34 @@ export type AdminDashboardData = {
 
 export type AdminRoleSummaryResponse = Partial<Record<UserRole, number>>;
 
+export type AdminTokenTransactionItem = {
+  id: string;
+  created_at: string;
+  username: string;
+  nickname?: string | null;
+  transaction_type: string;
+  amount: number;
+  remark: string;
+};
+
+export type AdminTokenTransactionsApiResponse = {
+  items: AdminTokenTransactionItem[];
+  total: number;
+  skip: number;
+  limit: number;
+};
+
+export type AdminTokenStats = {
+  today_consume: number;
+  today_topup: number;
+  month_consume: number;
+  total_balance: number;
+  today_consume_change_percent?: number | null;
+  today_topup_change_percent?: number | null;
+  month_consume_change_percent?: number | null;
+  total_balance_change_percent?: number | null;
+};
+
 export type AdminUserStatusPayload = {
   status: UserStatus;
 };

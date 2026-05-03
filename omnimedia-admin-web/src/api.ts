@@ -2,6 +2,8 @@ import { API_BASE_URL } from "./config";
 import type {
   AdminDashboardData,
   AdminRoleSummaryResponse,
+  AdminTokenStats,
+  AdminTokenTransactionsApiResponse,
   AdminUserItem,
   AdminUserPasswordResetApiResponse,
   AdminUserRoleUpdatePayload,
@@ -506,6 +508,37 @@ export async function fetchAdminRoleSummary(): Promise<AdminRoleSummaryResponse>
   );
 
   return (await response.json()) as AdminRoleSummaryResponse;
+}
+
+export async function fetchAdminTokenTransactions(params?: {
+  skip?: number;
+  limit?: number;
+  userKeyword?: string;
+}): Promise<AdminTokenTransactionsApiResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("skip", String(params?.skip ?? 0));
+  searchParams.set("limit", String(params?.limit ?? 20));
+  if (params?.userKeyword?.trim()) {
+    searchParams.set("user_keyword", params.userKeyword.trim());
+  }
+
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/transactions?${searchParams.toString()}`,
+    { method: "GET" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminTokenTransactionsApiResponse;
+}
+
+export async function fetchAdminTokenStats(): Promise<AdminTokenStats> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/transactions/stats",
+    { method: "GET" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminTokenStats;
 }
 
 export async function updateAdminUserStatus(

@@ -487,6 +487,49 @@ class AdminDashboardResponse(SchemaModel):
     )
 
 
+class AdminTokenTransactionItem(SchemaModel):
+    id: str = Field(..., description="Token transaction ID.")
+    created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+    username: str = Field(..., description="Owning account username.")
+    nickname: str | None = Field(default=None, description="Optional display nickname.")
+    transaction_type: str = Field(..., description="Ledger transaction type.")
+    amount: int = Field(..., description="Signed token delta.")
+    remark: str = Field(..., description="Ledger remark.")
+
+
+class AdminTokenTransactionListResponse(SchemaModel):
+    items: list[AdminTokenTransactionItem] = Field(
+        default_factory=list,
+        description="Paginated token transaction rows.",
+    )
+    total: int = Field(..., description="Total transaction count after filtering.")
+    skip: int = Field(..., description="Current offset.")
+    limit: int = Field(..., description="Current page size.")
+
+
+class AdminTokenTransactionStatsResponse(SchemaModel):
+    today_consume: int = Field(..., description="Today's consumed token total.")
+    today_topup: int = Field(..., description="Today's granted or topped-up token total.")
+    month_consume: int = Field(..., description="Current month-to-date consumed token total.")
+    total_balance: int = Field(..., description="Current total platform token balance.")
+    today_consume_change_percent: float | None = Field(
+        default=None,
+        description="Period-over-period percentage change for today's consumption.",
+    )
+    today_topup_change_percent: float | None = Field(
+        default=None,
+        description="Period-over-period percentage change for today's top-up activity.",
+    )
+    month_consume_change_percent: float | None = Field(
+        default=None,
+        description="Month-to-date percentage change against the prior comparable period.",
+    )
+    total_balance_change_percent: float | None = Field(
+        default=None,
+        description="Percentage change of total platform balance against the prior day baseline.",
+    )
+
+
 class ThreadSummaryItem(SchemaModel):
     id: str = Field(..., description="Thread ID.")
     title: str = Field(default="", description="Thread title.")

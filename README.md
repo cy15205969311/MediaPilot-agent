@@ -346,6 +346,9 @@ npx playwright install chromium
   - `super_admin` / `admin` -> `/dashboard`
   - `operator` -> `/users`
   - `finance` -> `/tokens`
+- `/tokens` 已升级为真实流水工作台，面向 `super_admin` 与 `finance` 提供财务侧查询入口。
+- 对应后端接口为 `GET /api/v1/admin/transactions` 与 `GET /api/v1/admin/transactions/stats`。
+- 当前流水页支持按用户名或昵称模糊筛选、防抖查询、上一页 / 下一页分页，以及顶部四张真实 KPI 卡片。
 
 ### 7.11 管理端角色与页面访问矩阵
 
@@ -356,7 +359,7 @@ npx playwright install chromium
 | 数据总览 `/dashboard` | 是 | 是 | 否 | 否 |
 | 用户中心 `/users` | 是 | 是 | 是 | 否 |
 | 角色权限 `/roles` | 是 | 否 | 否 | 否 |
-| Token 流水 `/tokens` | 是 | 是 | 否 | 是 |
+| Token 流水 `/tokens` | 是 | 否 | 否 | 是 |
 | 审计日志 `/audit` | 是 | 是 | 否 | 否 |
 | 模板库 `/templates` | 是 | 是 | 是 | 否 |
 | 存储治理 `/storage` | 是 | 是 | 否 | 否 |
@@ -370,6 +373,7 @@ npx playwright install chromium
 
 - `finance` 当前是后台只读财务角色，可进入后台并查看与财务相关的页面，但不参与用户治理动作
 - `admin` 当前保留为兼容型高权限角色，参与后台治理与资产豁免，但不开放系统级角色管理
+- `Token 流水` 当前仅开放给 `super_admin` 与 `finance`；`admin` 保留治理权限，但不进入财务台账工作区
 - 角色权限页当前主要展示系统管理最相关的内建角色卡：超级管理员、运营人员、财务人员；`admin` 仍是有效角色值，并在用户中心可分配
 
 ### 7.12 C 端素材上传体验升级
@@ -437,6 +441,7 @@ npx playwright install chromium
 - `oss.py`
 - `admin_users.py`
 - `admin_dashboard.py`
+- `admin_tokens.py`
 
 ### 8.2 分层原则
 
@@ -498,6 +503,8 @@ npx playwright install chromium
 - `PATCH /api/v1/admin/users/{user_id}/role`
 - `GET /api/v1/admin/roles/summary`
 - `GET /api/v1/admin/dashboard`
+- `GET /api/v1/admin/transactions`
+- `GET /api/v1/admin/transactions/stats`
 
 ## 10. 验证清单
 
@@ -523,6 +530,7 @@ npx playwright install chromium
    - 超级管理员不能修改自己或其他 `super_admin`
 6. 打开角色权限页，确认成员数量来自真实聚合而非写死 mock。
 7. 确认 `super_admin` 行仍然受保护，不能冻结、重置密码或调整 Token。
+8. 使用 `finance` 或 `super_admin` 打开 `/tokens`，确认顶部 KPI 卡片来自真实接口，用户名筛选支持防抖，分页翻页后记录与总数同步更新。
 
 ### 10.3 计费与多模态验证
 
