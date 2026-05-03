@@ -42,6 +42,7 @@ PASSWORD_RESET_TOKEN_TYPE = "reset"
 SESSION_LAST_SEEN_UPDATE_WINDOW = timedelta(minutes=1)
 logger = logging.getLogger(__name__)
 PRECISE_ISSUED_AT_CLAIM = "iat_exact"
+ACCOUNT_FROZEN_DETAIL = "ACCOUNT_FROZEN"
 
 
 @dataclass(frozen=True)
@@ -566,6 +567,12 @@ def get_current_user(
     if user is None:
         raise _credentials_exception()
 
+    if user.status == "frozen":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_FROZEN_DETAIL,
+        )
+
     if (
         user.password_changed_at is not None
         and token_payload.issued_at < user.password_changed_at
@@ -592,7 +599,7 @@ def RequireRole(allowed_roles: Sequence[str]) -> Callable[[User], User]:
         if current_user.status == "frozen":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="账号已被冻结",
+                detail=ACCOUNT_FROZEN_DETAIL,
             )
 
         if current_user.role not in allowed_role_set:

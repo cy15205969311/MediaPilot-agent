@@ -7,7 +7,8 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.db.models import Thread, TokenTransaction
+from app.db.database import SessionLocal
+from app.db.models import Thread, TokenTransaction, User
 from app.models.schemas import ArtifactPayloadModel, MediaChatRequest
 from app.services.graph import LangGraphProvider
 from app.services.persistence import ARTIFACT_TYPE_ADAPTER, persist_assistant_output
@@ -21,7 +22,8 @@ from app.services.providers import (
 )
 from app.services.token_usage import (
     LEGACY_MODEL_NAME,
-    estimate_generated_output_tokens,
+    merge_model_token_usage,
+    normalize_model_token_usage,
     normalize_model_name,
 )
 
@@ -98,6 +100,7 @@ class MediaAgentWorkflow:
         latest_artifact: ArtifactPayloadModel | None = None
         had_provider_error = False
         accumulated_text = ""
+        accumulated_token_usage: dict[str, int] = {}
         effective_provider = self._resolve_effective_provider(request.model_override)
 
         effective_provider_name = type(effective_provider).__name__
@@ -150,6 +153,10 @@ class MediaAgentWorkflow:
                     and user_id is not None
                     and not had_provider_error
                 ):
+                    accumulated_token_usage = merge_model_token_usage(
+                        accumulated_token_usage,
+                        event.get("token_usage"),
+                    )
                     try:
                         logger.info(
                             "agent.stream persist_output thread_id=%s text_chars=%s has_artifact=%s",
@@ -180,15 +187,11 @@ class MediaAgentWorkflow:
                     else:
                         try:
                             _record_generated_token_consumption(
-                                db,
                                 user_id=user_id,
                                 task_type=request.task_type.value,
-                                model_name=resolved_model_name,
-                                assistant_text=accumulated_text,
-                                artifact=latest_artifact,
+                                token_usage=accumulated_token_usage,
                             )
                         except Exception:
-                            db.rollback()
                             logger.exception(
                                 "agent.stream token_ledger failed thread_id=%s",
                                 request.thread_id,
@@ -292,41 +295,62 @@ def _resolve_runtime_model_name(
 
 
 def _record_generated_token_consumption(
-    db: Session,
     *,
     user_id: str,
     task_type: str,
-    model_name: str,
-    assistant_text: str,
-    artifact: ArtifactPayloadModel | None,
+    token_usage: object,
 ) -> None:
-    estimated_tokens = estimate_generated_output_tokens(
-        assistant_text=assistant_text,
-        artifact=artifact,
-    )
-    if estimated_tokens <= 0:
+    normalized_token_usage = normalize_model_token_usage(token_usage)
+    if not normalized_token_usage:
         logger.info(
-            "agent.stream token_ledger skipped user_id=%s task_type=%s reason=no_usage_estimate",
+            "agent.stream token_ledger skipped user_id=%s task_type=%s reason=no_tracked_usage",
             user_id,
             task_type,
         )
         return
 
-    transaction = TokenTransaction(
-        user_id=user_id,
-        amount=-estimated_tokens,
-        transaction_type="consume",
-        model_name=normalize_model_name(model_name) or LEGACY_MODEL_NAME,
-        remark=f"media_chat:{task_type}",
-    )
-    db.add(transaction)
-    db.commit()
+    total_tokens = int(sum(int(value) for value in normalized_token_usage.values()))
+    if total_tokens <= 0:
+        logger.info(
+            "agent.stream token_ledger skipped user_id=%s task_type=%s reason=non_positive_total",
+            user_id,
+            task_type,
+        )
+        return
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if user is None:
+            raise ValueError(f"User not found for token ledger: {user_id}")
+
+        user.token_balance = int(user.token_balance or 0) - total_tokens
+        for model_name, model_tokens in normalized_token_usage.items():
+            normalized_model_tokens = int(model_tokens)
+            if normalized_model_tokens <= 0:
+                continue
+            db.add(
+                TokenTransaction(
+                    user_id=user_id,
+                    amount=-normalized_model_tokens,
+                    transaction_type="consume",
+                    model_name=normalize_model_name(model_name) or LEGACY_MODEL_NAME,
+                    remark=f"media_chat:{task_type}",
+                )
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
     logger.info(
-        "agent.stream token_ledger recorded user_id=%s task_type=%s model_name=%s amount=%s",
+        "agent.stream token_ledger recorded user_id=%s task_type=%s total=%s models=%s",
         user_id,
         task_type,
-        transaction.model_name,
-        transaction.amount,
+        total_tokens,
+        normalized_token_usage,
     )
 
 

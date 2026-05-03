@@ -25,6 +25,7 @@ import {
   updateAdminUserTokens,
 } from "../api";
 import type {
+  AdminTokenAdjustAction,
   AdminToast,
   AdminUserItem,
   AdminUsersApiResponse,
@@ -49,6 +50,7 @@ type AdminUsersPageProps = {
 };
 
 const DEFAULT_PAGE_SIZE = 20;
+const TOKEN_QUICK_PACKS = [10000, 50000, 100000] as const;
 
 export function AdminUsersPage(props: AdminUsersPageProps) {
   const { onToast } = props;
@@ -64,6 +66,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const [searchKeyword, setSearchKeyword] = useState("");
   const [skip, setSkip] = useState(0);
   const [tokenModalUser, setTokenModalUser] = useState<AdminUserItem | null>(null);
+  const [tokenAction, setTokenAction] = useState<AdminTokenAdjustAction>("add");
   const [tokenAmount, setTokenAmount] = useState("1000");
   const [tokenRemark, setTokenRemark] = useState("");
   const [revealedPassword, setRevealedPassword] = useState<PasswordRevealState>(null);
@@ -73,6 +76,15 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const currentPage = Math.floor(skip / DEFAULT_PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil(total / DEFAULT_PAGE_SIZE));
   const selectedUser = items.find((item) => item.id === selectedUserId) ?? null;
+  const parsedTokenAmount = Number(tokenAmount);
+  const tokenPreviewBalance =
+    tokenModalUser && Number.isInteger(parsedTokenAmount) && parsedTokenAmount >= 0
+      ? tokenAction === "add"
+        ? tokenModalUser.token_balance + parsedTokenAmount
+        : tokenAction === "deduct"
+          ? tokenModalUser.token_balance - parsedTokenAmount
+          : parsedTokenAmount
+      : null;
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -216,6 +228,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const openTokenModal = (user: AdminUserItem) => {
     setOpenActionUserId(null);
     setTokenModalUser(user);
+    setTokenAction("add");
     setTokenAmount("1000");
     setTokenRemark("");
   };
@@ -226,6 +239,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     }
 
     setTokenModalUser(null);
+    setTokenAction("add");
     setTokenAmount("1000");
     setTokenRemark("");
   };
@@ -236,11 +250,19 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     }
 
     const parsedAmount = Number(tokenAmount);
-    if (!Number.isInteger(parsedAmount) || parsedAmount === 0) {
+    const requiresPositiveAmount = tokenAction === "add" || tokenAction === "deduct";
+    if (
+      !Number.isInteger(parsedAmount) ||
+      parsedAmount < 0 ||
+      (requiresPositiveAmount && parsedAmount === 0)
+    ) {
       onToast({
         tone: "warning",
         title: "额度参数无效",
-        message: "请输入非 0 的整数，正数代表充值，负数代表扣减。",
+        message:
+          tokenAction === "set"
+            ? "请填写大于等于 0 的整数作为目标余额。"
+            : "请填写大于 0 的整数作为本次调整数量。",
       });
       return;
     }
@@ -254,11 +276,21 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
       return;
     }
 
+    if (tokenAction === "deduct" && parsedAmount > tokenModalUser.token_balance) {
+      onToast({
+        tone: "warning",
+        title: "扣减额度超过余额",
+        message: "当前用户余额不足，请先确认扣减数量或改用设定余额操作。",
+      });
+      return;
+    }
+
     setActiveUserId(tokenModalUser.id);
     setIsSubmitting(true);
 
     try {
       const response = await updateAdminUserTokens(tokenModalUser.id, {
+        action: tokenAction,
         amount: parsedAmount,
         remark: tokenRemark.trim(),
       });
@@ -268,7 +300,12 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
       });
       onToast({
         tone: "success",
-        title: parsedAmount > 0 ? "额度充值成功" : "额度扣减成功",
+        title:
+          tokenAction === "add"
+            ? "Token 增额已生效"
+            : tokenAction === "deduct"
+              ? "Token 扣减已生效"
+              : "Token 余额已重设",
         message: `账号 ${tokenModalUser.username} 当前余额已更新为 ${formatNumber(response.token_balance)}。`,
       });
       closeTokenModal(true);
@@ -738,15 +775,15 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
 
       {tokenModalUser ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/15 p-4 backdrop-blur-[2px]">
-          <div className="w-full max-w-lg rounded-2xl bg-white p-7 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+          <div className="w-full max-w-2xl rounded-[28px] border border-orange-100 bg-[#fffdfa] p-7 shadow-[0_28px_90px_rgba(15,23,42,0.18)]">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-xl font-bold tracking-tight text-gray-900">
-                  调整用户额度
+                  Token 资产调度台
                 </div>
-                <div className="mt-1 text-sm text-slate-500">
-                  账号：{tokenModalUser.username}，当前余额：
-                  {formatNumber(tokenModalUser.token_balance)}
+                <div className="mt-1 text-sm leading-6 text-slate-500">
+                  账号：{tokenModalUser.username}，当前余额 {formatNumber(tokenModalUser.token_balance)}。
+                  本次操作会写入带备注的 Token 流水，方便后续审计与复盘。
                 </div>
               </div>
               <button
@@ -759,30 +796,128 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
               </button>
             </div>
 
-            <div className="mt-6 space-y-4">
-              <label className="block">
-                <div className="mb-2 text-sm font-bold text-gray-800">额度数量</div>
-                <input
-                  className="h-12 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm text-gray-900 outline-none transition focus:border-red-300 focus:ring-4 focus:ring-red-100"
-                  onChange={(event) => setTokenAmount(event.target.value)}
-                  placeholder="例如 1000 或 -200"
-                  type="number"
-                  value={tokenAmount}
-                />
-              </label>
+            <div className="mt-6 grid gap-6 lg:grid-cols-[1.35fr_0.85fr]">
+              <div className="space-y-5">
+                <div>
+                  <div className="mb-3 text-sm font-bold text-gray-800">操作类型</div>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    {[
+                      {
+                        value: "add" as const,
+                        label: "➕ 增加额度",
+                        description: "适用于补贴、赠送和大客户试用。",
+                      },
+                      {
+                        value: "deduct" as const,
+                        label: "➖ 扣减额度",
+                        description: "适用于异常回收、误发修正等场景。",
+                      },
+                      {
+                        value: "set" as const,
+                        label: "🎯 设定余额",
+                        description: "直接把账号余额校准到指定值。",
+                      },
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        className={`rounded-2xl border px-4 py-4 text-left transition ${
+                          tokenAction === option.value
+                            ? "border-red-300 bg-gradient-to-br from-red-50 to-orange-50 text-slate-900 shadow-[0_14px_32px_rgba(248,113,113,0.12)]"
+                            : "border-slate-200 bg-white text-slate-600 hover:border-orange-200 hover:bg-orange-50/40"
+                        }`}
+                        onClick={() => setTokenAction(option.value)}
+                        type="button"
+                      >
+                        <div className="text-sm font-semibold">{option.label}</div>
+                        <div className="mt-2 text-xs leading-5 text-slate-500">
+                          {option.description}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-              <label className="block">
-                <div className="mb-2 text-sm font-bold text-gray-800">备注</div>
-                <textarea
-                  className="min-h-28 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-red-300 focus:ring-4 focus:ring-red-100"
-                  onChange={(event) => setTokenRemark(event.target.value)}
-                  placeholder="请填写本次额度调整的原因"
-                  value={tokenRemark}
-                />
-              </label>
+                <label className="block">
+                  <div className="mb-2 text-sm font-bold text-gray-800">
+                    {tokenAction === "set" ? "目标余额" : "调整数量"}
+                  </div>
+                  <input
+                    className="h-12 w-full rounded-2xl border border-slate-200 bg-white px-4 text-sm text-gray-900 outline-none transition focus:border-red-300 focus:ring-4 focus:ring-red-100"
+                    onChange={(event) => setTokenAmount(event.target.value)}
+                    placeholder={
+                      tokenAction === "set"
+                        ? "请输入最终余额，例如 100000"
+                        : "请输入本次变动数量，例如 10000"
+                    }
+                    type="number"
+                    value={tokenAmount}
+                  />
+                </label>
+
+                <div>
+                  <div className="mb-2 text-sm font-bold text-gray-800">快捷输入</div>
+                  <div className="flex flex-wrap gap-2">
+                    {TOKEN_QUICK_PACKS.map((pack) => (
+                      <button
+                        key={pack}
+                        className="rounded-full border border-orange-100 bg-orange-50 px-4 py-2 text-sm font-medium text-orange-600 transition hover:border-orange-200 hover:bg-orange-100"
+                        onClick={() => setTokenAmount(String(pack))}
+                        type="button"
+                      >
+                        {formatNumber(pack)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <label className="block">
+                  <div className="mb-2 text-sm font-bold text-gray-800">操作备注</div>
+                  <textarea
+                    className="min-h-32 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-gray-900 outline-none transition focus:border-red-300 focus:ring-4 focus:ring-red-100"
+                    onChange={(event) => setTokenRemark(event.target.value)}
+                    placeholder="请填写调整原因，例如：客诉补偿、大客户试用等"
+                    required
+                    value={tokenRemark}
+                  />
+                </label>
+              </div>
+
+              <div className="rounded-[24px] border border-orange-100 bg-gradient-to-br from-[#fff8f4] via-white to-[#fff2ea] p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-orange-400">
+                  Operation Preview
+                </div>
+                <div className="mt-5 space-y-4">
+                  <PreviewMetric
+                    label="当前余额"
+                    value={formatNumber(tokenModalUser.token_balance)}
+                  />
+                  <PreviewMetric
+                    label={tokenAction === "set" ? "目标余额" : "预计变动"}
+                    value={
+                      Number.isInteger(parsedTokenAmount) && parsedTokenAmount >= 0
+                        ? `${tokenAction === "deduct" ? "-" : tokenAction === "add" ? "+" : ""}${formatNumber(parsedTokenAmount)}`
+                        : "等待输入"
+                    }
+                  />
+                  <PreviewMetric
+                    label="预计结果"
+                    value={
+                      tokenPreviewBalance === null
+                        ? "等待输入"
+                        : tokenPreviewBalance < 0
+                          ? "余额不足"
+                          : formatNumber(tokenPreviewBalance)
+                    }
+                  />
+                </div>
+
+                <div className="mt-5 rounded-2xl bg-white/90 p-4 text-sm leading-6 text-slate-500 shadow-[0_10px_30px_rgba(15,23,42,0.05)]">
+                  备注将与操作人身份、流水类型、变动数量一并记录，便于后续风控审计和客户支持追踪。
+                </div>
+              </div>
             </div>
 
-            <div className="mt-6 flex justify-end gap-3">
+            <div className="mt-7 flex justify-end gap-3">
               <button
                 className="h-11 rounded-xl bg-slate-100 px-5 text-sm font-medium text-slate-600 transition hover:bg-slate-200"
                 onClick={() => closeTokenModal()}
@@ -797,7 +932,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
                 type="button"
               >
                 {isSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
-                提交额度调整
+                提交 Token 调整
               </button>
             </div>
           </div>
@@ -870,6 +1005,19 @@ function ActionMenuButton(props: {
       {icon}
       {label}
     </button>
+  );
+}
+
+function PreviewMetric(props: { label: string; value: string }) {
+  const { label, value } = props;
+
+  return (
+    <div className="rounded-2xl bg-white/90 p-4 shadow-[0_10px_30px_rgba(15,23,42,0.05)]">
+      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+        {label}
+      </div>
+      <div className="mt-2 text-lg font-semibold text-slate-900">{value}</div>
+    </div>
   );
 }
 

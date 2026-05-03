@@ -78,6 +78,12 @@ from app.services.providers import (
     _is_dashscope_compatible_base_url,
     _supports_native_video_understanding,
 )
+from app.services.token_usage import (
+    build_model_token_usage,
+    extract_total_tokens,
+    merge_model_token_usage,
+    normalize_model_token_usage,
+)
 from app.services.tools import execute_business_tool, get_business_tools
 
 logger = logging.getLogger(__name__)
@@ -239,6 +245,7 @@ def _resolve_material_upload_metadata(
 
 class GraphState(TypedDict, total=False):
     request: MediaChatRequest
+    token_usage: dict[str, int]
     materials_parsed: list[str]
     ocr_clues: list[str]
     search_query: str
@@ -429,13 +436,24 @@ class LangGraphProvider(BaseLLMProvider):
             thread=thread,
             user_id=user_id,
         )
+        state_token_usage = normalize_model_token_usage(initial_state.get("token_usage"))
 
         try:
             async for mode, chunk in self.graph.astream(
                 initial_state,
                 stream_mode=["custom", "updates"],
             ):
-                if mode != "custom" or not isinstance(chunk, dict):
+                if not isinstance(chunk, dict):
+                    continue
+
+                if mode == "updates":
+                    for update in chunk.values():
+                        if not isinstance(update, dict) or "token_usage" not in update:
+                            continue
+                        state_token_usage = normalize_model_token_usage(update.get("token_usage"))
+                    continue
+
+                if mode != "custom":
                     continue
 
                 payload = chunk.get("payload")
@@ -449,7 +467,11 @@ class LangGraphProvider(BaseLLMProvider):
                 "message": f"LangGraph 工作流执行失败：{exc}",
             }
 
-        yield {"event": "done", "thread_id": request.thread_id}
+        yield {
+            "event": "done",
+            "thread_id": request.thread_id,
+            "token_usage": state_token_usage,
+        }
 
     def _build_initial_state(
         self,
@@ -461,6 +483,7 @@ class LangGraphProvider(BaseLLMProvider):
     ) -> GraphState:
         return {
             "request": request,
+            "token_usage": {},
             "materials_parsed": [],
             "ocr_clues": [],
             "search_query": "",
@@ -869,7 +892,10 @@ class LangGraphProvider(BaseLLMProvider):
 
         try:
             async with asyncio.timeout(self.vision_timeout_seconds):
-                ocr_clues = await self._extract_ocr_clues(state["request"], writer)
+                ocr_clues, ocr_token_usage = await self._extract_ocr_clues(
+                    state["request"],
+                    writer,
+                )
         except asyncio.TimeoutError as exc:
             traceback.print_exc()
             logger.warning(
@@ -892,6 +918,7 @@ class LangGraphProvider(BaseLLMProvider):
         return {
             "materials_parsed": [*state.get("materials_parsed", []), *ocr_clues],
             "ocr_clues": ocr_clues,
+            "token_usage": _merge_state_token_usage(state, ocr_token_usage),
             "current_step": "ocr:completed",
         }
 
@@ -1088,6 +1115,7 @@ class LangGraphProvider(BaseLLMProvider):
         latest_artifact: dict[str, object] | None = None
         latest_error: dict[str, object] | None = None
         artifact_fallback_reason: str | None = None
+        draft_token_usage: dict[str, int] = {}
 
         async for event in self.inner_provider.generate_stream(
             adapted_request,
@@ -1097,7 +1125,14 @@ class LangGraphProvider(BaseLLMProvider):
         ):
             event_name = str(event.get("event", ""))
 
-            if event_name in {"start", "done", "tool_call"}:
+            if event_name in {"start", "tool_call"}:
+                continue
+
+            if event_name == "done":
+                draft_token_usage = merge_model_token_usage(
+                    draft_token_usage,
+                    event.get("token_usage"),
+                )
                 continue
 
             if event_name == "message":
@@ -1140,9 +1175,10 @@ class LangGraphProvider(BaseLLMProvider):
             "error": latest_error,
             "messages": updated_messages,
             "knowledge_base_scope": knowledge_base_scope,
-                    "knowledge_base_context": knowledge_base_context,
-                    "knowledge_base_citation_audit": knowledge_base_citation_audit,
-                    "artifact_fallback_reason": artifact_fallback_reason,
+            "knowledge_base_context": knowledge_base_context,
+            "knowledge_base_citation_audit": knowledge_base_citation_audit,
+            "artifact_fallback_reason": artifact_fallback_reason,
+            "token_usage": _merge_state_token_usage(state, draft_token_usage),
             "current_step": "generate_draft:completed",
         }
 
@@ -1891,9 +1927,9 @@ class LangGraphProvider(BaseLLMProvider):
         self,
         request: MediaChatRequest,
         writer,
-    ) -> list[str]:
+    ) -> tuple[list[str], dict[str, int]]:
         if self.vision_analyzer is not None:
-            return await self.vision_analyzer(request)
+            return await self.vision_analyzer(request), {}
 
         if not self.vision_api_key:
             writer(
@@ -1905,19 +1941,23 @@ class LangGraphProvider(BaseLLMProvider):
                     }
                 }
             )
-            return []
+            return [], {}
 
         image_materials = [
             material for material in request.materials if material.type == MaterialType.IMAGE
         ]
         if not image_materials:
-            return []
+            return [], {}
 
         clues: list[str] = []
+        token_usage: dict[str, int] = {}
         for index, material in enumerate(image_materials, start=1):
             try:
                 prompt_content = await self._build_vision_prompt_content(material)
-                response_text = await self._request_vision_analysis(prompt_content)
+                response_text, response_token_usage = await self._request_vision_analysis(
+                    prompt_content,
+                )
+                token_usage = merge_model_token_usage(token_usage, response_token_usage)
                 logger.info(
                     "\u89c6\u89c9\u6a21\u578b\u63d0\u53d6\u7ed3\u679c: %s",
                     response_text,
@@ -1939,7 +1979,7 @@ class LangGraphProvider(BaseLLMProvider):
                     f"Vision analysis failed for image {index} with model {self.vision_model}: {exc}",
                 ) from exc
 
-        return clues
+        return clues, token_usage
 
     async def _collect_search_results(
         self,
@@ -2023,7 +2063,7 @@ class LangGraphProvider(BaseLLMProvider):
     async def _request_vision_analysis(
         self,
         content_parts: list[dict[str, object]],
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         request_kwargs = {
             "model": self.vision_model,
             "messages": [
@@ -2075,7 +2115,13 @@ class LangGraphProvider(BaseLLMProvider):
             raise ValueError(f"视觉模型调用失败：{exc}") from exc
 
         content = response.choices[0].message.content or ""
-        return content.strip()
+        return (
+            content.strip(),
+            build_model_token_usage(
+                getattr(response, "model", self.vision_model) or self.vision_model,
+                extract_total_tokens(getattr(response, "usage", None)),
+            ),
+        )
 
 
 def _emit_tool_call(
@@ -2093,6 +2139,16 @@ def _emit_tool_call(
     if message:
         payload["message"] = message
     writer({"payload": payload})
+
+
+def _merge_state_token_usage(
+    state: GraphState,
+    additional_usage: object,
+) -> dict[str, int]:
+    return merge_model_token_usage(
+        state.get("token_usage"),
+        additional_usage,
+    )
 
 
 def _escape_context_attribute(value: str) -> str:

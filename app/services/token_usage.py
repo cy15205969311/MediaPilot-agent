@@ -25,6 +25,81 @@ def normalize_model_name(value: Any) -> str | None:
     return normalized
 
 
+def coerce_token_count(value: Any) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, normalized)
+
+
+def extract_total_tokens(raw_usage: Any) -> int:
+    if raw_usage is None:
+        return 0
+
+    if isinstance(raw_usage, dict):
+        if "total_tokens" in raw_usage:
+            return coerce_token_count(raw_usage.get("total_tokens"))
+
+        prompt_tokens = coerce_token_count(
+            raw_usage.get("prompt_tokens", raw_usage.get("input_tokens")),
+        )
+        completion_tokens = coerce_token_count(
+            raw_usage.get("completion_tokens", raw_usage.get("output_tokens")),
+        )
+        return prompt_tokens + completion_tokens
+
+    total_tokens = getattr(raw_usage, "total_tokens", None)
+    if total_tokens is not None:
+        return coerce_token_count(total_tokens)
+
+    prompt_tokens = coerce_token_count(
+        getattr(raw_usage, "prompt_tokens", getattr(raw_usage, "input_tokens", 0)),
+    )
+    completion_tokens = coerce_token_count(
+        getattr(
+            raw_usage,
+            "completion_tokens",
+            getattr(raw_usage, "output_tokens", 0),
+        ),
+    )
+    return prompt_tokens + completion_tokens
+
+
+def build_model_token_usage(model_name: Any, total_tokens: Any) -> dict[str, int]:
+    normalized_model_name = normalize_model_name(model_name) or LEGACY_MODEL_NAME
+    normalized_total_tokens = coerce_token_count(total_tokens)
+    if normalized_total_tokens <= 0:
+        return {}
+    return {normalized_model_name: normalized_total_tokens}
+
+
+def normalize_model_token_usage(raw_usage: Any) -> dict[str, int]:
+    if not isinstance(raw_usage, dict):
+        return {}
+
+    normalized_usage: dict[str, int] = {}
+    for raw_model_name, raw_total_tokens in raw_usage.items():
+        normalized_model_name = normalize_model_name(raw_model_name) or LEGACY_MODEL_NAME
+        normalized_total_tokens = coerce_token_count(raw_total_tokens)
+        if normalized_total_tokens <= 0:
+            continue
+        normalized_usage[normalized_model_name] = (
+            normalized_usage.get(normalized_model_name, 0) + normalized_total_tokens
+        )
+    return normalized_usage
+
+
+def merge_model_token_usage(*usage_maps: Any) -> dict[str, int]:
+    merged_usage: dict[str, int] = {}
+
+    for usage_map in usage_maps:
+        for model_name, total_tokens in normalize_model_token_usage(usage_map).items():
+            merged_usage[model_name] = merged_usage.get(model_name, 0) + total_tokens
+
+    return merged_usage
+
+
 def estimate_text_tokens(text: str | None) -> int:
     normalized = str(text or "").strip()
     if not normalized:

@@ -419,8 +419,15 @@ class AdminUserPasswordResetResponse(SchemaModel):
     )
 
 
+class AdminTokenAdjustAction(str, Enum):
+    ADD = "add"
+    DEDUCT = "deduct"
+    SET = "set"
+
+
 class AdminUserTokenUpdateRequest(SchemaModel):
-    amount: int = Field(..., description="Signed token delta applied to the user.")
+    action: AdminTokenAdjustAction = Field(..., description="Admin token adjustment mode.")
+    amount: int = Field(..., ge=0, description="Unsigned amount or target balance.")
     remark: str = Field(..., min_length=1, max_length=255, description="Admin remark.")
 
 

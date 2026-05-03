@@ -44,6 +44,12 @@ from app.models.schemas import (
     TopicPlanningItem,
 )
 from app.services.persistence import resolve_media_reference
+from app.services.token_usage import (
+    build_model_token_usage,
+    extract_total_tokens,
+    merge_model_token_usage,
+    normalize_model_name,
+)
 
 load_environment()
 
@@ -585,6 +591,7 @@ class OpenAIProvider(BaseLLMProvider):
 
         streamed_text = ""
         message_index = 0
+        provider_token_usage: dict[str, int] = {}
 
         try:
             messages = _build_conversation_messages(
@@ -595,15 +602,32 @@ class OpenAIProvider(BaseLLMProvider):
                 active_model=self.model,
             )
             try:
-                stream = await self._get_client().chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=0.7,
-                    stream=True,
-                    timeout=self.request_timeout,
-                )
+                try:
+                    stream = await self._get_client().chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=0.7,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                        timeout=self.request_timeout,
+                    )
+                except BadRequestError:
+                    stream = await self._get_client().chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=0.7,
+                        stream=True,
+                        timeout=self.request_timeout,
+                    )
 
                 async for chunk in stream:
+                    provider_token_usage = merge_model_token_usage(
+                        provider_token_usage,
+                        _extract_response_token_usage(
+                            chunk,
+                            fallback_model_name=self.model,
+                        ),
+                    )
                     for choice in chunk.choices:
                         delta = choice.delta.content or ""
                         if not delta:
@@ -630,12 +654,16 @@ class OpenAIProvider(BaseLLMProvider):
                 "status": "processing",
             }
 
-            artifact = await self._build_structured_artifact(
+            artifact, artifact_token_usage = await self._build_structured_artifact(
                 request,
                 streamed_text=streamed_text,
                 db=db,
                 thread=thread,
                 user_id=user_id,
+            )
+            provider_token_usage = merge_model_token_usage(
+                provider_token_usage,
+                artifact_token_usage,
             )
             yield {
                 "event": "artifact",
@@ -684,7 +712,11 @@ class OpenAIProvider(BaseLLMProvider):
                 message="模型提供者执行失败，请稍后重试。",
             )
         finally:
-            yield {"event": "done", "thread_id": request.thread_id}
+            yield {
+                "event": "done",
+                "thread_id": request.thread_id,
+                "token_usage": provider_token_usage,
+            }
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
@@ -726,16 +758,16 @@ class OpenAIProvider(BaseLLMProvider):
         db: Session | None,
         thread: Thread | None,
         user_id: str | None,
-    ) -> ArtifactPayloadModel:
+    ) -> tuple[ArtifactPayloadModel, dict[str, int]]:
         schema_type = _resolve_artifact_schema(request.task_type)
-        raw_json = await self._request_json_artifact(
+        raw_json, token_usage = await self._request_json_artifact(
             request,
             streamed_text=streamed_text,
             db=db,
             thread=thread,
             user_id=user_id,
         )
-        return schema_type.model_validate(json.loads(raw_json))
+        return schema_type.model_validate(json.loads(raw_json)), token_usage
 
     async def _request_json_artifact(
         self,
@@ -745,7 +777,7 @@ class OpenAIProvider(BaseLLMProvider):
         db: Session | None,
         thread: Thread | None,
         user_id: str | None,
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         request_kwargs = {
             "model": self.artifact_model,
             "messages": _build_artifact_messages(
@@ -768,7 +800,13 @@ class OpenAIProvider(BaseLLMProvider):
             response = await self._get_client().chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
-        return content.strip()
+        return (
+            content.strip(),
+            _extract_response_token_usage(
+                response,
+                fallback_model_name=self.artifact_model,
+            ),
+        )
 
 
 class CompatibleLLMProvider(BaseLLMProvider):
@@ -827,6 +865,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
 
         streamed_text = ""
         message_index = 0
+        provider_token_usage: dict[str, int] = {}
 
         try:
             request_model = _resolve_compatible_generation_model(
@@ -842,15 +881,32 @@ class CompatibleLLMProvider(BaseLLMProvider):
                 active_model=request_model,
             )
             try:
-                stream = await self._get_client().chat.completions.create(
-                    model=request_model,
-                    messages=messages,
-                    temperature=0.7,
-                    stream=True,
-                    timeout=self.request_timeout,
-                )
+                try:
+                    stream = await self._get_client().chat.completions.create(
+                        model=request_model,
+                        messages=messages,
+                        temperature=0.7,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                        timeout=self.request_timeout,
+                    )
+                except BadRequestError:
+                    stream = await self._get_client().chat.completions.create(
+                        model=request_model,
+                        messages=messages,
+                        temperature=0.7,
+                        stream=True,
+                        timeout=self.request_timeout,
+                    )
 
                 async for chunk in stream:
+                    provider_token_usage = merge_model_token_usage(
+                        provider_token_usage,
+                        _extract_response_token_usage(
+                            chunk,
+                            fallback_model_name=request_model,
+                        ),
+                    )
                     for choice in chunk.choices:
                         delta = choice.delta.content or ""
                         if not delta:
@@ -877,12 +933,16 @@ class CompatibleLLMProvider(BaseLLMProvider):
                 "status": "processing",
             }
 
-            artifact = await self._build_structured_artifact(
+            artifact, artifact_token_usage = await self._build_structured_artifact(
                 request,
                 streamed_text=streamed_text,
                 db=db,
                 thread=thread,
                 user_id=user_id,
+            )
+            provider_token_usage = merge_model_token_usage(
+                provider_token_usage,
+                artifact_token_usage,
             )
             yield {
                 "event": "artifact",
@@ -987,16 +1047,16 @@ class CompatibleLLMProvider(BaseLLMProvider):
         db: Session | None,
         thread: Thread | None,
         user_id: str | None,
-    ) -> ArtifactPayloadModel:
+    ) -> tuple[ArtifactPayloadModel, dict[str, int]]:
         schema_type = _resolve_artifact_schema(request.task_type)
-        raw_json = await self._request_json_artifact(
+        raw_json, token_usage = await self._request_json_artifact(
             request,
             streamed_text=streamed_text,
             db=db,
             thread=thread,
             user_id=user_id,
         )
-        return schema_type.model_validate(json.loads(raw_json))
+        return schema_type.model_validate(json.loads(raw_json)), token_usage
 
     async def _request_json_artifact(
         self,
@@ -1006,7 +1066,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
         db: Session | None,
         thread: Thread | None,
         user_id: str | None,
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         request_kwargs = {
             "model": self.artifact_model,
             "messages": _build_artifact_messages(
@@ -1029,7 +1089,13 @@ class CompatibleLLMProvider(BaseLLMProvider):
             response = await self._get_client().chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
-        return content.strip()
+        return (
+            content.strip(),
+            _extract_response_token_usage(
+                response,
+                fallback_model_name=self.artifact_model,
+            ),
+        )
 
 
 class QwenLLMProvider(CompatibleLLMProvider):
@@ -1145,6 +1211,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
 
         streamed_text = ""
         message_index = 0
+        provider_token_usage: dict[str, int] = {}
 
         try:
             messages = _build_conversation_messages(
@@ -1154,9 +1221,11 @@ class QwenLLMProvider(CompatibleLLMProvider):
                 user_id=user_id,
                 active_model=self.model,
             )
+            stream_usage_recorder: dict[str, object] = {}
             async for delta in self._stream_text_with_fallback(
                 messages=messages,
                 temperature=0.7,
+                usage_recorder=stream_usage_recorder,
             ):
                 streamed_text += delta
                 yield {
@@ -1165,6 +1234,10 @@ class QwenLLMProvider(CompatibleLLMProvider):
                     "index": message_index,
                 }
                 message_index += 1
+            provider_token_usage = merge_model_token_usage(
+                provider_token_usage,
+                stream_usage_recorder.get("token_usage"),
+            )
 
             yield {
                 "event": "tool_call",
@@ -1172,12 +1245,16 @@ class QwenLLMProvider(CompatibleLLMProvider):
                 "status": "processing",
             }
 
-            artifact = await self._build_structured_artifact(
+            artifact, artifact_token_usage = await self._build_structured_artifact(
                 request,
                 streamed_text=streamed_text,
                 db=db,
                 thread=thread,
                 user_id=user_id,
+            )
+            provider_token_usage = merge_model_token_usage(
+                provider_token_usage,
+                artifact_token_usage,
             )
             yield {
                 "event": "artifact",
@@ -1234,7 +1311,11 @@ class QwenLLMProvider(CompatibleLLMProvider):
                 message="模型提供者执行失败，请稍后重试。",
             )
         finally:
-            yield {"event": "done", "thread_id": request.thread_id}
+            yield {
+                "event": "done",
+                "thread_id": request.thread_id,
+                "token_usage": provider_token_usage,
+            }
 
     def bind_tools(
         self,
@@ -1281,7 +1362,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
         db: Session | None,
         thread: Thread | None,
         user_id: str | None,
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         request_kwargs = {
             "messages": _build_artifact_messages(
                 request,
@@ -1313,13 +1394,20 @@ class QwenLLMProvider(CompatibleLLMProvider):
             request_factory=_request_model_response,
         )
         content = response.choices[0].message.content or ""
-        return content.strip()
+        return (
+            content.strip(),
+            _extract_response_token_usage(
+                response,
+                fallback_model_name=self.artifact_model,
+            ),
+        )
 
     async def _stream_text_with_fallback(
         self,
         *,
         messages: list[ConversationMessage],
         temperature: float,
+        usage_recorder: dict[str, object] | None = None,
     ) -> AsyncGenerator[str, None]:
         attempted_models: list[str] = []
         model_order = self._build_model_fallback_order(self.model)
@@ -1329,15 +1417,33 @@ class QwenLLMProvider(CompatibleLLMProvider):
 
             for attempt in range(1, self.retry_attempts + 1):
                 try:
-                    stream = await self._get_client().chat.completions.create(
-                        model=model_name,
-                        messages=messages,
-                        temperature=temperature,
-                        stream=True,
-                        timeout=self.request_timeout,
-                    )
+                    try:
+                        stream = await self._get_client().chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            temperature=temperature,
+                            stream=True,
+                            stream_options={"include_usage": True},
+                            timeout=self.request_timeout,
+                        )
+                    except BadRequestError:
+                        stream = await self._get_client().chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            temperature=temperature,
+                            stream=True,
+                            timeout=self.request_timeout,
+                        )
 
                     async for chunk in stream:
+                        if usage_recorder is not None:
+                            usage_recorder["token_usage"] = merge_model_token_usage(
+                                usage_recorder.get("token_usage"),
+                                _extract_response_token_usage(
+                                    chunk,
+                                    fallback_model_name=model_name,
+                                ),
+                            )
                         for choice in chunk.choices:
                             delta = choice.delta.content or ""
                             if not delta:
@@ -1569,6 +1675,19 @@ def _error_event(*, code: str, message: str, **extra: object) -> dict[str, objec
     }
     payload.update(extra)
     return payload
+
+
+def _extract_response_token_usage(
+    response: object,
+    *,
+    fallback_model_name: str | None = None,
+) -> dict[str, int]:
+    raw_usage = getattr(response, "usage", None)
+    resolved_model_name = getattr(response, "model", None) or fallback_model_name
+    return build_model_token_usage(
+        resolved_model_name,
+        extract_total_tokens(raw_usage),
+    )
 
 
 def _resolve_system_prompt(request: MediaChatRequest, thread: Thread | None) -> str:

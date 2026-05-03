@@ -16,11 +16,13 @@ import {
 } from "lucide-react";
 
 import {
+  ACCOUNT_FROZEN_EVENT_NAME,
   APIError,
   clearStoredRefreshToken,
   clearStoredToken,
   clearStoredUser,
   completePasswordReset,
+  consumeFrozenAccountNotice,
   createChatStream,
   deleteKnowledgeSource,
   deleteKnowledgeScope,
@@ -42,6 +44,7 @@ import {
   fetchSessions,
   fetchThreadMessages,
   fetchThreads,
+  getFrozenAccountReason,
   getStoredRefreshToken,
   getStoredToken,
   getStoredUser,
@@ -50,11 +53,13 @@ import {
   logoutAPI,
   previewKnowledgeSource,
   requestPasswordReset,
+  registerActiveStreamController,
   register,
   revokeSession,
   resetPassword,
   setStoredUser,
   renameKnowledgeScope,
+  unregisterActiveStreamController,
   updateTopic,
   updateThread,
   uploadKnowledgeDocument,
@@ -1022,6 +1027,16 @@ function App() {
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const textInputRef = useRef<HTMLInputElement | null>(null);
 
+  const cancelActiveStream = () => {
+    if (!abortRef.current) {
+      return;
+    }
+
+    unregisterActiveStreamController(abortRef.current);
+    abortRef.current.abort();
+    abortRef.current = null;
+  };
+
   const isAuthenticated = Boolean(
     currentUser && (getStoredToken() || getStoredRefreshToken()),
   );
@@ -1297,7 +1312,7 @@ function App() {
   const handleUnauthorized = (
     fallbackMessage = "当前登录状态已失效，请重新登录。",
   ) => {
-    abortRef.current?.abort();
+    cancelActiveStream();
     clearStoredToken();
     clearStoredRefreshToken();
     clearStoredUser();
@@ -1344,6 +1359,46 @@ function App() {
     setRevokingSessionId(null);
     hasInitializedHistoryRef.current = false;
   };
+
+  useEffect(() => {
+    const applyFrozenNotice = (message: string) => {
+      handleUnauthorized(message);
+      setStatusText("账号已被冻结");
+    };
+
+    const frozenReason = getFrozenAccountReason();
+    const searchParams = new URLSearchParams(window.location.search);
+    const queryReason = searchParams.get("reason");
+    const storedNotice = consumeFrozenAccountNotice();
+
+    if (storedNotice) {
+      applyFrozenNotice(storedNotice);
+    } else if (queryReason === frozenReason) {
+      applyFrozenNotice("🚨 您的账号已被冻结，请联系管理员。");
+    }
+
+    if (queryReason === frozenReason) {
+      searchParams.delete("reason");
+      const nextQuery = searchParams.toString();
+      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+      window.history.replaceState({}, "", nextUrl);
+    }
+
+    const handleAccountFrozen = (event: Event) => {
+      const detail =
+        event instanceof CustomEvent &&
+        event.detail &&
+        typeof event.detail.message === "string"
+          ? event.detail.message
+          : "🚨 您的账号已被冻结，请联系管理员。";
+      applyFrozenNotice(detail);
+    };
+
+    window.addEventListener(ACCOUNT_FROZEN_EVENT_NAME, handleAccountFrozen);
+    return () => {
+      window.removeEventListener(ACCOUNT_FROZEN_EVENT_NAME, handleAccountFrozen);
+    };
+  }, []);
 
   const updateAssistantMessage = (contentPatch: string) => {
     const assistantId = assistantMessageIdRef.current;
@@ -1458,7 +1513,7 @@ function App() {
     topicId: string | null = null,
     options?: { silentNotFound?: boolean },
   ): Promise<"loaded" | "not_found" | "failed"> => {
-    abortRef.current?.abort();
+    cancelActiveStream();
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
@@ -2995,7 +3050,7 @@ function App() {
     const normalizedKnowledgeBaseScope = draftKnowledgeBaseScope.trim();
     const normalizedThreadId = draftTargetThreadId?.trim() || "thread-new";
 
-    abortRef.current?.abort();
+    cancelActiveStream();
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
@@ -3066,6 +3121,7 @@ function App() {
     }
 
     stopRequestedRef.current = true;
+    unregisterActiveStreamController(abortRef.current);
     abortRef.current.abort();
     abortRef.current = null;
     removeAssistantPlaceholderIfEmpty();
@@ -3197,7 +3253,7 @@ function App() {
       return;
     }
 
-    abortRef.current?.abort();
+    cancelActiveStream();
     stopRequestedRef.current = false;
 
     const isExistingThread = activeThreadId !== "thread-new";
@@ -3273,6 +3329,7 @@ function App() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    registerActiveStreamController(controller);
 
     const requestPayload: MediaChatRequestPayload = {
       thread_id: nextThreadId,
@@ -3321,7 +3378,10 @@ function App() {
       assistantMessageIdRef.current = null;
     } finally {
       stopRequestedRef.current = false;
-      abortRef.current = null;
+      unregisterActiveStreamController(controller);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
     }
   };
 
@@ -3488,7 +3548,7 @@ function App() {
   };
 
   const handleLogout = async () => {
-    abortRef.current?.abort();
+    cancelActiveStream();
 
     try {
       await logoutAPI();

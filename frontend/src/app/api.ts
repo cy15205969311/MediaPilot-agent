@@ -53,6 +53,11 @@ const USER_STORAGE_KEY = "omnimedia_user";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_UPLOAD_TIMEOUT_MS = 120000;
 const STREAM_CONNECT_TIMEOUT_MS = 120000;
+const ACCOUNT_FROZEN_ERROR_CODE = "ACCOUNT_FROZEN";
+const ACCOUNT_FROZEN_MESSAGE = "🚨 您的账号已被冻结，请联系管理员。";
+const ACCOUNT_FROZEN_REASON = "frozen";
+const ACCOUNT_FROZEN_NOTICE_STORAGE_KEY = "omnimedia_account_frozen_notice";
+export const ACCOUNT_FROZEN_EVENT_NAME = "omnimedia:account-frozen";
 
 type APIErrorOptions = {
   status: number;
@@ -73,6 +78,8 @@ type ValidationIssue = {
 };
 
 let refreshInFlight: Promise<AuthResponse> | null = null;
+let frozenRedirectTriggered = false;
+const activeStreamControllers = new Set<AbortController>();
 
 export class APIError extends Error {
   status: number;
@@ -148,7 +155,92 @@ function clearStoredSession(): void {
 }
 
 export function isUnauthorizedError(error: unknown): boolean {
-  return error instanceof APIError && error.status === 401;
+  return (
+    error instanceof APIError &&
+    (error.status === 401 || isAccountFrozenApiError(error))
+  );
+}
+
+export function registerActiveStreamController(controller: AbortController): void {
+  activeStreamControllers.add(controller);
+}
+
+export function unregisterActiveStreamController(controller: AbortController): void {
+  activeStreamControllers.delete(controller);
+}
+
+export function abortAllActiveStreams(): void {
+  for (const controller of activeStreamControllers) {
+    controller.abort();
+  }
+  activeStreamControllers.clear();
+}
+
+export function consumeFrozenAccountNotice(): string | null {
+  try {
+    const value = window.sessionStorage.getItem(ACCOUNT_FROZEN_NOTICE_STORAGE_KEY);
+    if (!value) {
+      return null;
+    }
+    window.sessionStorage.removeItem(ACCOUNT_FROZEN_NOTICE_STORAGE_KEY);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export function getFrozenAccountReason(): string {
+  return ACCOUNT_FROZEN_REASON;
+}
+
+function isAccountFrozenApiError(error: APIError): boolean {
+  return (
+    error.status === 403 &&
+    (error.code === ACCOUNT_FROZEN_ERROR_CODE ||
+      error.message.includes(ACCOUNT_FROZEN_ERROR_CODE))
+  );
+}
+
+function buildAccountFrozenError(cause?: unknown): APIError {
+  return new APIError(ACCOUNT_FROZEN_MESSAGE, {
+    status: 403,
+    code: ACCOUNT_FROZEN_ERROR_CODE,
+    cause,
+  });
+}
+
+function handleFrozenAccountLock(): void {
+  clearStoredSession();
+  abortAllActiveStreams();
+
+  try {
+    window.sessionStorage.setItem(
+      ACCOUNT_FROZEN_NOTICE_STORAGE_KEY,
+      ACCOUNT_FROZEN_MESSAGE,
+    );
+  } catch {
+    // Ignore storage write failures and continue the lockout flow.
+  }
+
+  if (frozenRedirectTriggered) {
+    return;
+  }
+
+  frozenRedirectTriggered = true;
+  window.dispatchEvent(
+    new CustomEvent(ACCOUNT_FROZEN_EVENT_NAME, {
+      detail: {
+        message: ACCOUNT_FROZEN_MESSAGE,
+        reason: ACCOUNT_FROZEN_REASON,
+      },
+    }),
+  );
+
+  window.setTimeout(() => {
+    const nextParams = new URLSearchParams(window.location.search);
+    nextParams.set("reason", ACCOUNT_FROZEN_REASON);
+    window.location.href = `${window.location.pathname}?${nextParams.toString()}${window.location.hash}`;
+  }, 0);
 }
 
 function formatValidationIssues(detail: ValidationIssue[]): string {
@@ -384,6 +476,11 @@ async function refreshAuthSession(): Promise<AuthResponse> {
       persistAuthSession(payload);
       return payload;
     } catch (error) {
+      if (error instanceof APIError && isAccountFrozenApiError(error)) {
+        handleFrozenAccountLock();
+        throw buildAccountFrozenError(error);
+      }
+
       clearStoredSession();
       if (error instanceof APIError) {
         throw error;
@@ -409,16 +506,33 @@ export async function fetchWithInterceptor(
   try {
     return await executeRequest(input, init, options);
   } catch (error) {
+    if (error instanceof APIError && isAccountFrozenApiError(error)) {
+      handleFrozenAccountLock();
+      throw buildAccountFrozenError(error);
+    }
+
     if (
       error instanceof APIError &&
       error.status === 401 &&
       !options.skipAuthRefresh
     ) {
       await refreshAuthSession();
-      return executeRequest(input, init, {
-        ...options,
-        skipAuthRefresh: true,
-      });
+      try {
+        return await executeRequest(input, init, {
+          ...options,
+          skipAuthRefresh: true,
+        });
+      } catch (retryError) {
+        if (
+          retryError instanceof APIError &&
+          isAccountFrozenApiError(retryError)
+        ) {
+          handleFrozenAccountLock();
+          throw buildAccountFrozenError(retryError);
+        }
+
+        throw retryError;
+      }
     }
 
     throw error;

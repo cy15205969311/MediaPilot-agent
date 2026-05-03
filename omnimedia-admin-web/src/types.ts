@@ -76,7 +76,10 @@ export type AdminUserPasswordResetApiResponse = {
   revoked_sessions: number;
 };
 
+export type AdminTokenAdjustAction = "add" | "deduct" | "set";
+
 export type AdminUserTokenUpdatePayload = {
+  action: AdminTokenAdjustAction;
   amount: number;
   remark: string;
 };

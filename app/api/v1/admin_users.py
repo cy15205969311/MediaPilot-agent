@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import TokenTransaction, User
 from app.models.schemas import (
+    AdminTokenAdjustAction,
     AdminUserListItem,
     AdminUserListResponse,
     AdminUserPasswordResetResponse,
@@ -31,6 +32,44 @@ from app.services.token_usage import LEGACY_MODEL_NAME
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-users"])
 require_admin_role = RequireRole(["super_admin", "admin", "operator"])
 PASSWORD_SPECIAL_CHARS = "!@#$%^&*"
+
+
+def _resolve_admin_token_change(
+    *,
+    current_balance: int,
+    action: AdminTokenAdjustAction,
+    amount: int,
+) -> tuple[int, int, str]:
+    if action == AdminTokenAdjustAction.ADD:
+        if amount <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Amount must be greater than 0 for add actions.",
+            )
+        return current_balance + amount, amount, "recharge"
+
+    if action == AdminTokenAdjustAction.DEDUCT:
+        if amount <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Amount must be greater than 0 for deduct actions.",
+            )
+        next_balance = current_balance - amount
+        if next_balance < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Token balance cannot drop below 0.",
+            )
+        return next_balance, -amount, "consume"
+
+    if amount < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Target balance cannot be negative.",
+        )
+
+    next_balance = amount
+    return next_balance, next_balance - current_balance, "adjust"
 
 
 def _build_admin_user_item(user: User) -> AdminUserListItem:
@@ -104,9 +143,27 @@ async def update_admin_user_status(
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
 
+    active_sessions = []
+    is_freezing = payload.status.value == "frozen"
+    if is_freezing:
+        active_sessions = list_active_refresh_sessions(db, user_id=user.id)
+
     user.status = payload.status.value
 
     try:
+        if is_freezing:
+            revoke_other_refresh_sessions(
+                db,
+                user_id=user.id,
+                keep_session_jti=None,
+            )
+            for session in active_sessions:
+                blacklist_access_token_jti(
+                    db,
+                    jti=session.latest_access_jti,
+                    expires_at=datetime.now(timezone.utc)
+                    + timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
+                )
         db.commit()
         db.refresh(user)
     except SQLAlchemyError as exc:
@@ -163,24 +220,26 @@ async def update_admin_user_tokens(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_role),
 ) -> AdminUserTokenUpdateResponse:
-    if payload.amount == 0:
-        raise HTTPException(status_code=400, detail="额度变动数量不能为 0。")
-
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    next_balance = user.token_balance + payload.amount
-    if next_balance < 0:
-        raise HTTPException(status_code=400, detail="扣减后额度不能小于 0。")
+    normalized_remark = payload.remark.strip()
+    if not normalized_remark:
+        raise HTTPException(status_code=400, detail="备注不能为空。")
 
-    transaction_type = "recharge" if payload.amount > 0 else "consume"
+    next_balance, delta, transaction_type = _resolve_admin_token_change(
+        current_balance=user.token_balance,
+        action=payload.action,
+        amount=payload.amount,
+    )
+
     transaction = TokenTransaction(
         user_id=user.id,
-        amount=payload.amount,
+        amount=delta,
         transaction_type=transaction_type,
         model_name=LEGACY_MODEL_NAME,
-        remark=payload.remark.strip(),
+        remark=normalized_remark,
         operator_id=current_user.id,
     )
 

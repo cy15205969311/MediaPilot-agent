@@ -27,6 +27,7 @@ from app.models.schemas import (
     UserProfileUpdate,
 )
 from app.services.auth import (
+    ACCOUNT_FROZEN_DETAIL,
     DecodedToken,
     JWT_ACCESS_EXPIRE_MINUTES,
     JWT_PASSWORD_RESET_EXPIRE_MINUTES,
@@ -166,6 +167,11 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误。",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+    if user.status == "frozen":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_FROZEN_DETAIL,
         )
 
     try:

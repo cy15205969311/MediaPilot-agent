@@ -2,48 +2,92 @@
 
 更新时间：`2026-05-03`
 
-`MediaPilot-agent` 是仓库名称，代码内部和运行时服务仍大量使用 `OmniMedia Agent` 命名。两者指向同一个项目：一个面向内容运营团队的 AI 工作台，覆盖内容策划、知识检索、素材解析、会话协作、草稿沉淀、图片生成与后台管理等完整链路。
+`MediaPilot-agent` 是仓库名，代码与运行时中仍保留较多 `OmniMedia Agent` 命名。两者指向同一套系统：一个面向内容运营团队的 AI 内容工作台与管理后台一体化工程。
 
-## 1. 项目概览
+## 1. 项目概述
 
-当前仓库包含四个核心部分：
+当前仓库由三套核心应用和一套共享后端组成：
 
-- `app/`：`FastAPI` 后端，负责鉴权、数据持久化、流式聊天、知识库、模板、选题、存储与管理接口。
-- `frontend/`：面向内容生产与运营人员的主工作台，基于 `React 18 + Vite + TypeScript + Tailwind CSS v4`。
-- `omnimedia-admin-web/`：面向运营后台与管理员的独立管理端，当前重点覆盖用户列表、状态控制、密码重置、额度调整和后台仪表盘。
-- `extension/omnimedia-publisher/`：浏览器扩展辅助目录，用于后续发布链路或站外辅助能力接入。
+- `app/`：`FastAPI` 后端，负责认证鉴权、会话历史、SSE 流式生成、素材解析、知识库、上传存储、管理端接口与 Token 流水。
+- `frontend/`：C 端主工作台，面向内容创作与运营人员，提供聊天生成、知识库检索、草稿管理、历史会话与个人安全设置。
+- `omnimedia-admin-web/`：B 端管理后台，面向管理员提供用户列表、账号状态控制、Token 额度调整与后台运营视图。
+- `extension/`：浏览器扩展预留目录，用于后续发布链路或站外辅助能力接入。
 
-项目的默认后端服务名为 `OmniMedia Agent API`，默认数据库为本地 `SQLite`，默认上传存储为本地 `/uploads`，在配置完整时可自动切换到阿里云 `OSS`。
+系统默认使用：
 
-## 2. 核心能力
+- `SQLite` 作为本地开发数据库
+- `uploads/` 作为本地文件存储目录
+- 可选接入阿里云 `OSS`
+- `LangGraph` 编排多模态工作流
+- `OpenAI / DashScope / OpenAI-Compatible` 模型网关
 
-### 2.1 后端能力
+## 2. 近期重要更新
 
-- 提供注册、登录、刷新令牌、退出登录、找回密码、站内改密、会话管理、用户资料更新等完整鉴权链路。
-- 提供线程化聊天能力，支持 `SSE` 流式返回、聊天中止、历史回放、线程重命名与删除。
-- 提供内容工作流接口，支持选题规划、正文生成、热点分析、评论回复等任务类型。
-- 提供知识库接口，支持空间管理、文档上传、来源预览、来源删除、空间重命名与空间删除。
-- 提供模板、选题、草稿箱、仪表盘、模型注册表、上传留存统计等业务接口。
-- 提供管理后台接口，支持管理员查看用户、冻结/解冻账号、重置用户密码、增减额度。
-- 提供本地存储与 `OSS` 双后端，支持签名地址、临时上传前缀、线程绑定后提级与生命周期任务。
-- 提供图片生成与多模态解析链路，支持 `dashscope`、`openai` 兼容网关与关闭模式三种后端。
+以下内容已经体现在当前代码中，开发时请以此为准：
 
-### 2.2 主工作台能力
+### 2.1 账号冻结与全局阻断
 
-- 中文内容工作台，包含仪表盘、聊天区、知识库、模板库、选题池、草稿箱等主视图。
-- 支持流式消息渲染、引用审计面板、结构化产物侧栏、复制、导出与富文本剪贴板写入。
-- 支持主题切换、模型选择、线程设置、附件上传和用户资料管理。
+- 后端登录与鉴权链路会在用户状态为 `frozen` 时返回 `403 ACCOUNT_FROZEN`。
+- 管理员冻结账号时，会同步撤销该用户的刷新会话并拉黑相关访问令牌。
+- C 端前端全局拦截器会捕获 `ACCOUNT_FROZEN`，自动：
+  - 清理本地登录态
+  - 终止正在进行的流式请求
+  - 跳转回登录页
+  - 弹出冻结提示
 
-### 2.3 管理后台能力
+### 2.2 管理端 Token 资产调度
 
-- 独立登录页与鉴权守卫。
-- 后台布局、数据看板、用户列表页和占位页面。
-- 用户管理接口已对接 `/api/v1/admin/users` 相关能力。
-- 管理端默认独立运行在 `5174` 端口，可通过 `VITE_API_BASE_URL` 指向任意后端环境。
+- 管理员调整 Token 已升级为三种动作：
+  - `add`：增加额度
+  - `deduct`：扣减额度
+  - `set`：直接设定余额
+- 请求体要求携带必填 `remark`，用于审计追踪。
+- 管理后台用户页已升级为“Token 资产调度台”交互，包含操作类型切换、快捷额度包与结果预览。
 
-## 3. 技术栈
+### 2.3 多模型真实计费
 
-### 3.1 后端
+- `LangGraph` 状态中新增 `token_usage`，用于在多节点之间累计不同模型的真实消耗。
+- 素材视觉解析节点、主生成节点、结构化产物节点都会分别记录自身模型用量。
+- 最终记账逻辑不再按最终文本长度估算，而是按 `model_name -> token_count` 逐模型写入多条 `TokenTransaction`。
+
+### 2.4 SQLite 事务隔离修复
+
+- 为避免 SSE 生成期间长时间占用同一个数据库写事务，最终计费已切换为独立短生命周期会话。
+- 计费阶段会使用单独的 `SessionLocal` 完成：
+  - 用户余额扣减
+  - 多条 Token 流水写入
+  - `commit / rollback / close`
+- 这样可以降低 SQLite 读写互斥对历史会话列表等只读接口的影响。
+
+## 3. 仓库结构
+
+```text
+MediaPilot-agent/
+├─ app/                        # FastAPI backend
+│  ├─ api/v1/                  # 路由模块
+│  ├─ db/                      # SQLAlchemy 引擎、Session、ORM 模型
+│  ├─ models/                  # Pydantic 请求/响应模型
+│  ├─ services/                # 业务服务、Graph、Provider、存储、鉴权
+│  ├─ config.py                # 环境变量加载与运行时配置
+│  └─ main.py                  # 应用入口
+├─ alembic/                    # 数据库迁移
+├─ frontend/                   # C 端主工作台
+│  ├─ e2e/                     # Playwright 测试
+│  └─ src/
+├─ omnimedia-admin-web/        # B 端管理后台
+│  └─ src/
+├─ extension/                  # 浏览器扩展预留目录
+├─ tests/                      # 后端测试
+├─ uploads/                    # 本地上传资源
+├─ .env.example                # 环境变量模板
+├─ requirements.txt            # Python 依赖
+├─ README.md                   # 中文开发说明
+└─ DEVELOPMENT.md              # 英文开发基线
+```
+
+## 4. 技术栈
+
+### 4.1 后端
 
 - `Python 3.11+`
 - `FastAPI`
@@ -55,53 +99,25 @@
 - `ChromaDB`
 - `SQLite`
 - `APScheduler`
-- `oss2`
 
-### 3.2 前端
+### 4.2 前端
 
 - `React 18`
 - `Vite`
 - `TypeScript`
-- `Tailwind CSS v4`
+- `Tailwind CSS`
 - `Lucide React`
 - `Playwright`
 
-## 4. 仓库结构
-
-```text
-MediaPilot-agent/
-├─ app/                      # FastAPI backend
-│  ├─ api/v1/                # Route modules
-│  ├─ db/                    # Database session and ORM models
-│  ├─ models/                # Pydantic request/response schemas
-│  ├─ services/              # Business logic, graph, providers, storage
-│  ├─ config.py              # Environment loading and runtime helpers
-│  └─ main.py                # FastAPI app entrypoint
-├─ alembic/                  # Database migrations
-├─ frontend/                 # Main creator workspace
-│  ├─ e2e/                   # Playwright tests
-│  └─ src/
-├─ omnimedia-admin-web/      # Admin console
-│  └─ src/
-├─ extension/                # Optional browser extension
-├─ tests/                    # Backend pytest suite
-├─ uploads/                  # Local uploaded assets
-├─ .env.example              # Sample environment variables
-├─ requirements.txt          # Python dependencies
-├─ README.md                 # 中文说明
-└─ DEVELOPMENT.md            # 英文开发基线
-```
-
-## 5. 快速开始
+## 5. 本地启动
 
 ### 5.1 环境要求
 
 - `Python 3.11+`
 - `Node.js 18+`
 - `npm 9+`
-- Windows、macOS、Linux 均可；以下命令以 Windows PowerShell 为主
 
-### 5.2 后端启动
+### 5.2 启动后端
 
 ```powershell
 copy .env.example .env
@@ -112,13 +128,13 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-后端默认地址：
+默认地址：
 
 - `http://127.0.0.1:8000`
-- OpenAPI 文档：`http://127.0.0.1:8000/docs`
-- 健康检查：`http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/health`
 
-### 5.3 主工作台启动
+### 5.3 启动 C 端工作台
 
 ```powershell
 cd frontend
@@ -126,17 +142,17 @@ npm install
 npm run dev
 ```
 
-主工作台默认地址：
+默认地址：
 
 - `http://127.0.0.1:5173`
 
-当前 `frontend/vite.config.ts` 已配置代理：
+当前 Vite 代理：
 
 - `/api -> http://127.0.0.1:8000`
 - `/health -> http://127.0.0.1:8000`
 - `/uploads -> http://127.0.0.1:8000`
 
-### 5.4 管理后台启动
+### 5.4 启动 B 端管理后台
 
 ```powershell
 cd omnimedia-admin-web
@@ -144,27 +160,25 @@ npm install
 npm run dev
 ```
 
-管理后台默认地址：
+默认地址：
 
 - `http://127.0.0.1:5174`
 
 可选环境变量：
 
-- `VITE_API_BASE_URL`：指定管理端请求的后端地址，默认 `http://127.0.0.1:8000`
-- `VITE_CLIENT_APP_URL`：指定“返回工作台”按钮地址，默认 `http://127.0.0.1:5173`
+- `VITE_API_BASE_URL`：指定管理端 API 基础地址
+- `VITE_CLIENT_APP_URL`：指定“返回工作台”按钮地址
 
-### 5.5 浏览器自动化测试准备
-
-首次运行主工作台 `Playwright` 用例前安装浏览器：
+### 5.5 首次安装 Playwright 浏览器
 
 ```powershell
 cd frontend
 npx playwright install chromium
 ```
 
-## 6. 环境变量说明
+## 6. 环境变量分组
 
-建议先复制 `.env.example`，再按环境逐项补齐。重点分组如下：
+建议从 `.env.example` 复制出 `.env` 后按分组补全。
 
 ### 6.1 大模型与工作流
 
@@ -238,18 +252,12 @@ npx playwright install chromium
 - `CORS_ALLOWED_ORIGINS`
 - `DATABASE_URL`
 
-`.env` 包含密钥与私有地址，未提交到仓库。
+## 7. 核心接口概览
 
-## 7. API 概览
-
-### 7.1 基础接口
+### 7.1 基础与认证
 
 - `GET /`
 - `GET /health`
-- `GET /docs`
-
-### 7.2 鉴权与用户
-
 - `POST /api/v1/auth/register`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/refresh`
@@ -262,7 +270,7 @@ npx playwright install chromium
 - `PATCH /api/v1/auth/profile`
 - `GET /api/v1/users/me`
 
-### 7.3 内容工作台
+### 7.2 内容工作台
 
 - `POST /api/v1/media/chat/stream`
 - `GET /api/v1/media/threads`
@@ -270,19 +278,15 @@ npx playwright install chromium
 - `PATCH /api/v1/media/threads/{thread_id}`
 - `DELETE /api/v1/media/threads/{thread_id}`
 - `GET /api/v1/media/artifacts`
-- `DELETE /api/v1/media/artifacts/{message_id}`
-- `DELETE /api/v1/media/artifacts`
 - `POST /api/v1/media/upload`
-- `GET /api/v1/media/retention`
 - `GET /api/v1/media/dashboard/summary`
 - `GET /api/v1/models/available`
 
-### 7.4 模板、选题与知识库
+### 7.3 知识库、模板与选题
 
 - `GET /api/v1/media/templates`
 - `POST /api/v1/media/templates`
 - `DELETE /api/v1/media/templates/{template_id}`
-- `DELETE /api/v1/media/templates`
 - `GET /api/v1/media/skills/search`
 - `GET /api/v1/media/topics`
 - `POST /api/v1/media/topics`
@@ -292,72 +296,68 @@ npx playwright install chromium
 - `POST /api/v1/media/knowledge/upload`
 - `PATCH /api/v1/media/knowledge/scopes/{scope_name}`
 - `DELETE /api/v1/media/knowledge/scopes/{scope}`
-- `GET /api/v1/media/knowledge/scopes/{scope_name}/sources`
-- `GET /api/v1/media/knowledge/scopes/{scope_name}/sources/{source_name}/preview`
-- `DELETE /api/v1/media/knowledge/scopes/{scope_name}/sources/{source_name}`
 
-### 7.5 管理后台
+### 7.4 管理后台
 
 - `GET /api/v1/admin/users`
 - `POST /api/v1/admin/users/{user_id}/status`
-- `POST /api/v1/admin/users/{user_id}/reset-password`
+- `POST /api/v1/admin/users/{user_id}/password-reset`
 - `POST /api/v1/admin/users/{user_id}/tokens`
+- `GET /api/v1/admin/dashboard`
 
-## 8. 常用命令
+## 8. 开发约束
 
-### 8.1 后端
+### 8.1 分层原则
 
-```powershell
-pip install -r requirements.txt
-alembic upgrade head
-python -m pytest -q
-uvicorn app.main:app --reload
+- `app/api/` 负责参数校验、依赖注入、响应码与错误返回
+- `app/services/` 负责业务逻辑与外部能力编排
+- `app/db/` 负责模型、引擎和 Session 管理
+- `app/models/` 负责请求响应契约
+
+### 8.2 SQLite 使用建议
+
+- 不要在长时间流式输出过程中持有未提交写事务
+- 写密集逻辑尽量使用短事务
+- 遇到异常必须明确 `rollback`
+- 框架托管 Session 与业务自建短会话不要混用职责
+
+### 8.3 提交规范
+
+推荐使用 Conventional Commits：
+
+- `feat:` 新功能
+- `fix:` 缺陷修复
+- `refactor:` 重构但不改行为
+- `docs:` 文档更新
+- `test:` 测试补充
+- `chore:` 工程维护
+
+示例：
+
+```text
+feat: strengthen account freeze control and multimodal token billing
 ```
 
-### 8.2 主工作台
+## 9. 联调与验收建议
 
-```powershell
-cd frontend
-npm install
-npm run dev
-npm run build
-npm run test:e2e
-npx playwright test --ui
-```
+### 9.1 账号冻结链路
 
-### 8.3 管理后台
+1. 使用管理员冻结一个普通用户。
+2. 验证该用户已被强制退出。
+3. 验证其再次访问受保护接口时收到 `403 ACCOUNT_FROZEN`。
 
-```powershell
-cd omnimedia-admin-web
-npm install
-npm run dev
-npm run build
-npm run lint
-```
+### 9.2 Token 调整链路
 
-## 9. 测试与验证建议
+1. 在管理后台选择 `add / deduct / set` 任一动作。
+2. 确认请求体包含 `action + amount + remark`。
+3. 验证 `User.token_balance` 与 `TokenTransaction` 流水同步更新。
 
-文档更新本身不需要改动业务代码，但涉及接口、数据模型、路由、上传链路或前端展示变更时，建议至少执行下列检查：
+### 9.3 多模态计费链路
 
-- 后端：`python -m pytest -q`
-- 主工作台构建：`cd frontend && npm run build`
-- 主工作台浏览器用例：`cd frontend && npm run test:e2e`
-- 管理后台构建：`cd omnimedia-admin-web && npm run build`
-- 管理后台静态检查：`cd omnimedia-admin-web && npm run lint`
+1. 发起“图片/视频解析 + 文案生成”任务。
+2. 检查 `TokenTransaction` 是否出现多条不同模型记录。
+3. 验证余额扣减总数等于各模型消耗之和。
 
-如果本次修改只涉及文档，可在提交说明中明确写明“未执行自动化测试，仅更新文档”。
+---
 
-## 10. 开发协作约定
-
-- 后端接口或数据契约变更时，必须同步更新 `app/models/schemas.py` 与前端类型定义。
-- 迁移数据库结构时，必须补充 `Alembic` 迁移，不能只改 ORM。
-- 涉及上传、知识库、图像生成、`OSS`、模型注册或流式协议变更时，必须同步更新根目录文档。
-- 主工作台与管理后台共用同一后端时，注意 `CORS_ALLOWED_ORIGINS` 同时覆盖 `5173` 和 `5174`。
-- 如果改动影响用户可见行为，请同时更新本文件和 `DEVELOPMENT.md`。
-
-## 11. 文档分工
-
-- `README.md`：中文总览、启动说明、目录说明和常用命令。
-- `DEVELOPMENT.md`：英文工程基线、架构边界、接口分组、开发流程与变更要求。
-
-后续如新增模块、独立服务、前端子应用、重要接口组或部署方式，请同步维护这两份文档。
+如需英文工程基线，请查看 [DEVELOPMENT.md](./DEVELOPMENT.md)。
