@@ -2,7 +2,7 @@
 
 Last updated: `2026-05-03`
 
-This document is the engineering baseline for the `MediaPilot-agent` repository. The repository name is `MediaPilot-agent`, while several runtime labels, API titles, and internal identifiers still use `OmniMedia Agent`. Both names refer to the same product.
+This document is the engineering baseline for the `MediaPilot-agent` repository. The repository name is `MediaPilot-agent`, while some runtime labels, API titles, and internal identifiers still use `OmniMedia Agent`. Both names refer to the same product.
 
 ## 1. Scope
 
@@ -12,19 +12,19 @@ Use this document when you need to:
 - develop backend APIs in `app/`
 - work on the creator workspace in `frontend/`
 - work on the admin console in `omnimedia-admin-web/`
-- validate persistence, auth, storage, or multimodal workflow changes
+- validate auth, persistence, storage, and multimodal billing behavior
 - prepare changes for review, commit, and push
 
-`README.md` is the Chinese development and onboarding guide. `DEVELOPMENT.md` must remain English-only.
+`README.md` is the Chinese engineering and onboarding guide. `DEVELOPMENT.md` must remain English-only.
 
 ## 2. Product Architecture
 
 The repository contains one shared backend and two web clients:
 
 - `app/`: shared `FastAPI` backend for auth, sessions, streaming chat, history, uploads, knowledge base, templates, topics, dashboards, admin operations, and token ledgers
-- `frontend/`: creator workspace for generation, drafting, knowledge retrieval, security settings, history, and user-facing workflows
+- `frontend/`: creator workspace for generation, drafting, knowledge retrieval, history, profile management, and security settings
 - `omnimedia-admin-web/`: admin console for operator authentication, dashboard views, user management, account status control, and token operations
-- `extension/`: reserved area for browser extension or publishing-assist tooling
+- `extension/`: reserved area for browser-extension or publishing-assist integrations
 
 Default local infrastructure:
 
@@ -131,7 +131,7 @@ npx playwright install chromium
 
 ## 6. Key Environment Variables
 
-Start from `.env.example`. Never commit private keys, secrets, or production endpoints.
+Start from `.env.example`. Never commit secrets, private endpoints, or production keys.
 
 ### 6.1 LLM and workflow settings
 
@@ -213,12 +213,12 @@ The current system enforces account freezing across backend and frontend layers:
 
 - login rejects frozen users with `403 ACCOUNT_FROZEN`
 - authenticated requests reject frozen users during token validation
-- admin-side freeze actions revoke refresh sessions and invalidate related access tokens
+- admin freeze actions revoke refresh sessions and invalidate related access tokens
 - the creator workspace globally intercepts `ACCOUNT_FROZEN`, clears auth state, aborts active streams, and redirects users back to login
 
 ### 7.2 Admin token operations
 
-Admin token adjustment now supports explicit action-based commands instead of signed deltas:
+Admin token adjustment now uses explicit action-based commands instead of signed deltas:
 
 - `add`
 - `deduct`
@@ -230,7 +230,7 @@ The request contract requires:
 - `amount`
 - `remark`
 
-The admin UI has been upgraded to a token operation console with action selection, quick-pack buttons, and result preview.
+The admin UI has been upgraded into a token operation console with action switching, quick-pack inputs, preview metrics, and audit remarks.
 
 ### 7.3 Multimodal token accounting
 
@@ -242,16 +242,35 @@ The billing flow now tracks real model usage across multimodal workflows:
 - `GraphState` carries `token_usage` as a `{model_name: token_count}` map
 - final billing inserts one `TokenTransaction` row per model instead of estimating usage from output text
 
-### 7.4 SQLite transaction isolation
+### 7.4 Provider usage propagation fix
 
-Because `SQLite` uses coarse-grained write locks, token ledger writes must stay short-lived:
+The latest backend baseline also fixes provider-to-ledger usage propagation:
 
-- the streaming request session remains owned by FastAPI dependency injection
+- stream-based provider calls must attempt `stream_options={"include_usage": True}`
+- `OpenAIProvider`, `CompatibleLLMProvider`, and `QwenLLMProvider` now emit accumulated `token_usage` in their final `done` event
+- `CompatibleLLMProvider` specifically fixed a regression where usage was accumulated internally but not forwarded upstream
+- provider-level warning logs now surface when upstream rejects `include_usage` or when a request still ends without tracked usage
+
+### 7.5 SQLite transaction isolation
+
+Because `SQLite` uses coarse-grained write locks, token ledger writes must remain short-lived:
+
+- the streaming request session stays owned by FastAPI dependency injection
 - final token ledger writes use a dedicated `SessionLocal()` session
 - billing code performs `commit`, `rollback`, and `close` inside the ledger helper
 - no long-lived write transaction should remain open during streaming
 
-This rule is important for preventing thread-history or dashboard reads from blocking behind a lingering write lock.
+This rule matters for preventing thread-history or dashboard reads from blocking behind a lingering write lock.
+
+### 7.6 Billing diagnostics
+
+Current diagnostics now include:
+
+- provider warnings when usage is missing
+- final `token_usage` logging in `agent.py` before ledger persistence
+- skipped-ledger logging that includes the actual `token_usage` payload
+
+These logs are the first place to look when `no_tracked_usage` appears.
 
 ## 8. Backend Boundaries
 
@@ -277,9 +296,9 @@ Current route modules under `app/api/v1/` include:
 - `app/api/` should focus on request validation, auth dependencies, response models, and HTTP status handling
 - `app/services/` should own business logic, orchestration, parsing, providers, and persistence helpers
 - `app/db/` should own engine setup, sessions, ORM models, and migration-safe schema helpers
-- `app/models/` should own Pydantic schemas and cross-route request or response contracts
+- `app/models/` should own Pydantic schemas and shared API contracts
 
-Avoid pushing database-heavy logic into route files when a service layer is more appropriate.
+Avoid pushing database-heavy logic into route files when a dedicated service abstraction is more appropriate.
 
 ## 9. API Surface Summary
 
@@ -337,17 +356,21 @@ Avoid pushing database-heavy logic into route files when a service layer is more
 Before pushing changes, validate the areas you touched:
 
 - backend syntax check: `python -m compileall app`
-- creator workspace build or targeted validation if frontend files changed
-- admin console build or targeted validation if admin files changed
+- creator workspace build or targeted validation when `frontend/` changes
+- admin console build or targeted validation when `omnimedia-admin-web/` changes
 - API contract compatibility for any schema changes
-- transaction safety for any `SQLite` write-path update
+- transaction safety for any `SQLite` write-path change
 
 Recommended manual checks for the latest feature set:
 
 1. Freeze a user from the admin console and confirm forced logout behavior.
 2. Adjust tokens with `add`, `deduct`, and `set`, then confirm ledger records and balance changes.
-3. Run a multimodal generation flow and confirm multiple model-specific `TokenTransaction` rows are created.
-4. Verify `GET /api/v1/media/threads` still returns promptly after a streaming generation completes.
+3. Run an audio, image, or video generation flow and confirm model-specific `TokenTransaction` rows are created.
+4. Verify `GET /api/v1/media/threads` still returns promptly after streaming generation completes.
+5. If usage is still missing, inspect logs for:
+   - `include_usage rejected`
+   - `Provider usage missing after ...`
+   - `agent.stream final token_usage ...`
 
 ## 11. Commit Convention
 
@@ -363,5 +386,5 @@ Use Conventional Commits:
 Example:
 
 ```text
-feat: strengthen account freeze control and multimodal token billing
+feat: strengthen provider usage propagation for multimodal billing
 ```

@@ -157,6 +157,11 @@ class MediaAgentWorkflow:
                         accumulated_token_usage,
                         event.get("token_usage"),
                     )
+                    logger.info(
+                        "agent.stream final token_usage thread_id=%s token_usage=%s",
+                        request.thread_id,
+                        accumulated_token_usage,
+                    )
                     try:
                         logger.info(
                             "agent.stream persist_output thread_id=%s text_chars=%s has_artifact=%s",
@@ -303,9 +308,10 @@ def _record_generated_token_consumption(
     normalized_token_usage = normalize_model_token_usage(token_usage)
     if not normalized_token_usage:
         logger.info(
-            "agent.stream token_ledger skipped user_id=%s task_type=%s reason=no_tracked_usage",
+            "agent.stream token_ledger skipped user_id=%s task_type=%s reason=no_tracked_usage token_usage=%s",
             user_id,
             task_type,
+            token_usage,
         )
         return
 

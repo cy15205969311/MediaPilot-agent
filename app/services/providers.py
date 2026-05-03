@@ -49,6 +49,7 @@ from app.services.token_usage import (
     extract_total_tokens,
     merge_model_token_usage,
     normalize_model_name,
+    normalize_model_token_usage,
 )
 
 load_environment()
@@ -612,6 +613,11 @@ class OpenAIProvider(BaseLLMProvider):
                         timeout=self.request_timeout,
                     )
                 except BadRequestError:
+                    logger.warning(
+                        "OpenAI streaming include_usage rejected by upstream; token usage may be unavailable. model=%s thread_id=%s",
+                        self.model,
+                        request.thread_id,
+                    )
                     stream = await self._get_client().chat.completions.create(
                         model=self.model,
                         messages=messages,
@@ -664,6 +670,13 @@ class OpenAIProvider(BaseLLMProvider):
             provider_token_usage = merge_model_token_usage(
                 provider_token_usage,
                 artifact_token_usage,
+            )
+            _warn_if_missing_token_usage(
+                provider_name="openai",
+                model_name=self.model,
+                thread_id=request.thread_id,
+                token_usage=provider_token_usage,
+                operation_name="generate_stream",
             )
             yield {
                 "event": "artifact",
@@ -800,12 +813,20 @@ class OpenAIProvider(BaseLLMProvider):
             response = await self._get_client().chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
+        token_usage = _extract_response_token_usage(
+            response,
+            fallback_model_name=self.artifact_model,
+        )
+        _warn_if_missing_token_usage(
+            provider_name="openai",
+            model_name=self.artifact_model,
+            thread_id=request.thread_id,
+            token_usage=token_usage,
+            operation_name="artifact_json",
+        )
         return (
             content.strip(),
-            _extract_response_token_usage(
-                response,
-                fallback_model_name=self.artifact_model,
-            ),
+            token_usage,
         )
 
 
@@ -891,6 +912,11 @@ class CompatibleLLMProvider(BaseLLMProvider):
                         timeout=self.request_timeout,
                     )
                 except BadRequestError:
+                    logger.warning(
+                        "Compatible streaming include_usage rejected by upstream; token usage may be unavailable. model=%s thread_id=%s",
+                        request_model,
+                        request.thread_id,
+                    )
                     stream = await self._get_client().chat.completions.create(
                         model=request_model,
                         messages=messages,
@@ -944,6 +970,13 @@ class CompatibleLLMProvider(BaseLLMProvider):
                 provider_token_usage,
                 artifact_token_usage,
             )
+            _warn_if_missing_token_usage(
+                provider_name="compatible",
+                model_name=request_model,
+                thread_id=request.thread_id,
+                token_usage=provider_token_usage,
+                operation_name="generate_stream",
+            )
             yield {
                 "event": "artifact",
                 "artifact": artifact.model_dump(mode="json"),
@@ -991,7 +1024,11 @@ class CompatibleLLMProvider(BaseLLMProvider):
                 message="模型提供者执行失败，请稍后重试。",
             )
         finally:
-            yield {"event": "done", "thread_id": request.thread_id}
+            yield {
+                "event": "done",
+                "thread_id": request.thread_id,
+                "token_usage": provider_token_usage,
+            }
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
@@ -1089,12 +1126,20 @@ class CompatibleLLMProvider(BaseLLMProvider):
             response = await self._get_client().chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
+        token_usage = _extract_response_token_usage(
+            response,
+            fallback_model_name=self.artifact_model,
+        )
+        _warn_if_missing_token_usage(
+            provider_name="compatible",
+            model_name=self.artifact_model,
+            thread_id=request.thread_id,
+            token_usage=token_usage,
+            operation_name="artifact_json",
+        )
         return (
             content.strip(),
-            _extract_response_token_usage(
-                response,
-                fallback_model_name=self.artifact_model,
-            ),
+            token_usage,
         )
 
 
@@ -1256,6 +1301,13 @@ class QwenLLMProvider(CompatibleLLMProvider):
                 provider_token_usage,
                 artifact_token_usage,
             )
+            _warn_if_missing_token_usage(
+                provider_name="qwen",
+                model_name=self.model,
+                thread_id=request.thread_id,
+                token_usage=provider_token_usage,
+                operation_name="generate_stream",
+            )
             yield {
                 "event": "artifact",
                 "artifact": artifact.model_dump(mode="json"),
@@ -1394,12 +1446,20 @@ class QwenLLMProvider(CompatibleLLMProvider):
             request_factory=_request_model_response,
         )
         content = response.choices[0].message.content or ""
+        token_usage = _extract_response_token_usage(
+            response,
+            fallback_model_name=self.artifact_model,
+        )
+        _warn_if_missing_token_usage(
+            provider_name="qwen",
+            model_name=self.artifact_model,
+            thread_id=request.thread_id,
+            token_usage=token_usage,
+            operation_name="artifact_json",
+        )
         return (
             content.strip(),
-            _extract_response_token_usage(
-                response,
-                fallback_model_name=self.artifact_model,
-            ),
+            token_usage,
         )
 
     async def _stream_text_with_fallback(
@@ -1427,6 +1487,10 @@ class QwenLLMProvider(CompatibleLLMProvider):
                             timeout=self.request_timeout,
                         )
                     except BadRequestError:
+                        logger.warning(
+                            "Qwen streaming include_usage rejected by upstream; token usage may be unavailable. model=%s",
+                            model_name,
+                        )
                         stream = await self._get_client().chat.completions.create(
                             model=model_name,
                             messages=messages,
@@ -1687,6 +1751,28 @@ def _extract_response_token_usage(
     return build_model_token_usage(
         resolved_model_name,
         extract_total_tokens(raw_usage),
+    )
+
+
+def _warn_if_missing_token_usage(
+    *,
+    provider_name: str,
+    model_name: str | None,
+    thread_id: str,
+    token_usage: object,
+    operation_name: str,
+) -> None:
+    normalized_usage = normalize_model_token_usage(token_usage)
+    if normalized_usage:
+        return
+
+    logger.warning(
+        "Provider usage missing after %s. provider=%s model=%s thread_id=%s token_usage=%s",
+        operation_name,
+        provider_name,
+        model_name or "<unset>",
+        thread_id,
+        token_usage,
     )
 
 

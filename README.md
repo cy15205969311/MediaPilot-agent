@@ -2,62 +2,84 @@
 
 更新时间：`2026-05-03`
 
-`MediaPilot-agent` 是仓库名，代码与运行时中仍保留较多 `OmniMedia Agent` 命名。两者指向同一套系统：一个面向内容运营团队的 AI 内容工作台与管理后台一体化工程。
+`MediaPilot-agent` 是仓库名称，运行时和部分代码标识中仍保留 `OmniMedia Agent` 命名。两者指向同一套系统：一个面向内容运营团队的 AI 内容工作台与后台管理一体化工程。
 
 ## 1. 项目概述
 
-当前仓库由三套核心应用和一套共享后端组成：
+当前仓库由一套共享后端、两套前端应用和一个扩展预留目录组成：
 
 - `app/`：`FastAPI` 后端，负责认证鉴权、会话历史、SSE 流式生成、素材解析、知识库、上传存储、管理端接口与 Token 流水。
-- `frontend/`：C 端主工作台，面向内容创作与运营人员，提供聊天生成、知识库检索、草稿管理、历史会话与个人安全设置。
-- `omnimedia-admin-web/`：B 端管理后台，面向管理员提供用户列表、账号状态控制、Token 额度调整与后台运营视图。
-- `extension/`：浏览器扩展预留目录，用于后续发布链路或站外辅助能力接入。
+- `frontend/`：C 端主工作台，面向内容创作者与运营同学，提供生成、草稿、知识库、历史会话和个人安全设置等功能。
+- `omnimedia-admin-web/`：B 端管理后台，面向管理员提供用户管理、账号冻结、Token 调度、后台概览等能力。
+- `extension/`：浏览器扩展或站外辅助能力接入的预留目录。
 
-系统默认使用：
+系统本地开发默认使用：
 
-- `SQLite` 作为本地开发数据库
+- `SQLite` 作为数据库
 - `uploads/` 作为本地文件存储目录
 - 可选接入阿里云 `OSS`
-- `LangGraph` 编排多模态工作流
-- `OpenAI / DashScope / OpenAI-Compatible` 模型网关
+- `LangGraph` 作为多模态工作流编排层
+- `OpenAI / DashScope / OpenAI-Compatible` 作为模型网关
 
-## 2. 近期重要更新
+## 2. 当前工程基线
 
-以下内容已经体现在当前代码中，开发时请以此为准：
+以下内容已经落在当前代码中，开发与联调时请以此为准。
 
 ### 2.1 账号冻结与全局阻断
 
-- 后端登录与鉴权链路会在用户状态为 `frozen` 时返回 `403 ACCOUNT_FROZEN`。
-- 管理员冻结账号时，会同步撤销该用户的刷新会话并拉黑相关访问令牌。
-- C 端前端全局拦截器会捕获 `ACCOUNT_FROZEN`，自动：
+- 后端登录接口与鉴权依赖会在用户状态为 `frozen` 时返回 `403 ACCOUNT_FROZEN`。
+- 管理员冻结账号时，会同步撤销刷新会话，并对相关访问令牌执行拉黑。
+- C 端前端全局拦截器会在收到 `ACCOUNT_FROZEN` 后自动：
   - 清理本地登录态
-  - 终止正在进行的流式请求
-  - 跳转回登录页
+  - 中断正在进行的流式生成
+  - 回跳登录页
   - 弹出冻结提示
 
 ### 2.2 管理端 Token 资产调度
 
-- 管理员调整 Token 已升级为三种动作：
+- 管理员调整 Token 已升级为三种明确动作：
   - `add`：增加额度
   - `deduct`：扣减额度
   - `set`：直接设定余额
-- 请求体要求携带必填 `remark`，用于审计追踪。
-- 管理后台用户页已升级为“Token 资产调度台”交互，包含操作类型切换、快捷额度包与结果预览。
+- 请求体要求携带 `action + amount + remark`。
+- 管理后台用户详情侧的 Token 调整交互已升级为“Token 资产调度台”，包含：
+  - 操作类型切换
+  - 快捷额度包
+  - 结果预览
+  - 审计备注
 
 ### 2.3 多模型真实计费
 
-- `LangGraph` 状态中新增 `token_usage`，用于在多节点之间累计不同模型的真实消耗。
-- 素材视觉解析节点、主生成节点、结构化产物节点都会分别记录自身模型用量。
-- 最终记账逻辑不再按最终文本长度估算，而是按 `model_name -> token_count` 逐模型写入多条 `TokenTransaction`。
+- `LangGraph` 状态字典中新增 `token_usage`，用于在不同节点之间累计 `{model_name: token_count}`。
+- 视觉解析节点、主生成节点、结构化产物节点会分别记录自己的模型消耗。
+- 最终结算逻辑不再按输出文本长度估算，而是按真实模型消耗逐条写入 `TokenTransaction`。
+- 用户余额扣减总数等于所有模型消耗之和。
 
-### 2.4 SQLite 事务隔离修复
+### 2.4 Provider 用量透传修复
 
-- 为避免 SSE 生成期间长时间占用同一个数据库写事务，最终计费已切换为独立短生命周期会话。
-- 计费阶段会使用单独的 `SessionLocal` 完成：
+为修复 `token_ledger skipped ... reason=no_tracked_usage`，当前 Provider 层已经补齐以下约束：
+
+- 流式兼容接口统一优先尝试 `stream_options={"include_usage": True}`。
+- `OpenAIProvider`、`CompatibleLLMProvider`、`QwenLLMProvider` 都会在 `done` 事件中回传累计 `token_usage`。
+- `CompatibleLLMProvider` 已修复“内部累计了 usage，但 `done` 事件漏传”的问题。
+- 当上游拒绝 `include_usage` 或最终仍然拿不到 usage 时，会输出显式 warning 日志，避免静默失败。
+
+### 2.5 SQLite 短事务隔离
+
+- 为避免在 SSE 生成期间长期持有数据库写锁，最终计费改为独立短生命周期会话。
+- 计费阶段使用单独的 `SessionLocal` 完成：
   - 用户余额扣减
   - 多条 Token 流水写入
   - `commit / rollback / close`
 - 这样可以降低 SQLite 读写互斥对历史会话列表等只读接口的影响。
+
+### 2.6 计费排障日志
+
+当前代码已补齐关键日志，便于定位 usage 是“没提取到”还是“传丢了”：
+
+- Provider 层缺失 usage 时会输出 warning
+- `agent.py` 在最终记账前会打印本次 `token_usage`
+- 若仍然跳过记账，会把实际 `token_usage` 一并写入日志
 
 ## 3. 仓库结构
 
@@ -67,7 +89,7 @@ MediaPilot-agent/
 │  ├─ api/v1/                  # 路由模块
 │  ├─ db/                      # SQLAlchemy 引擎、Session、ORM 模型
 │  ├─ models/                  # Pydantic 请求/响应模型
-│  ├─ services/                # 业务服务、Graph、Provider、存储、鉴权
+│  ├─ services/                # 鉴权、Graph、Provider、存储、解析与业务逻辑
 │  ├─ config.py                # 环境变量加载与运行时配置
 │  └─ main.py                  # 应用入口
 ├─ alembic/                    # 数据库迁移
@@ -76,7 +98,7 @@ MediaPilot-agent/
 │  └─ src/
 ├─ omnimedia-admin-web/        # B 端管理后台
 │  └─ src/
-├─ extension/                  # 浏览器扩展预留目录
+├─ extension/                  # 扩展预留目录
 ├─ tests/                      # 后端测试
 ├─ uploads/                    # 本地上传资源
 ├─ .env.example                # 环境变量模板
@@ -169,7 +191,7 @@ npm run dev
 - `VITE_API_BASE_URL`：指定管理端 API 基础地址
 - `VITE_CLIENT_APP_URL`：指定“返回工作台”按钮地址
 
-### 5.5 首次安装 Playwright 浏览器
+### 5.5 安装 Playwright 浏览器
 
 ```powershell
 cd frontend
@@ -309,19 +331,29 @@ npx playwright install chromium
 
 ### 8.1 分层原则
 
-- `app/api/` 负责参数校验、依赖注入、响应码与错误返回
-- `app/services/` 负责业务逻辑与外部能力编排
-- `app/db/` 负责模型、引擎和 Session 管理
-- `app/models/` 负责请求响应契约
+- `app/api/` 负责请求校验、依赖注入、响应码与错误返回
+- `app/services/` 负责业务逻辑、模型调用、Graph 编排、存储与持久化辅助
+- `app/db/` 负责 ORM 模型、Session 和数据库配置
+- `app/models/` 负责请求/响应契约
 
 ### 8.2 SQLite 使用建议
 
-- 不要在长时间流式输出过程中持有未提交写事务
-- 写密集逻辑尽量使用短事务
-- 遇到异常必须明确 `rollback`
-- 框架托管 Session 与业务自建短会话不要混用职责
+- 不要在长时间流式输出期间持有未提交写事务
+- 写密集逻辑应尽量使用短事务
+- 遇到异常必须显式 `rollback`
+- 框架托管 Session 与业务自建短会话要分清职责
 
-### 8.3 提交规范
+### 8.3 Provider 计费约束
+
+- 流式模型接入时优先开启 `include_usage`
+- Provider 的最终 `done` 事件必须显式携带 `token_usage`
+- LangGraph 节点修改状态时必须通过 `return` 返回更新值，不能仅做原地修改
+- 新增模型接入时要同步验证：
+  - 流式 usage 是否可用
+  - 结构化产物调用是否可取到 usage
+  - 最终 `token_ledger` 是否能落库
+
+### 8.4 提交规范
 
 推荐使用 Conventional Commits：
 
@@ -335,28 +367,37 @@ npx playwright install chromium
 示例：
 
 ```text
-feat: strengthen account freeze control and multimodal token billing
+feat: strengthen provider usage propagation for multimodal billing
 ```
 
 ## 9. 联调与验收建议
 
 ### 9.1 账号冻结链路
 
-1. 使用管理员冻结一个普通用户。
-2. 验证该用户已被强制退出。
+1. 由管理员冻结一个普通用户。
+2. 验证该用户会被强制退出。
 3. 验证其再次访问受保护接口时收到 `403 ACCOUNT_FROZEN`。
 
 ### 9.2 Token 调整链路
 
 1. 在管理后台选择 `add / deduct / set` 任一动作。
 2. 确认请求体包含 `action + amount + remark`。
-3. 验证 `User.token_balance` 与 `TokenTransaction` 流水同步更新。
+3. 验证余额与 Token 流水同步更新。
 
-### 9.3 多模态计费链路
+### 9.3 多模型计费链路
 
-1. 发起“图片/视频解析 + 文案生成”任务。
-2. 检查 `TokenTransaction` 是否出现多条不同模型记录。
-3. 验证余额扣减总数等于各模型消耗之和。
+1. 发起“音频/视频/图片解析 + 文案生成”任务。
+2. 检查日志中是否出现最终 `token_usage`。
+3. 检查 `TokenTransaction` 是否出现多条不同模型记录。
+4. 验证余额扣减总数等于各模型消耗之和。
+
+### 9.4 Usage 排障观察点
+
+若再次出现 `no_tracked_usage`，优先检查日志中是否存在：
+
+- `include_usage rejected`
+- `Provider usage missing after ...`
+- `agent.stream final token_usage ...`
 
 ---
 
