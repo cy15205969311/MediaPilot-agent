@@ -81,6 +81,20 @@
 - `agent.py` 在最终记账前会打印本次 `token_usage`
 - 若仍然跳过记账，会把实际 `token_usage` 一并写入日志
 
+### 2.7 管理端用户中心治理升级
+
+- 管理端用户列表接口现在会返回 `avatar_url`，便于后台直接渲染真实头像。
+- `omnimedia-admin-web` 已新增统一的 `UserAvatar` 组件：
+  - 优先加载后端返回的头像地址
+  - 图片缺失或加载失败时自动回退为珊瑚橙底色的首字母头像
+- 用户列表与详情抽屉已落地企业级 RBAC 约束：
+  - 目标账号为 `super_admin` 时，后端禁止冻结、重置密码和调整 Token
+  - 前端会把该类账号标记为受保护账号，仅保留“查看详情”
+- 管理团队账号在后台按“无限额度”展示：
+  - `super_admin`
+  - `admin`
+- 原先表格行内的悬浮操作菜单已移除，危险操作统一收敛到右侧详情抽屉，彻底规避 `overflow` 导致的菜单裁剪问题。
+
 ## 3. 仓库结构
 
 ```text
@@ -323,7 +337,7 @@ npx playwright install chromium
 
 - `GET /api/v1/admin/users`
 - `POST /api/v1/admin/users/{user_id}/status`
-- `POST /api/v1/admin/users/{user_id}/password-reset`
+- `POST /api/v1/admin/users/{user_id}/reset-password`
 - `POST /api/v1/admin/users/{user_id}/tokens`
 - `GET /api/v1/admin/dashboard`
 
@@ -398,6 +412,18 @@ feat: strengthen provider usage propagation for multimodal billing
 - `include_usage rejected`
 - `Provider usage missing after ...`
 - `agent.stream final token_usage ...`
+
+### 9.5 后台用户中心验收点
+
+1. 在用户列表中确认真实头像可显示，失效地址会自动回退为首字母头像。
+2. 检查 `super_admin` 行：
+   - Token 列显示 `∞ 无限制`
+   - 行内不再出现危险操作入口
+   - 详情抽屉只展示保护说明，不允许冻结、重置密码或调额
+3. 检查普通用户行：
+   - “查看详情”按钮可正常打开右侧抽屉
+   - 抽屉内可执行冻结、重置密码和 Token 调整
+4. 水平滚动表格时，确认操作区不再出现下拉菜单被裁剪的问题。
 
 ---
 

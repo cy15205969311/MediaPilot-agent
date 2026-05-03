@@ -34,6 +34,7 @@ export type AdminUserItem = {
   id: string;
   username: string;
   nickname?: string | null;
+  avatar_url?: string | null;
   role: UserRole;
   status: UserStatus;
   token_balance: number;

@@ -270,6 +270,18 @@ Current diagnostics now include:
 - final `token_usage` logging in `agent.py` before ledger persistence
 - skipped-ledger logging that includes the actual `token_usage` payload
 
+### 7.7 Admin user-center hardening
+
+The admin user center now includes a stricter presentation and control baseline:
+
+- the admin user list API returns `avatar_url` so the console can render real profile images
+- a shared `UserAvatar` component prefers the backend image URL and falls back to a coral-colored initial badge when the image is missing or fails to load
+- `super_admin` targets are protected on both backend and frontend:
+  - backend rejects status changes, password resets, and token adjustments
+  - frontend keeps those rows view-only and surfaces a protection note in the detail drawer
+- `super_admin` and `admin` accounts are displayed as unlimited-balance accounts in the console
+- row-level floating action menus were removed in favor of the existing right-side detail drawer, eliminating clipping issues caused by table `overflow` containers
+
 These logs are the first place to look when `no_tracked_usage` appears.
 
 ## 8. Backend Boundaries
@@ -347,7 +359,7 @@ Avoid pushing database-heavy logic into route files when a dedicated service abs
 
 - `GET /api/v1/admin/users`
 - `POST /api/v1/admin/users/{user_id}/status`
-- `POST /api/v1/admin/users/{user_id}/password-reset`
+- `POST /api/v1/admin/users/{user_id}/reset-password`
 - `POST /api/v1/admin/users/{user_id}/tokens`
 - `GET /api/v1/admin/dashboard`
 
@@ -371,6 +383,11 @@ Recommended manual checks for the latest feature set:
    - `include_usage rejected`
    - `Provider usage missing after ...`
    - `agent.stream final token_usage ...`
+6. Open the admin user center and verify:
+   - valid `avatar_url` values render actual images
+   - broken or empty avatar URLs fall back to initials
+   - `super_admin` rows show unlimited balance and expose no destructive controls
+   - the right-side drawer remains usable without any clipped row-action popup
 
 ## 11. Commit Convention
 

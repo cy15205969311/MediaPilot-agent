@@ -27,11 +27,13 @@ from app.services.auth import (
     mark_user_password_changed,
     revoke_other_refresh_sessions,
 )
+from app.services.persistence import resolve_media_reference
 from app.services.token_usage import LEGACY_MODEL_NAME
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-users"])
 require_admin_role = RequireRole(["super_admin", "admin", "operator"])
 PASSWORD_SPECIAL_CHARS = "!@#$%^&*"
+PROTECTED_SUPER_ADMIN_DETAIL = "禁止修改超级管理员账号。"
 
 
 def _resolve_admin_token_change(
@@ -77,11 +79,24 @@ def _build_admin_user_item(user: User) -> AdminUserListItem:
         id=user.id,
         username=user.username,
         nickname=user.nickname,
+        avatar_url=resolve_media_reference(user.avatar_url),
         role=user.role,
         status=user.status,
         token_balance=user.token_balance,
         created_at=user.created_at,
     )
+
+
+def _get_target_user_or_404(db: Session, user_id: str) -> User:
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在。")
+    return user
+
+
+def _ensure_target_user_is_mutable(user: User) -> None:
+    if user.role == "super_admin":
+        raise HTTPException(status_code=403, detail=PROTECTED_SUPER_ADMIN_DETAIL)
 
 
 def _generate_random_password(length: int = 8) -> str:
@@ -139,9 +154,8 @@ async def update_admin_user_status(
     db: Session = Depends(get_db),
     _: User = Depends(require_admin_role),
 ) -> AdminUserListItem:
-    user = db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
+    user = _get_target_user_or_404(db, user_id)
+    _ensure_target_user_is_mutable(user)
 
     active_sessions = []
     is_freezing = payload.status.value == "frozen"
@@ -179,9 +193,8 @@ async def reset_admin_user_password(
     db: Session = Depends(get_db),
     _: User = Depends(require_admin_role),
 ) -> AdminUserPasswordResetResponse:
-    user = db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
+    user = _get_target_user_or_404(db, user_id)
+    _ensure_target_user_is_mutable(user)
 
     new_password = _generate_random_password(8)
     user.hashed_password = hash_password(new_password)
@@ -220,9 +233,8 @@ async def update_admin_user_tokens(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_role),
 ) -> AdminUserTokenUpdateResponse:
-    user = db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
+    user = _get_target_user_or_404(db, user_id)
+    _ensure_target_user_is_mutable(user)
 
     normalized_remark = payload.remark.strip()
     if not normalized_remark:

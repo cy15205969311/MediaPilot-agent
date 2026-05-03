@@ -121,7 +121,16 @@ function App() {
           >
             <Route path="/" element={<Navigate replace to="/dashboard" />} />
             <Route path="/dashboard" element={<AdminDashboardPage onToast={pushToast} />} />
-            <Route path="/users" element={<AdminUsersPage onToast={pushToast} />} />
+            <Route
+              path="/users"
+              element={
+                currentUser ? (
+                  <AdminUsersPage currentUser={currentUser} onToast={pushToast} />
+                ) : (
+                  <Navigate replace to="/login" />
+                )
+              }
+            />
             <Route
               path="/roles"
               element={

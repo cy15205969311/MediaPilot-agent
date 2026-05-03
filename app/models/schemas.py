@@ -393,6 +393,7 @@ class AdminUserListItem(SchemaModel):
     id: str = Field(..., description="User ID.")
     username: str = Field(..., description="Username.")
     nickname: str | None = Field(default=None, description="Display nickname.")
+    avatar_url: str | None = Field(default=None, description="Resolved profile avatar delivery URL.")
     role: UserRole = Field(..., description="Role assigned to the user.")
     status: UserAccountStatus = Field(..., description="Current account status.")
     token_balance: int = Field(..., description="Current token balance.")
