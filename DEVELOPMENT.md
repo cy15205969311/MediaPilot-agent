@@ -275,6 +275,7 @@ Current diagnostics now include:
 The admin user center now includes a stricter presentation and control baseline:
 
 - the admin user list API returns `avatar_url` so the console can render real profile images
+- the admin search box now uses debounced synchronization and automatically restores the full list when the keyword is cleared
 - a shared `UserAvatar` component prefers the backend image URL and falls back to a coral-colored initial badge when the image is missing or fails to load
 - `super_admin` targets are protected on both backend and frontend:
   - backend rejects status changes, password resets, and token adjustments
@@ -283,6 +284,38 @@ The admin user center now includes a stricter presentation and control baseline:
 - row-level floating action menus were removed in favor of the existing right-side detail drawer, eliminating clipping issues caused by table `overflow` containers
 
 These logs are the first place to look when `no_tracked_usage` appears.
+
+### 7.8 Commercial token lifecycle
+
+The current product baseline now includes a first-pass monetization flow:
+
+- user registration grants `10_000_000` initial tokens
+- the registration transaction writes both the `User` row and a matching `TokenTransaction(transaction_type="grant")` row in the same database transaction
+- the default grant ledger remark records the new-user promotional token bonus at the database layer
+- creator-workspace profile UI exposes an asset panel that shows formatted token balance values for standard users
+- the top-up entry is currently a product placeholder and intentionally surfaces a "payment system coming soon" message
+
+### 7.9 Pre-flight balance enforcement
+
+The media chat entrypoint now performs a balance check before any expensive workflow starts:
+
+- standard users with `token_balance <= 0` receive `402 INSUFFICIENT_TOKENS`
+- the request is rejected before LangGraph execution and before any model provider call
+- the frontend turns this into a commercialized insufficient-balance prompt instead of a silent failure
+
+This is intentionally stricter than final ledger deduction and should remain near the top of the request path.
+
+### 7.10 Privileged account bypass
+
+Management accounts follow a separate billing policy:
+
+- `super_admin` and `admin` bypass the pre-flight balance block
+- the final token-ledger deduction step also skips those roles
+- privileged accounts therefore:
+  - can generate content even when their stored balance is `0`
+  - do not accumulate negative balances
+  - do not create normal consumption ledger rows for internal management usage
+- the creator workspace renders these accounts as an unlimited-credit state and replaces the top-up control with a privilege badge
 
 ## 8. Backend Boundaries
 
@@ -385,9 +418,18 @@ Recommended manual checks for the latest feature set:
    - `agent.stream final token_usage ...`
 6. Open the admin user center and verify:
    - valid `avatar_url` values render actual images
+   - the search box auto-restores the full user list when cleared
    - broken or empty avatar URLs fall back to initials
    - `super_admin` rows show unlimited balance and expose no destructive controls
    - the right-side drawer remains usable without any clipped row-action popup
+7. Register a new standard user and verify:
+   - the API response includes the initial `10_000_000` balance
+   - a matching `grant` ledger row is persisted
+8. Set a standard user balance to `0` and verify `POST /api/v1/media/chat/stream` returns `402 INSUFFICIENT_TOKENS`.
+9. Set an `admin` or `super_admin` balance to `0` and verify:
+   - the same chat request still succeeds
+   - final billing does not reduce the balance below zero
+   - no normal consumption ledger row is added for the privileged run
 
 ## 11. Commit Convention
 

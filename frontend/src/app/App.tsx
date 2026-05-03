@@ -18,6 +18,7 @@ import {
 import {
   ACCOUNT_FROZEN_EVENT_NAME,
   APIError,
+  INSUFFICIENT_TOKENS_MESSAGE,
   clearStoredRefreshToken,
   clearStoredToken,
   clearStoredUser,
@@ -35,6 +36,7 @@ import {
   deleteTemplates,
   deleteThread,
   fetchArtifacts,
+  fetchCurrentUser,
   fetchDashboardSummary,
   fetchKnowledgeScopeSources,
   fetchKnowledgeScopes,
@@ -48,6 +50,7 @@ import {
   getStoredRefreshToken,
   getStoredToken,
   getStoredUser,
+  isInsufficientTokensError,
   isUnauthorizedError,
   login,
   logoutAPI,
@@ -996,6 +999,7 @@ function App() {
   const [isThreadSettingsOpen, setIsThreadSettingsOpen] = useState(false);
   const [isSavingThreadSettings, setIsSavingThreadSettings] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isInsufficientTokensModalOpen, setIsInsufficientTokensModalOpen] = useState(false);
   const [isWorkspaceHeaderExpanded, setIsWorkspaceHeaderExpanded] = useState(true);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
@@ -1355,6 +1359,7 @@ function App() {
     setDraftSourceTopicId(null);
     setActiveTopicId(null);
     setIsProfileModalOpen(false);
+    setIsInsufficientTokensModalOpen(false);
     setIsThreadSettingsOpen(false);
     setRevokingSessionId(null);
     hasInitializedHistoryRef.current = false;
@@ -3348,6 +3353,7 @@ function App() {
     try {
       await createChatStream(requestPayload, handleStreamEvent, controller.signal);
       await loadThreads(nextThreadId, true, activeTopicId);
+      await refreshCurrentUserProfile({ silent: true });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         setStatusText(
@@ -3357,6 +3363,18 @@ function App() {
         );
       } else if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
+      } else if (isInsufficientTokensError(error)) {
+        setStatusText("算力余额不足，请前往个人中心充值后继续创作");
+        removeAssistantPlaceholderIfEmpty();
+        setIsInsufficientTokensModalOpen(true);
+        appendSystemMessage({
+          id: createId("insufficient-tokens"),
+          role: "note",
+          title: "算力余额不足",
+          content: INSUFFICIENT_TOKENS_MESSAGE,
+          createdAt: new Date().toISOString(),
+        });
+        await refreshCurrentUserProfile({ silent: true });
       } else {
         const errorMessage =
           error instanceof APIError
@@ -3366,6 +3384,7 @@ function App() {
               : "发生未知错误，请稍后重试。";
 
         setStatusText("请求失败，请检查后端服务");
+        removeAssistantPlaceholderIfEmpty();
         appendSystemMessage({
           id: createId("error"),
           role: "error",
@@ -3398,6 +3417,38 @@ function App() {
       throw error instanceof Error
         ? error
         : new Error("头像上传失败，请稍后重试。");
+    }
+  };
+
+  const refreshCurrentUserProfile = async (options?: { silent?: boolean }) => {
+    try {
+      const nextUser = await fetchCurrentUser();
+      setCurrentUser(nextUser);
+      return nextUser;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return null;
+      }
+
+      if (!options?.silent) {
+        const errorMessage =
+          error instanceof APIError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : "同步账户资料失败，请稍后重试。";
+
+        setStatusText("账户资料同步失败");
+        appendSystemMessage({
+          id: createId("profile-refresh-error"),
+          role: "error",
+          title: "账户资料同步失败",
+          content: errorMessage,
+        });
+      }
+
+      return null;
     }
   };
 
@@ -3434,7 +3485,10 @@ function App() {
 
   const handleOpenProfile = async () => {
     setIsProfileModalOpen(true);
-    await loadAuthSessions();
+    await Promise.allSettled([
+      refreshCurrentUserProfile({ silent: true }),
+      loadAuthSessions(),
+    ]);
   };
 
   const handleRevokeSession = async (sessionId: string) => {
@@ -3501,6 +3555,17 @@ function App() {
     } finally {
       setIsUpdatingProfile(false);
     }
+  };
+
+  const handleTopUpPlaceholder = () => {
+    setStatusText("支付系统正在接入中，敬请期待");
+    appendSystemMessage({
+      id: createId("top-up-placeholder"),
+      role: "note",
+      title: "充值能力即将开放",
+      content: "支付系统正在接入中，敬请期待。后续将支持通过个人中心直接获取更多创作算力。",
+      createdAt: new Date().toISOString(),
+    });
   };
 
   const handlePasswordReset = async ({
@@ -3678,7 +3743,11 @@ function App() {
       setAuthConfirmPassword("");
       setAuthResetToken("");
       setActiveView("chat");
-      setStatusText("登录成功，正在加载工作台");
+      setStatusText(
+        authMode === "register"
+          ? "注册成功，千万级初始算力已到账"
+          : "登录成功，正在加载工作台",
+      );
       hasInitializedHistoryRef.current = false;
       resetWorkspace();
     } catch (error) {
@@ -4094,6 +4163,57 @@ function App() {
         open={isThreadSettingsOpen}
       />
 
+      {isInsufficientTokensModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4">
+          <div className="w-full max-w-lg rounded-[28px] border border-border bg-card p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-[0.24em] text-brand">
+                  Monetization Guard
+                </div>
+                <div className="mt-3 text-2xl font-semibold text-foreground">
+                  算力余额不足
+                </div>
+                <div className="mt-2 text-sm leading-6 text-muted-foreground">
+                  {INSUFFICIENT_TOKENS_MESSAGE}
+                </div>
+              </div>
+              <button
+                className="rounded-xl p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                onClick={() => setIsInsufficientTokensModalOpen(false)}
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-brand/10 bg-brand-soft px-4 py-4 text-sm leading-6 text-foreground">
+              当前体系已启用事前风控，余额小于等于 0 时会在模型调用前直接阻断，避免继续透支创作算力。
+            </div>
+
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+              <button
+                className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-medium text-card-foreground transition hover:bg-muted"
+                onClick={() => setIsInsufficientTokensModalOpen(false)}
+                type="button"
+              >
+                稍后处理
+              </button>
+              <button
+                className="inline-flex items-center justify-center rounded-2xl bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90"
+                onClick={() => {
+                  setIsInsufficientTokensModalOpen(false);
+                  void handleOpenProfile();
+                }}
+                type="button"
+              >
+                前往个人中心
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <UserProfileModal
         isLoadingSessions={isLoadingSessions}
         isResettingPassword={isResettingPassword}
@@ -4101,6 +4221,7 @@ function App() {
         onClose={() => setIsProfileModalOpen(false)}
         onRefreshSessions={() => void loadAuthSessions()}
         onRevokeSession={(sessionId) => void handleRevokeSession(sessionId)}
+        onRequestTopUp={handleTopUpPlaceholder}
         onResetPassword={handlePasswordReset}
         onSave={handleProfileSave}
         onUploadAvatar={handleAvatarUpload}

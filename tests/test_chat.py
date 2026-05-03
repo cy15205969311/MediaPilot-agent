@@ -16,7 +16,14 @@ import app.services.knowledge_base as knowledge_base_module
 import app.services.persistence as persistence_module
 import app.services.providers as providers_module
 from app.db.database import Base, get_db
-from app.db.models import AccessTokenBlacklist, ArtifactRecord, Message, Thread, User
+from app.db.models import (
+    AccessTokenBlacklist,
+    ArtifactRecord,
+    Message,
+    Thread,
+    TokenTransaction,
+    User,
+)
 from app.main import app
 from app.models.schemas import (
     CommentReplyArtifactPayload,
@@ -254,7 +261,21 @@ def test_auth_register_and_login(client: TestClient):
     assert register_payload["user"]["username"] == "alice"
     assert register_payload["user"]["nickname"] is None
     assert register_payload["user"]["bio"] is None
+    assert register_payload["user"]["token_balance"] == 10_000_000
     assert register_payload["user"]["created_at"].endswith("Z")
+
+    with client.app.state.testing_session_local() as db:
+        user = db.scalar(select(User).where(User.username == "alice"))
+        assert user is not None
+        assert user.token_balance == 10_000_000
+
+        transaction = db.scalar(
+            select(TokenTransaction).where(TokenTransaction.user_id == user.id)
+        )
+        assert transaction is not None
+        assert transaction.amount == 10_000_000
+        assert transaction.transaction_type == "grant"
+        assert transaction.remark == "新用户注册千万算力福利"
 
     login_response = client.post(
         "/api/v1/auth/login",
@@ -752,6 +773,71 @@ def test_protected_chat_requires_token(client: TestClient):
 
     response = client.post("/api/v1/media/chat/stream", json=payload)
     assert response.status_code == 401
+
+
+def test_media_chat_stream_rejects_when_token_balance_is_exhausted(client: TestClient):
+    headers = register_user(client, username="alice-no-tokens")
+
+    with client.app.state.testing_session_local() as db:
+        user = db.scalar(select(User).where(User.username == "alice-no-tokens"))
+        assert user is not None
+        user.token_balance = 0
+        db.commit()
+
+    payload = {
+        "thread_id": "thread-no-balance",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "余额不足时应在调用模型前阻断。",
+        "materials": [],
+    }
+
+    response = client.post(
+        "/api/v1/media/chat/stream",
+        json=payload,
+        headers=headers,
+    )
+
+    assert response.status_code == 402
+    assert response.json()["detail"] == "INSUFFICIENT_TOKENS"
+
+
+def test_media_chat_stream_allows_admin_with_zero_balance_and_skips_billing(
+    client: TestClient,
+):
+    register_payload = register_auth_response(client, username="alice-admin-bypass")
+    headers = {"Authorization": f"Bearer {register_payload['access_token']}"}
+
+    with client.app.state.testing_session_local() as db:
+        user = db.scalar(select(User).where(User.username == "alice-admin-bypass"))
+        assert user is not None
+        user.role = "admin"
+        user.token_balance = 0
+        db.commit()
+
+    payload = {
+        "thread_id": "thread-admin-bypass",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "管理员应享有无限算力，不受余额限制。",
+        "materials": [],
+    }
+
+    events = collect_stream_events(client, payload, headers=headers)
+    assert any(event["event"] == "done" for event in events)
+
+    with client.app.state.testing_session_local() as db:
+        user = db.scalar(select(User).where(User.username == "alice-admin-bypass"))
+        assert user is not None
+        assert user.token_balance == 0
+
+        transactions = list(
+            db.scalars(
+                select(TokenTransaction).where(TokenTransaction.user_id == user.id)
+            ).all()
+        )
+        assert len(transactions) == 1
+        assert transactions[0].transaction_type == "grant"
 
 
 def test_media_chat_stream_logs_request_entry(

@@ -21,6 +21,8 @@ from app.services.persistence import (
 
 router = APIRouter(prefix="/api/v1/media", tags=["media-chat"])
 logger = logging.getLogger(__name__)
+INSUFFICIENT_TOKENS_DETAIL = "INSUFFICIENT_TOKENS"
+TOKEN_BYPASS_ROLES = {"super_admin", "admin"}
 
 
 def persist_chat_request(
@@ -121,6 +123,9 @@ async def stream_media_chat(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
+    if current_user.role not in TOKEN_BYPASS_ROLES and int(current_user.token_balance or 0) <= 0:
+        raise HTTPException(status_code=402, detail=INSUFFICIENT_TOKENS_DETAIL)
+
     logger.info(
         "chat.stream route entered thread_id=%s task_type=%s user_id=%s",
         request.thread_id,

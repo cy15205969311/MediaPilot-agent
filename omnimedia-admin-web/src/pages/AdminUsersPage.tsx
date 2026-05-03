@@ -104,6 +104,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<UserFilterTab>("all");
   const [searchInput, setSearchInput] = useState("");
+  const [debouncedSearchInput, setDebouncedSearchInput] = useState("");
   const [searchKeyword, setSearchKeyword] = useState("");
   const [skip, setSkip] = useState(0);
   const [tokenModalUser, setTokenModalUser] = useState<AdminUserItem | null>(null);
@@ -202,6 +203,24 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   }, [skip, searchKeyword]);
 
   useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedSearchInput(searchInput);
+    }, 280);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [searchInput]);
+
+  useEffect(() => {
+    const normalizedKeyword = debouncedSearchInput.trim();
+    if (normalizedKeyword === searchKeyword) {
+      return;
+    }
+
+    setSkip(0);
+    setSearchKeyword(normalizedKeyword);
+  }, [debouncedSearchInput, searchKeyword]);
+
+  useEffect(() => {
     if (!items.length) {
       setSelectedUserId(null);
       setDetailOpen(false);
@@ -255,6 +274,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   };
 
   const handleSearchSubmit = () => {
+    setDebouncedSearchInput(searchInput);
     setSkip(0);
     setSearchKeyword(searchInput.trim());
   };

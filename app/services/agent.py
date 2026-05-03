@@ -28,6 +28,7 @@ from app.services.token_usage import (
 )
 
 logger = logging.getLogger(__name__)
+TOKEN_BILLING_EXEMPT_ROLES = {"super_admin", "admin"}
 
 
 class MediaAgentWorkflow:
@@ -329,6 +330,16 @@ def _record_generated_token_consumption(
         user = db.get(User, user_id)
         if user is None:
             raise ValueError(f"User not found for token ledger: {user_id}")
+
+        if user.role in TOKEN_BILLING_EXEMPT_ROLES:
+            logger.info(
+                "agent.stream token_ledger skipped user_id=%s task_type=%s reason=privileged_bypass role=%s token_usage=%s",
+                user_id,
+                task_type,
+                user.role,
+                normalized_token_usage,
+            )
+            return
 
         user.token_balance = int(user.token_balance or 0) - total_tokens
         for model_name, model_tokens in normalized_token_usage.items():

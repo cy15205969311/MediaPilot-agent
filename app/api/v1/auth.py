@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.db.models import User
+from app.db.models import TokenTransaction, User
 from app.models.schemas import (
     AuthSessionItem,
     AuthSessionsResponse,
@@ -59,6 +59,8 @@ from app.services.persistence import normalize_media_reference, resolve_media_re
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
+REGISTER_GRANT_TOKENS = 10_000_000
+REGISTER_GRANT_REMARK = "新用户注册千万算力福利"
 
 
 def _build_auth_response(
@@ -128,11 +130,20 @@ async def register(
     user = User(
         username=username,
         hashed_password=hash_password(password),
+        token_balance=REGISTER_GRANT_TOKENS,
     )
     db.add(user)
 
     try:
         db.flush()
+        db.add(
+            TokenTransaction(
+                user_id=user.id,
+                amount=REGISTER_GRANT_TOKENS,
+                transaction_type="grant",
+                remark=REGISTER_GRANT_REMARK,
+            )
+        )
         access_token, refresh_token = issue_token_pair(
             db,
             user_id=user.id,

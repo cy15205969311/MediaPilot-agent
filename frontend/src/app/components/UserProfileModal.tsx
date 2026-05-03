@@ -36,6 +36,7 @@ type UserProfileModalProps = {
   onUploadAvatar: (file: File) => Promise<string>;
   onRefreshSessions: () => Promise<void> | void;
   onRevokeSession: (sessionId: string) => Promise<void> | void;
+  onRequestTopUp: () => void;
   onResetPassword: (
     payload: ResetPasswordPayload,
   ) => Promise<ResetPasswordResponse> | ResetPasswordResponse;
@@ -221,6 +222,14 @@ function deduplicateSessions(sessions: AuthSessionItem[]): DeduplicatedSession[]
   });
 }
 
+function formatTokenBalance(value: number | null | undefined): string {
+  return new Intl.NumberFormat("zh-CN").format(Math.max(0, Number(value ?? 0)));
+}
+
+function isPrivilegedAccount(role: AuthenticatedUser["role"] | undefined): boolean {
+  return role === "super_admin" || role === "admin";
+}
+
 export function UserProfileModal({
   open,
   user,
@@ -234,6 +243,7 @@ export function UserProfileModal({
   onUploadAvatar,
   onRefreshSessions,
   onRevokeSession,
+  onRequestTopUp,
   onResetPassword,
 }: UserProfileModalProps) {
   const [activeTab, setActiveTab] = useState<ModalTab>("profile");
@@ -243,6 +253,7 @@ export function UserProfileModal({
   const [uploadError, setUploadError] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState("");
+  const [assetNotice, setAssetNotice] = useState("");
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -261,6 +272,7 @@ export function UserProfileModal({
     setUploadError("");
     setPasswordError("");
     setPasswordSuccess("");
+    setAssetNotice("");
     setOldPassword("");
     setNewPassword("");
     setConfirmPassword("");
@@ -342,6 +354,10 @@ export function UserProfileModal({
   const disableProfileActions = isSubmitting || isUploadingAvatar;
   const disableSecurityAction = isResettingPassword;
   const currentInitial = (nickname || user?.username || "U").slice(0, 1).toUpperCase();
+  const privilegedAccount = isPrivilegedAccount(user?.role);
+  const tokenBalanceLabel = privilegedAccount
+    ? "∞ 无限算力"
+    : `${formatTokenBalance(user?.token_balance)} Tokens`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4">
@@ -410,6 +426,57 @@ export function UserProfileModal({
 
         {activeTab === "profile" ? (
           <div className="space-y-5">
+            <div className="rounded-[24px] border border-brand/15 bg-[linear-gradient(135deg,rgba(255,247,237,0.96),rgba(255,255,255,1),rgba(255,241,242,0.96))] p-5 shadow-sm">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.24em] text-brand">
+                    我的资产
+                  </div>
+                  <div
+                    className={`mt-3 text-3xl font-semibold ${
+                      privilegedAccount
+                        ? "bg-[linear-gradient(135deg,#f97316,#ef4444,#111827)] bg-clip-text text-transparent"
+                        : "text-foreground"
+                    }`}
+                  >
+                    {tokenBalanceLabel}
+                  </div>
+                  <div className="mt-2 text-sm leading-6 text-muted-foreground">
+                    {privilegedAccount
+                      ? "尊贵的管理团队账号，享有系统无限算力与最高权限。"
+                      : "新账号默认附赠千万级创作算力，可用于内容生成、解析与多模态工作流。"}
+                  </div>
+                </div>
+
+                {privilegedAccount ? (
+                  <div
+                    className="inline-flex items-center justify-center rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-700"
+                    data-testid="profile-privileged-tag"
+                  >
+                    特权账号
+                  </div>
+                ) : (
+                  <button
+                    className="inline-flex items-center justify-center rounded-2xl border border-brand/20 bg-card px-4 py-3 text-sm font-medium text-brand transition hover:border-brand/40 hover:bg-brand-soft"
+                    onClick={() => {
+                      setAssetNotice("支付系统正在接入中，敬请期待。");
+                      onRequestTopUp();
+                    }}
+                    type="button"
+                    data-testid="profile-top-up-button"
+                  >
+                    获取算力 / 去充值
+                  </button>
+                )}
+              </div>
+
+              {assetNotice && !privilegedAccount ? (
+                <div className="mt-4 rounded-2xl border border-brand/10 bg-white/85 px-4 py-3 text-sm text-muted-foreground">
+                  {assetNotice}
+                </div>
+              ) : null}
+            </div>
+
             <div className="rounded-[24px] border border-border bg-surface-muted p-4">
               <div className="flex items-center gap-4">
                 <div
