@@ -184,6 +184,22 @@ def _build_http_timeout(seconds: float) -> httpx.Timeout:
     return httpx.Timeout(seconds, connect=connect_timeout)
 
 
+def _apply_generation_token_limit(
+    request_kwargs: dict[str, object],
+    *,
+    max_generation_tokens: int | None,
+) -> dict[str, object]:
+    if max_generation_tokens is None:
+        return request_kwargs
+
+    normalized_limit = int(max_generation_tokens)
+    if normalized_limit <= 0:
+        return request_kwargs
+
+    request_kwargs["max_tokens"] = normalized_limit
+    return request_kwargs
+
+
 def _is_transient_stream_exception(exc: Exception) -> bool:
     return isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadTimeout))
 
@@ -602,15 +618,21 @@ class OpenAIProvider(BaseLLMProvider):
                 user_id=user_id,
                 active_model=self.model,
             )
+            stream_request_kwargs = _apply_generation_token_limit(
+                {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "stream": True,
+                    "timeout": self.request_timeout,
+                },
+                max_generation_tokens=request.max_generation_tokens,
+            )
             try:
                 try:
                     stream = await self._get_client().chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        temperature=0.7,
-                        stream=True,
+                        **stream_request_kwargs,
                         stream_options={"include_usage": True},
-                        timeout=self.request_timeout,
                     )
                 except BadRequestError:
                     logger.warning(
@@ -618,13 +640,7 @@ class OpenAIProvider(BaseLLMProvider):
                         self.model,
                         request.thread_id,
                     )
-                    stream = await self._get_client().chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        temperature=0.7,
-                        stream=True,
-                        timeout=self.request_timeout,
-                    )
+                    stream = await self._get_client().chat.completions.create(**stream_request_kwargs)
 
                 async for chunk in stream:
                     provider_token_usage = merge_model_token_usage(
@@ -901,15 +917,21 @@ class CompatibleLLMProvider(BaseLLMProvider):
                 user_id=user_id,
                 active_model=request_model,
             )
+            stream_request_kwargs = _apply_generation_token_limit(
+                {
+                    "model": request_model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "stream": True,
+                    "timeout": self.request_timeout,
+                },
+                max_generation_tokens=request.max_generation_tokens,
+            )
             try:
                 try:
                     stream = await self._get_client().chat.completions.create(
-                        model=request_model,
-                        messages=messages,
-                        temperature=0.7,
-                        stream=True,
+                        **stream_request_kwargs,
                         stream_options={"include_usage": True},
-                        timeout=self.request_timeout,
                     )
                 except BadRequestError:
                     logger.warning(
@@ -917,13 +939,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
                         request_model,
                         request.thread_id,
                     )
-                    stream = await self._get_client().chat.completions.create(
-                        model=request_model,
-                        messages=messages,
-                        temperature=0.7,
-                        stream=True,
-                        timeout=self.request_timeout,
-                    )
+                    stream = await self._get_client().chat.completions.create(**stream_request_kwargs)
 
                 async for chunk in stream:
                     provider_token_usage = merge_model_token_usage(
@@ -1270,6 +1286,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
             async for delta in self._stream_text_with_fallback(
                 messages=messages,
                 temperature=0.7,
+                max_generation_tokens=request.max_generation_tokens,
                 usage_recorder=stream_usage_recorder,
             ):
                 streamed_text += delta
@@ -1467,6 +1484,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
         *,
         messages: list[ConversationMessage],
         temperature: float,
+        max_generation_tokens: int | None = None,
         usage_recorder: dict[str, object] | None = None,
     ) -> AsyncGenerator[str, None]:
         attempted_models: list[str] = []
@@ -1477,27 +1495,27 @@ class QwenLLMProvider(CompatibleLLMProvider):
 
             for attempt in range(1, self.retry_attempts + 1):
                 try:
+                    stream_request_kwargs = _apply_generation_token_limit(
+                        {
+                            "model": model_name,
+                            "messages": messages,
+                            "temperature": temperature,
+                            "stream": True,
+                            "timeout": self.request_timeout,
+                        },
+                        max_generation_tokens=max_generation_tokens,
+                    )
                     try:
                         stream = await self._get_client().chat.completions.create(
-                            model=model_name,
-                            messages=messages,
-                            temperature=temperature,
-                            stream=True,
+                            **stream_request_kwargs,
                             stream_options={"include_usage": True},
-                            timeout=self.request_timeout,
                         )
                     except BadRequestError:
                         logger.warning(
                             "Qwen streaming include_usage rejected by upstream; token usage may be unavailable. model=%s",
                             model_name,
                         )
-                        stream = await self._get_client().chat.completions.create(
-                            model=model_name,
-                            messages=messages,
-                            temperature=temperature,
-                            stream=True,
-                            timeout=self.request_timeout,
-                        )
+                        stream = await self._get_client().chat.completions.create(**stream_request_kwargs)
 
                     async for chunk in stream:
                         if usage_recorder is not None:

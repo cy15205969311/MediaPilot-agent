@@ -33,6 +33,7 @@ import {
   formatDate,
   formatDateTime,
   formatNumber,
+  formatRelativeTime,
   formatRoleLabel,
   formatStatusLabel,
 } from "../utils/format";
@@ -92,6 +93,109 @@ function getActionTitle(action: AdminTokenAdjustAction): string {
     return "扣减额度";
   }
   return "设定余额";
+}
+
+export function formatSessionDeviceInfo(value?: string | null): string {
+  return normalizeLatestSessionDeviceInfo(value);
+
+  const normalized = (value || "").trim();
+  if (!normalized) {
+    return "鏈煡璁惧";
+  }
+
+  return normalized
+    .replace(/\s+路\s+/g, " · ")
+    .replace(/\s+on\s+/gi, " · ")
+    .replace(/\s+[\\/|]+\s+/g, " · ");
+}
+
+export function formatLatestSessionMeta(user: Pick<AdminUserItem, "latest_session">): string {
+  return buildLatestSessionMeta(user);
+
+  const latestSession = user.latest_session ?? {
+    ip_address: "",
+    last_seen_at: null,
+    created_at: null,
+  };
+  if (!user.latest_session) {
+    return "鏆傛棤娲诲姩璁板綍";
+  }
+
+  const parts: string[] = [];
+  if (latestSession.ip_address?.trim()) {
+    parts.push(`IP ${latestSession.ip_address?.trim() || ""}`);
+  }
+
+  const relativeTime = formatRelativeTime(
+    latestSession.last_seen_at ?? latestSession.created_at,
+  );
+  if (relativeTime !== "鏆傛棤") {
+    parts.push(relativeTime);
+  }
+
+  return parts.join(" · ") || "鏆傛棤娲诲姩璁板綍";
+}
+
+const DEVICE_INFO_SEPARATOR_SAFE = ` ${String.fromCharCode(183)} `;
+const KNOWN_DEVICE_BROWSERS_SAFE = [
+  "Edge",
+  "Chrome",
+  "Firefox",
+  "Safari",
+  "TestClient",
+  "curl",
+];
+const KNOWN_DEVICE_SYSTEMS_SAFE = [
+  "Windows",
+  "macOS",
+  "iOS",
+  "iPadOS",
+  "Android",
+  "Linux",
+];
+
+function normalizeLatestSessionDeviceInfo(value?: string | null): string {
+  const normalized = (value || "").trim();
+  if (!normalized) {
+    return "Unknown device";
+  }
+
+  const lowerValue = normalized.toLowerCase();
+  const browser = KNOWN_DEVICE_BROWSERS_SAFE.find((item) =>
+    lowerValue.includes(item.toLowerCase()),
+  );
+  const system = KNOWN_DEVICE_SYSTEMS_SAFE.find((item) =>
+    lowerValue.includes(item.toLowerCase()),
+  );
+
+  if (browser && system) {
+    return `${browser}${DEVICE_INFO_SEPARATOR_SAFE}${system}`;
+  }
+
+  return normalized
+    .replace(/\s+on\s+/gi, DEVICE_INFO_SEPARATOR_SAFE)
+    .replace(/\s+[\\/|]+\s+/g, DEVICE_INFO_SEPARATOR_SAFE);
+}
+
+function buildLatestSessionMeta(user: Pick<AdminUserItem, "latest_session">): string {
+  const latestSession = user.latest_session;
+  if (!latestSession) {
+    return "--";
+  }
+
+  const parts: string[] = [];
+  if (latestSession.ip_address?.trim()) {
+    parts.push(`IP ${latestSession.ip_address.trim()}`);
+  }
+
+  const relativeTime = formatRelativeTime(
+    latestSession.last_seen_at ?? latestSession.created_at,
+  );
+  if (relativeTime !== "--") {
+    parts.push(relativeTime);
+  }
+
+  return parts.join(DEVICE_INFO_SEPARATOR_SAFE) || "--";
 }
 
 export function AdminUsersPage(props: AdminUsersPageProps) {
@@ -624,7 +728,20 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
                         <td className="px-5 py-4 text-sm text-slate-600">
                           {formatDate(user.created_at)}
                         </td>
-                        <td className="px-5 py-4 text-sm text-slate-500">登录设备能力接入中</td>
+                        <td className="px-5 py-4">
+                          {user.latest_session ? (
+                            <div className="space-y-1">
+                              <div className="text-sm font-medium text-slate-700">
+                                {normalizeLatestSessionDeviceInfo(user.latest_session.device_info)}
+                              </div>
+                              <div className="text-xs text-slate-400">
+                                {buildLatestSessionMeta(user)}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-sm text-slate-400">暂无活动记录</span>
+                          )}
+                        </td>
                         <td className="px-5 py-4">
                           {unlimitedTokenUser ? (
                             <span className="inline-flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1 text-sm font-semibold text-white">
@@ -793,7 +910,18 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
                   账号身份：
                   {isAdminRole(selectedUser.role) ? "后台管理团队" : "普通业务用户"}
                 </div>
-                <div>最近活跃：登录设备明细功能接入中</div>
+                <div>
+                  最近活跃：
+                  {selectedUser.latest_session ? (
+                    <span>
+                      {normalizeLatestSessionDeviceInfo(selectedUser.latest_session.device_info)}
+                      {" · "}
+                      {buildLatestSessionMeta(selectedUser)}
+                    </span>
+                  ) : (
+                    "暂无活动记录"
+                  )}
+                </div>
               </div>
             </div>
 

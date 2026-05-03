@@ -4,6 +4,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -63,8 +64,13 @@ class MediaAgentWorkflow:
         thread: Thread | None = None,
         user_id: str | None = None,
     ) -> AsyncGenerator[dict[str, object], None]:
+        budgeted_request = _apply_runtime_generation_budget(
+            request=request,
+            db=db,
+            user_id=user_id,
+        )
         async for event in effective_provider.generate_stream(
-            request,
+            budgeted_request,
             db=db,
             thread=thread,
             user_id=user_id,
@@ -341,15 +347,20 @@ def _record_generated_token_consumption(
             )
             return
 
-        user.token_balance = int(user.token_balance or 0) - total_tokens
-        for model_name, model_tokens in normalized_token_usage.items():
-            normalized_model_tokens = int(model_tokens)
-            if normalized_model_tokens <= 0:
-                continue
+        stored_balance = int(user.token_balance or 0)
+        actual_deduction = min(total_tokens, max(0, stored_balance))
+        user.token_balance = max(0, stored_balance - actual_deduction)
+
+        billed_token_usage = _allocate_billed_token_usage(
+            normalized_token_usage=normalized_token_usage,
+            billable_total=actual_deduction,
+            total_tokens=total_tokens,
+        )
+        for model_name, model_tokens in billed_token_usage.items():
             db.add(
                 TokenTransaction(
                     user_id=user_id,
-                    amount=-normalized_model_tokens,
+                    amount=-int(model_tokens),
                     transaction_type="consume",
                     model_name=normalize_model_name(model_name) or LEGACY_MODEL_NAME,
                     remark=f"media_chat:{task_type}",
@@ -363,12 +374,120 @@ def _record_generated_token_consumption(
         db.close()
 
     logger.info(
-        "agent.stream token_ledger recorded user_id=%s task_type=%s total=%s models=%s",
+        "agent.stream token_ledger recorded user_id=%s task_type=%s requested_total=%s billed_total=%s models=%s",
         user_id,
         task_type,
         total_tokens,
-        normalized_token_usage,
+        actual_deduction,
+        billed_token_usage,
     )
+
+
+def _apply_runtime_generation_budget(
+    *,
+    request: MediaChatRequest,
+    db: Session | None,
+    user_id: str | None,
+) -> MediaChatRequest:
+    if not user_id:
+        return request
+
+    owns_session = db is None
+    active_db = db or SessionLocal()
+    try:
+        row = active_db.execute(
+            select(User.role, User.token_balance).where(User.id == user_id),
+        ).one_or_none()
+    except Exception:
+        logger.exception(
+            "agent.stream budget lookup failed user_id=%s thread_id=%s",
+            user_id,
+            request.thread_id,
+        )
+        return request
+    finally:
+        if owns_session:
+            active_db.close()
+
+    if row is None:
+        logger.warning(
+            "agent.stream budget lookup missing user_id=%s thread_id=%s",
+            user_id,
+            request.thread_id,
+        )
+        return request
+
+    role, token_balance = row
+    if role in TOKEN_BILLING_EXEMPT_ROLES:
+        return request
+
+    available_tokens = max(0, int(token_balance or 0))
+    if available_tokens <= 0:
+        return request
+
+    existing_budget = request.max_generation_tokens
+    effective_budget = min(available_tokens, int(existing_budget)) if existing_budget else available_tokens
+    if request.max_generation_tokens == effective_budget:
+        return request
+
+    logger.info(
+        "agent.stream applying generation budget thread_id=%s user_id=%s max_generation_tokens=%s",
+        request.thread_id,
+        user_id,
+        effective_budget,
+    )
+    return request.model_copy(update={"max_generation_tokens": effective_budget})
+
+
+def _allocate_billed_token_usage(
+    *,
+    normalized_token_usage: dict[str, int],
+    billable_total: int,
+    total_tokens: int,
+) -> dict[str, int]:
+    capped_billable_total = max(0, min(int(billable_total), int(total_tokens)))
+    if capped_billable_total <= 0 or total_tokens <= 0:
+        return {}
+
+    weighted_items: list[dict[str, int | str]] = []
+    allocated_total = 0
+    for index, (model_name, model_tokens) in enumerate(normalized_token_usage.items()):
+        normalized_model_tokens = max(0, int(model_tokens))
+        if normalized_model_tokens <= 0:
+            continue
+        scaled = capped_billable_total * normalized_model_tokens
+        base_amount = scaled // total_tokens
+        remainder_weight = scaled % total_tokens
+        weighted_items.append(
+            {
+                "index": index,
+                "model_name": normalize_model_name(model_name) or LEGACY_MODEL_NAME,
+                "amount": base_amount,
+                "remainder_weight": remainder_weight,
+            }
+        )
+        allocated_total += base_amount
+
+    remaining = capped_billable_total - allocated_total
+    if remaining > 0 and weighted_items:
+        for item in sorted(
+            weighted_items,
+            key=lambda current: (
+                -int(current["remainder_weight"]),
+                int(current["index"]),
+            ),
+        )[:remaining]:
+            item["amount"] = int(item["amount"]) + 1
+
+    billed_usage: dict[str, int] = {}
+    for item in weighted_items:
+        amount = int(item["amount"])
+        if amount <= 0:
+            continue
+        model_name = str(item["model_name"])
+        billed_usage[model_name] = billed_usage.get(model_name, 0) + amount
+
+    return billed_usage
 
 
 media_agent_workflow = MediaAgentWorkflow(provider=create_provider_from_env())

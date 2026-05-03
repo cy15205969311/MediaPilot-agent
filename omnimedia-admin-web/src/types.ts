@@ -39,6 +39,7 @@ export type AdminUserItem = {
   status: UserStatus;
   token_balance: number;
   created_at: string;
+  latest_session?: AdminLatestSessionItem | null;
 };
 
 export type AdminUsersApiResponse = {
@@ -46,6 +47,13 @@ export type AdminUsersApiResponse = {
   total: number;
   skip: number;
   limit: number;
+};
+
+export type AdminLatestSessionItem = {
+  device_info?: string | null;
+  ip_address?: string | null;
+  last_seen_at?: string | null;
+  created_at?: string | null;
 };
 
 export type AdminDashboardTrendItem = {

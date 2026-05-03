@@ -15,6 +15,9 @@ const dateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
 });
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
+const relativeTimeFormatter = new Intl.RelativeTimeFormat("zh-CN", {
+  numeric: "auto",
+});
 
 export function formatNumber(value: number): string {
   return numberFormatter.format(value);
@@ -44,6 +47,39 @@ export function formatDateTime(value?: string | null): string {
   }
 
   return dateTimeFormatter.format(date);
+}
+
+export function formatRelativeTime(value?: string | null): string {
+  if (!value) {
+    return "--";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+
+  const diffSeconds = Math.round((date.getTime() - Date.now()) / 1000);
+  if (Math.abs(diffSeconds) < 60) {
+    return relativeTimeFormatter.format(0, "second");
+  }
+
+  const diffMinutes = Math.round(diffSeconds / 60);
+  if (Math.abs(diffMinutes) < 60) {
+    return relativeTimeFormatter.format(diffMinutes, "minute");
+  }
+
+  const diffHours = Math.round(diffMinutes / 60);
+  if (Math.abs(diffHours) < 24) {
+    return relativeTimeFormatter.format(diffHours, "hour");
+  }
+
+  const diffDays = Math.round(diffHours / 24);
+  if (Math.abs(diffDays) < 30) {
+    return relativeTimeFormatter.format(diffDays, "day");
+  }
+
+  return formatDateTime(value);
 }
 
 export function formatRoleLabel(role: UserRole): string {

@@ -8,9 +8,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.db.models import TokenTransaction, User
+from app.db.models import RefreshSession, TokenTransaction, User
 from app.models.schemas import (
     AdminTokenAdjustAction,
+    AdminUserLatestSessionItem,
     AdminUserListItem,
     AdminUserListResponse,
     AdminUserPasswordResetResponse,
@@ -74,7 +75,55 @@ def _resolve_admin_token_change(
     return next_balance, next_balance - current_balance, "adjust"
 
 
-def _build_admin_user_item(user: User) -> AdminUserListItem:
+def _build_admin_latest_session_item(
+    session: RefreshSession | None,
+) -> AdminUserLatestSessionItem | None:
+    if session is None:
+        return None
+
+    return AdminUserLatestSessionItem(
+        device_info=session.device_info,
+        ip_address=session.ip_address,
+        last_seen_at=session.last_seen_at,
+        created_at=session.created_at,
+    )
+
+
+def _load_latest_sessions_for_users(
+    db: Session,
+    *,
+    user_ids: list[str],
+) -> dict[str, AdminUserLatestSessionItem]:
+    if not user_ids:
+        return {}
+
+    sessions = list(
+        db.scalars(
+            select(RefreshSession)
+            .where(RefreshSession.user_id.in_(user_ids))
+            .order_by(
+                RefreshSession.user_id.asc(),
+                RefreshSession.last_seen_at.desc(),
+                RefreshSession.created_at.desc(),
+            )
+        ).all()
+    )
+
+    latest_sessions: dict[str, AdminUserLatestSessionItem] = {}
+    for session in sessions:
+        if session.user_id in latest_sessions:
+            continue
+        latest_session = _build_admin_latest_session_item(session)
+        if latest_session is not None:
+            latest_sessions[session.user_id] = latest_session
+    return latest_sessions
+
+
+def _build_admin_user_item(
+    user: User,
+    *,
+    latest_session: AdminUserLatestSessionItem | None = None,
+) -> AdminUserListItem:
     return AdminUserListItem(
         id=user.id,
         username=user.username,
@@ -84,6 +133,7 @@ def _build_admin_user_item(user: User) -> AdminUserListItem:
         status=user.status,
         token_balance=user.token_balance,
         created_at=user.created_at,
+        latest_session=latest_session,
     )
 
 
@@ -138,9 +188,19 @@ async def list_admin_users(
 
     total = db.scalar(count_statement) or 0
     users = list(db.scalars(list_statement).all())
+    latest_sessions = _load_latest_sessions_for_users(
+        db,
+        user_ids=[user.id for user in users],
+    )
 
     return AdminUserListResponse(
-        items=[_build_admin_user_item(user) for user in users],
+        items=[
+            _build_admin_user_item(
+                user,
+                latest_session=latest_sessions.get(user.id),
+            )
+            for user in users
+        ],
         total=total,
         skip=skip,
         limit=limit,
@@ -184,7 +244,8 @@ async def update_admin_user_status(
         db.rollback()
         raise HTTPException(status_code=500, detail="更新用户状态失败，请稍后重试。") from exc
 
-    return _build_admin_user_item(user)
+    latest_session = _load_latest_sessions_for_users(db, user_ids=[user.id]).get(user.id)
+    return _build_admin_user_item(user, latest_session=latest_session)
 
 
 @router.post("/users/{user_id}/reset-password", response_model=AdminUserPasswordResetResponse)

@@ -143,6 +143,11 @@ class MediaChatRequest(SchemaModel):
         max_length=80,
         description="Optional runtime model override for the active provider.",
     )
+    max_generation_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional runtime ceiling for generation tokens applied by the backend.",
+    )
 
 
 class UploadMediaResponse(SchemaModel):
@@ -389,6 +394,13 @@ class SessionRevokeResponse(SchemaModel):
     revoked: bool = Field(default=True, description="Revocation result.")
 
 
+class AdminUserLatestSessionItem(SchemaModel):
+    device_info: str | None = Field(default=None, description="Derived device label.")
+    ip_address: str | None = Field(default=None, description="Client IP address.")
+    last_seen_at: UTCDateTime = Field(..., description="Last seen time in UTC.")
+    created_at: UTCDateTime = Field(..., description="Session creation time in UTC.")
+
+
 class AdminUserListItem(SchemaModel):
     id: str = Field(..., description="User ID.")
     username: str = Field(..., description="Username.")
@@ -398,6 +410,10 @@ class AdminUserListItem(SchemaModel):
     status: UserAccountStatus = Field(..., description="Current account status.")
     token_balance: int = Field(..., description="Current token balance.")
     created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+    latest_session: AdminUserLatestSessionItem | None = Field(
+        default=None,
+        description="Latest observed login session for recent activity display.",
+    )
 
 
 class AdminUserListResponse(SchemaModel):
