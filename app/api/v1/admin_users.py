@@ -26,6 +26,7 @@ from app.services.auth import (
     mark_user_password_changed,
     revoke_other_refresh_sessions,
 )
+from app.services.token_usage import LEGACY_MODEL_NAME
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-users"])
 require_admin_role = RequireRole(["super_admin", "admin", "operator"])
@@ -178,6 +179,7 @@ async def update_admin_user_tokens(
         user_id=user.id,
         amount=payload.amount,
         transaction_type=transaction_type,
+        model_name=LEGACY_MODEL_NAME,
         remark=payload.remark.strip(),
         operator_id=current_user.id,
     )

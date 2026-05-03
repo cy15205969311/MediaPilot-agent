@@ -433,6 +433,31 @@ class AdminUserTokenUpdateResponse(SchemaModel):
     remark: str = Field(..., description="Admin remark recorded in the ledger.")
 
 
+class AdminDashboardTrendItem(SchemaModel):
+    date: str = Field(..., description="UTC date in YYYY-MM-DD format.")
+    token_count: int = Field(..., description="Token consumption total for the day.")
+
+
+class AdminDashboardModelUsageItem(SchemaModel):
+    model_name: str = Field(..., description="Aggregated model label.")
+    count: int = Field(..., description="Observed invocation count for the model.")
+
+
+class AdminDashboardResponse(SchemaModel):
+    total_users: int = Field(..., description="Total registered users.")
+    today_tokens: int = Field(..., description="Today's token consumption total.")
+    today_contents: int = Field(..., description="Today's generated content count.")
+    oss_storage_bytes: int = Field(..., description="Tracked upload storage in bytes.")
+    trend_30_days: list[AdminDashboardTrendItem] = Field(
+        default_factory=list,
+        description="Daily token totals for the recent 30-day window.",
+    )
+    model_usage_ratio: list[AdminDashboardModelUsageItem] = Field(
+        default_factory=list,
+        description="Aggregated model invocation counts for chart rendering.",
+    )
+
+
 class ThreadSummaryItem(SchemaModel):
     id: str = Field(..., description="Thread ID.")
     title: str = Field(default="", description="Thread title.")

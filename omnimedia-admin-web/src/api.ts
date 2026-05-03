@@ -1,5 +1,6 @@
 import { API_BASE_URL } from "./config";
 import type {
+  AdminDashboardData,
   AdminUserItem,
   AdminUserPasswordResetApiResponse,
   AdminUserStatusPayload,
@@ -478,6 +479,16 @@ export async function fetchAdminUsers(params?: {
   );
 
   return (await response.json()) as AdminUsersApiResponse;
+}
+
+export async function fetchAdminDashboardSummary(): Promise<AdminDashboardData> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/dashboard",
+    { method: "GET" },
+    { timeoutMs: 20000 },
+  );
+
+  return (await response.json()) as AdminDashboardData;
 }
 
 export async function updateAdminUserStatus(

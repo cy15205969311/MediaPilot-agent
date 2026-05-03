@@ -47,6 +47,25 @@ export type AdminUsersApiResponse = {
   limit: number;
 };
 
+export type AdminDashboardTrendItem = {
+  date: string;
+  token_count: number;
+};
+
+export type AdminDashboardModelUsageItem = {
+  model_name: string;
+  count: number;
+};
+
+export type AdminDashboardData = {
+  total_users: number;
+  today_tokens: number;
+  today_contents: number;
+  oss_storage_bytes: number;
+  trend_30_days: AdminDashboardTrendItem[];
+  model_usage_ratio: AdminDashboardModelUsageItem[];
+};
+
 export type AdminUserStatusPayload = {
   status: UserStatus;
 };

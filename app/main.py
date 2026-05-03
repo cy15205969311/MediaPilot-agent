@@ -13,6 +13,7 @@ from app.config import load_environment
 load_environment()
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.admin_dashboard import router as admin_dashboard_router
 from app.api.v1.admin_users import router as admin_users_router
 from app.api.v1.chat import router as media_chat_router
 from app.api.v1.dashboard import router as media_dashboard_router
@@ -169,6 +170,7 @@ async def root() -> dict[str, str]:
 
 
 app.include_router(auth_router)
+app.include_router(admin_dashboard_router)
 app.include_router(admin_users_router)
 app.include_router(users_router)
 app.include_router(media_chat_router)

@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.db.models import Thread
+from app.db.models import Thread, TokenTransaction
 from app.models.schemas import ArtifactPayloadModel, MediaChatRequest
 from app.services.graph import LangGraphProvider
 from app.services.persistence import ARTIFACT_TYPE_ADAPTER, persist_assistant_output
@@ -18,6 +18,11 @@ from app.services.providers import (
     OpenAIProvider,
     QwenLLMProvider,
     create_provider_from_env,
+)
+from app.services.token_usage import (
+    LEGACY_MODEL_NAME,
+    estimate_generated_output_tokens,
+    normalize_model_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +106,10 @@ class MediaAgentWorkflow:
         if isinstance(effective_provider, LangGraphProvider):
             effective_inner_provider_name = type(effective_provider.inner_provider).__name__
             effective_model_name = getattr(effective_provider.inner_provider, "model", "")
+        resolved_model_name = _resolve_runtime_model_name(
+            provider_model_name=effective_model_name,
+            model_override=request.model_override,
+        )
 
         logger.info(
             "agent.stream start thread_id=%s provider=%s runtime_provider=%s inner_provider=%s model=%s model_override=%s",
@@ -108,7 +117,7 @@ class MediaAgentWorkflow:
             type(self.provider).__name__,
             effective_provider_name,
             effective_inner_provider_name,
-            effective_model_name,
+            resolved_model_name,
             request.model_override or "",
         )
 
@@ -168,6 +177,22 @@ class MediaAgentWorkflow:
                             "message": "Failed to persist assistant output. Please retry.",
                         }
                         yield self._format_sse(error_event, event="error")
+                    else:
+                        try:
+                            _record_generated_token_consumption(
+                                db,
+                                user_id=user_id,
+                                task_type=request.task_type.value,
+                                model_name=resolved_model_name,
+                                assistant_text=accumulated_text,
+                                artifact=latest_artifact,
+                            )
+                        except Exception:
+                            db.rollback()
+                            logger.exception(
+                                "agent.stream token_ledger failed thread_id=%s",
+                                request.thread_id,
+                            )
 
                 if event_name == "done":
                     logger.info(
@@ -246,6 +271,62 @@ def _wrap_provider_for_workflow(
         vision_timeout_seconds=base_provider.vision_timeout_seconds,
         search_timeout_seconds=base_provider.search_timeout_seconds,
         business_tool_max_iterations=base_provider.business_tool_max_iterations,
+    )
+
+
+def _resolve_runtime_model_name(
+    *,
+    provider_model_name: str | None,
+    model_override: str | None,
+) -> str:
+    normalized_provider_model = normalize_model_name(provider_model_name)
+    if normalized_provider_model:
+        return normalized_provider_model
+
+    _, override_model_name = _split_model_override(model_override or "")
+    normalized_override_model = normalize_model_name(override_model_name)
+    if normalized_override_model:
+        return normalized_override_model
+
+    return LEGACY_MODEL_NAME
+
+
+def _record_generated_token_consumption(
+    db: Session,
+    *,
+    user_id: str,
+    task_type: str,
+    model_name: str,
+    assistant_text: str,
+    artifact: ArtifactPayloadModel | None,
+) -> None:
+    estimated_tokens = estimate_generated_output_tokens(
+        assistant_text=assistant_text,
+        artifact=artifact,
+    )
+    if estimated_tokens <= 0:
+        logger.info(
+            "agent.stream token_ledger skipped user_id=%s task_type=%s reason=no_usage_estimate",
+            user_id,
+            task_type,
+        )
+        return
+
+    transaction = TokenTransaction(
+        user_id=user_id,
+        amount=-estimated_tokens,
+        transaction_type="consume",
+        model_name=normalize_model_name(model_name) or LEGACY_MODEL_NAME,
+        remark=f"media_chat:{task_type}",
+    )
+    db.add(transaction)
+    db.commit()
+    logger.info(
+        "agent.stream token_ledger recorded user_id=%s task_type=%s model_name=%s amount=%s",
+        user_id,
+        task_type,
+        transaction.model_name,
+        transaction.amount,
     )
 
 

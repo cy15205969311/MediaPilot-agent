@@ -132,6 +132,11 @@ class TokenTransaction(Base):
     )
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     transaction_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        server_default="legacy",
+    )
     remark: Mapped[str] = mapped_column(Text, default="", nullable=False)
     operator_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
