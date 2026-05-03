@@ -164,12 +164,55 @@ type PublishToastState = {
   error?: string;
 };
 
+type MaterialCaptureSource = "picker" | "paste" | "drop";
+
 const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
 const LEGACY_QWEN_MODEL_STORAGE_KEY = "omnimedia_qwen_model_override";
 const XIAOHONGSHU_CREATOR_URL = "https://creator.xiaohongshu.com/publish/publish";
 const MAX_IMAGE_MATERIALS = 9;
+const MAX_FILES_PER_CAPTURE = 12;
 const IMAGE_LIMIT_WARNING_MESSAGE =
   "为保证解析质量与小红书发布规范，最多支持上传 9 张配图，超出部分已自动忽略。";
+const UNSUPPORTED_FILE_WARNING_MESSAGE =
+  "仅支持上传 jpg、jpeg、png、webp、mp4、mov、avi、wmv、mp3、wav、flac、m4a、ogg、txt、pdf、md、docx 文件。";
+const DEFAULT_UPLOAD_LIMIT_BYTES = 15 * 1024 * 1024;
+const AUDIO_UPLOAD_LIMIT_BYTES = 100 * 1024 * 1024;
+const VIDEO_UPLOAD_LIMIT_BYTES = 300 * 1024 * 1024;
+const DOCX_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+const MATERIAL_FILE_RULES: Array<{
+  kind: UploadedMaterialKind;
+  extensions: string[];
+  mimePrefixes?: string[];
+  mimeTypes?: string[];
+  maxBytes: number;
+}> = [
+  {
+    kind: "image",
+    extensions: [".jpg", ".jpeg", ".png", ".webp"],
+    mimePrefixes: ["image/"],
+    maxBytes: DEFAULT_UPLOAD_LIMIT_BYTES,
+  },
+  {
+    kind: "video",
+    extensions: [".mp4", ".mov", ".avi", ".wmv"],
+    mimePrefixes: ["video/"],
+    maxBytes: VIDEO_UPLOAD_LIMIT_BYTES,
+  },
+  {
+    kind: "audio",
+    extensions: [".mp3", ".wav", ".flac", ".m4a", ".ogg"],
+    mimePrefixes: ["audio/"],
+    maxBytes: AUDIO_UPLOAD_LIMIT_BYTES,
+  },
+  {
+    kind: "text",
+    extensions: [".txt", ".pdf", ".md", ".docx"],
+    mimeTypes: ["text/plain", "application/pdf", "text/markdown", DOCX_MIME_TYPE],
+    maxBytes: DEFAULT_UPLOAD_LIMIT_BYTES,
+  },
+];
 
 function getPlatformDisplayLabel(platform: UiPlatform): string {
   if (platform === "both") {
@@ -179,6 +222,87 @@ function getPlatformDisplayLabel(platform: UiPlatform): string {
     return "抖音";
   }
   return "小红书";
+}
+
+function getFileExtension(filename: string): string {
+  const normalizedName = filename.trim().toLowerCase();
+  const lastDotIndex = normalizedName.lastIndexOf(".");
+  if (lastDotIndex < 0) {
+    return "";
+  }
+  return normalizedName.slice(lastDotIndex);
+}
+
+function resolveMaterialKindFromFile(file: File): UploadedMaterialKind | null {
+  const extension = getFileExtension(file.name);
+  const mimeType = file.type.trim().toLowerCase();
+
+  for (const rule of MATERIAL_FILE_RULES) {
+    if (rule.extensions.includes(extension)) {
+      return rule.kind;
+    }
+
+    if (rule.mimeTypes?.includes(mimeType)) {
+      return rule.kind;
+    }
+
+    if (rule.mimePrefixes?.some((prefix) => mimeType.startsWith(prefix))) {
+      return rule.kind;
+    }
+  }
+
+  return null;
+}
+
+function getUploadLimitForKind(kind: UploadedMaterialKind): number {
+  const matchedRule = MATERIAL_FILE_RULES.find((rule) => rule.kind === kind);
+  return matchedRule?.maxBytes ?? DEFAULT_UPLOAD_LIMIT_BYTES;
+}
+
+function getUploadLimitLabel(maxBytes: number): string {
+  return `${Math.round(maxBytes / (1024 * 1024))}MB`;
+}
+
+function buildFallbackFilename(file: File, kind: UploadedMaterialKind): string {
+  const mimeType = file.type.trim().toLowerCase();
+  const extensionByMime: Record<string, string> = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/flac": ".flac",
+    "audio/x-flac": ".flac",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/ogg": ".ogg",
+    "text/plain": ".txt",
+    "application/pdf": ".pdf",
+    "text/markdown": ".md",
+    [DOCX_MIME_TYPE]: ".docx",
+  };
+
+  const extension =
+    extensionByMime[mimeType] ||
+    MATERIAL_FILE_RULES.find((rule) => rule.kind === kind)?.extensions[0] ||
+    ".bin";
+
+  return `${kind}-${Date.now()}${extension}`;
+}
+
+function ensureUploadableFile(file: File, kind: UploadedMaterialKind): File {
+  if (file.name.trim()) {
+    return file;
+  }
+
+  return new File([file], buildFallbackFilename(file, kind), {
+    type: file.type,
+    lastModified: file.lastModified,
+  });
 }
 
 function getToolCallFallbackMessage(name: string, status: string): string {
@@ -2679,32 +2803,103 @@ function App() {
     }
   };
 
-  const onFilesSelected = (kind: UploadedMaterialKind, event: ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = Array.from(event.target.files ?? []);
-    const currentImageCount = uploadedMaterialsRef.current.filter(
-      (item) => item.kind === "image",
-    ).length;
-    const availableImageSlots =
-      kind === "image" ? Math.max(0, MAX_IMAGE_MATERIALS - currentImageCount) : selectedFiles.length;
-    const files =
-      kind === "image" ? selectedFiles.slice(0, availableImageSlots) : selectedFiles;
+  const showMaterialWarningToast = (title: string, message: string) => {
+    setStatusText(message);
+    setPublishToast({
+      id: Date.now(),
+      tone: "warning",
+      title,
+      message,
+    });
+  };
 
-    if (kind === "image" && selectedFiles.length > files.length) {
-      setStatusText(IMAGE_LIMIT_WARNING_MESSAGE);
-      setPublishToast({
-        id: Date.now(),
-        tone: "warning",
-        title: "图片数量已限制",
-        message: IMAGE_LIMIT_WARNING_MESSAGE,
-      });
-    }
-
-    if (files.length === 0) {
-      event.target.value = "";
+  const enqueueMaterialFiles = (
+    incomingFiles: File[],
+    source: MaterialCaptureSource,
+    preferredKind?: UploadedMaterialKind,
+  ) => {
+    if (incomingFiles.length === 0) {
       return;
     }
 
-    const nextMaterials = files.map((file) => ({
+    let files = incomingFiles;
+    if (incomingFiles.length > MAX_FILES_PER_CAPTURE) {
+      files = incomingFiles.slice(0, MAX_FILES_PER_CAPTURE);
+      showMaterialWarningToast(
+        "单次上传数量受限",
+        `单次最多处理 ${MAX_FILES_PER_CAPTURE} 个素材，超出部分已自动忽略。`,
+      );
+    }
+
+    const acceptedEntries: Array<{ file: File; kind: UploadedMaterialKind }> = [];
+    const unsupportedFiles: string[] = [];
+    const oversizedFiles: string[] = [];
+
+    for (const incomingFile of files) {
+      const inferredKind = preferredKind ?? resolveMaterialKindFromFile(incomingFile);
+      if (!inferredKind) {
+        unsupportedFiles.push(incomingFile.name || "未命名文件");
+        continue;
+      }
+
+      const preparedFile = ensureUploadableFile(incomingFile, inferredKind);
+      const uploadLimit = getUploadLimitForKind(inferredKind);
+      if (preparedFile.size > uploadLimit) {
+        oversizedFiles.push(`${preparedFile.name}（>${getUploadLimitLabel(uploadLimit)}）`);
+        continue;
+      }
+
+      acceptedEntries.push({
+        file: preparedFile,
+        kind: inferredKind,
+      });
+    }
+
+    if (unsupportedFiles.length > 0) {
+      showMaterialWarningToast(
+        "存在不支持的文件格式",
+        unsupportedFiles.length === 1
+          ? `${unsupportedFiles[0]} 无法处理。${UNSUPPORTED_FILE_WARNING_MESSAGE}`
+          : `有 ${unsupportedFiles.length} 个文件格式不受支持。${UNSUPPORTED_FILE_WARNING_MESSAGE}`,
+      );
+    }
+
+    if (oversizedFiles.length > 0) {
+      showMaterialWarningToast(
+        "文件过大，无法处理",
+        oversizedFiles.length === 1
+          ? `${oversizedFiles[0]} 超过当前上传限制。`
+          : `有 ${oversizedFiles.length} 个文件超过当前上传限制，请压缩后重试。`,
+      );
+    }
+
+    const currentImageCount = uploadedMaterialsRef.current.filter(
+      (item) => item.kind === "image",
+    ).length;
+    let remainingImageSlots = Math.max(0, MAX_IMAGE_MATERIALS - currentImageCount);
+    let skippedImages = 0;
+    const queuedEntries: Array<{ file: File; kind: UploadedMaterialKind }> = [];
+
+    for (const entry of acceptedEntries) {
+      if (entry.kind === "image") {
+        if (remainingImageSlots <= 0) {
+          skippedImages += 1;
+          continue;
+        }
+        remainingImageSlots -= 1;
+      }
+      queuedEntries.push(entry);
+    }
+
+    if (skippedImages > 0) {
+      showMaterialWarningToast("图片数量已限制", IMAGE_LIMIT_WARNING_MESSAGE);
+    }
+
+    if (queuedEntries.length === 0) {
+      return;
+    }
+
+    const nextMaterials = queuedEntries.map(({ file, kind }) => ({
       id: createId("material"),
       name: file.name,
       kind,
@@ -2718,9 +2913,29 @@ function App() {
 
     setUploadedMaterials((current) => [...current, ...nextMaterials]);
     nextMaterials.forEach((material, index) => {
-      void uploadSelectedFile(material.id, files[index], kind);
+      const entry = queuedEntries[index];
+      if (!entry) {
+        return;
+      }
+      void uploadSelectedFile(material.id, entry.file, entry.kind);
     });
+
+    setStatusText(
+      source === "paste"
+        ? `已接收 ${queuedEntries.length} 个剪贴板素材，正在上传`
+        : source === "drop"
+          ? `已接收 ${queuedEntries.length} 个拖拽素材，正在上传`
+          : `已加入 ${queuedEntries.length} 个待上传素材`,
+    );
+  };
+
+  const onFilesSelected = (kind: UploadedMaterialKind, event: ChangeEvent<HTMLInputElement>) => {
+    enqueueMaterialFiles(Array.from(event.target.files ?? []), "picker", kind);
     event.target.value = "";
+  };
+
+  const handleCapturedFiles = (files: File[], source: Exclude<MaterialCaptureSource, "picker">) => {
+    enqueueMaterialFiles(files, source);
   };
 
   const removeMaterial = (materialId: string) => {
@@ -3982,6 +4197,7 @@ function App() {
                       audioInputRef={audioInputRef}
                       isStreaming={isStreaming}
                       isUploading={isUploading}
+                      onFilesCaptured={handleCapturedFiles}
                       message={message}
                       onFilesSelected={onFilesSelected}
                       onMessageChange={setMessage}

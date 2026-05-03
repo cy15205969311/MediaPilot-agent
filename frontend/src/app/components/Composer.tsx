@@ -10,8 +10,14 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
-import type { ChangeEvent, KeyboardEvent, RefObject } from "react";
+import { useMemo, useRef, useState } from "react";
+import type {
+  ChangeEvent,
+  ClipboardEvent,
+  DragEvent,
+  KeyboardEvent,
+  RefObject,
+} from "react";
 
 import type {
   ComposerSubmitPayload,
@@ -34,7 +40,11 @@ type ComposerProps = {
   onStopStreaming: () => void;
   onTriggerFilePicker: (kind: UploadedMaterialKind) => void;
   onRemoveMaterial: (materialId: string) => void;
-  onFilesSelected: (kind: UploadedMaterialKind, event: ChangeEvent<HTMLInputElement>) => void;
+  onFilesSelected: (
+    kind: UploadedMaterialKind,
+    event: ChangeEvent<HTMLInputElement>,
+  ) => void;
+  onFilesCaptured: (files: File[], source: "paste" | "drop") => void;
 };
 
 function renderMaterialStatus(material: UploadedMaterial) {
@@ -64,6 +74,21 @@ function renderMaterialStatus(material: UploadedMaterial) {
   );
 }
 
+function hasFileTransfer(event: DragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types).includes("Files");
+}
+
+function extractClipboardFiles(event: ClipboardEvent<HTMLTextAreaElement>): File[] {
+  const directFiles = Array.from(event.clipboardData.files);
+  if (directFiles.length > 0) {
+    return directFiles;
+  }
+
+  return Array.from(event.clipboardData.items)
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+}
+
 export function Composer({
   message,
   uploadedMaterials,
@@ -79,11 +104,15 @@ export function Composer({
   onTriggerFilePicker,
   onRemoveMaterial,
   onFilesSelected,
+  onFilesCaptured,
 }: ComposerProps) {
   const [previewData, setPreviewData] = useState<{
     images: string[];
     startIndex: number;
   } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragDepthRef = useRef(0);
+
   const isLoading = isStreaming || isUploading;
   const canSubmit = message.trim().length > 0 && !isLoading;
   const imageMaterials = useMemo(
@@ -120,16 +149,71 @@ export function Composer({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter") {
-      return;
-    }
-
-    if (event.shiftKey) {
+    if (event.key !== "Enter" || event.shiftKey) {
       return;
     }
 
     event.preventDefault();
     handleSubmit();
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = extractClipboardFiles(event);
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    onFilesCaptured(files, "paste");
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDragging(true);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDragging(false);
+
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length === 0) {
+      return;
+    }
+
+    onFilesCaptured(files, "drop");
   };
 
   const openImagePreview = (startIndex: number) => {
@@ -155,7 +239,7 @@ export function Composer({
   const renderImageCard = (item: UploadedMaterial, index: number) => (
     <div
       key={item.id}
-      className="relative flex-shrink-0 w-16 h-16 sm:w-[72px] sm:h-[72px] rounded-xl overflow-hidden border border-black/10 dark:border-white/10 shadow-sm transition-transform hover:scale-[1.02] bg-muted"
+      className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl border border-black/10 bg-muted shadow-sm transition-transform hover:scale-[1.02] sm:h-[72px] sm:w-[72px] dark:border-white/10"
       data-testid="composer-uploaded-image"
     >
       {item.previewUrl ? (
@@ -179,7 +263,7 @@ export function Composer({
 
       <button
         aria-label={`删除图片 ${item.name}`}
-        className="absolute top-1 right-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition hover:bg-black/75"
+        className="absolute right-1 top-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition hover:bg-black/75"
         onClick={() => onRemoveMaterial(item.id)}
         type="button"
       >
@@ -191,10 +275,10 @@ export function Composer({
   const renderAttachmentCard = (item: UploadedMaterial) => (
     <div
       key={item.id}
-      className="flex items-center gap-3 rounded-2xl border border-border bg-muted px-3 py-2 shadow-sm"
+      className="flex min-w-[16rem] max-w-full items-center gap-3 rounded-2xl border border-border bg-muted px-3 py-2 shadow-sm"
       data-testid="composer-uploaded-material"
     >
-      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-card text-muted-foreground">
+      <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl bg-card text-muted-foreground">
         {item.kind === "video" ? (
           <Video className="h-5 w-5" />
         ) : item.kind === "audio" ? (
@@ -203,7 +287,7 @@ export function Composer({
           <FileText className="h-5 w-5" />
         )}
       </div>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-foreground">{item.name}</div>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>{item.sizeLabel}</span>
@@ -246,7 +330,7 @@ export function Composer({
             type="button"
           >
             <Video className="h-4 w-4" />
-            视频转写稿
+            上传视频
           </button>
           <button
             className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-card-foreground transition hover:border-brand/40 hover:bg-brand-soft"
@@ -264,12 +348,12 @@ export function Composer({
             type="button"
           >
             <FileText className="h-4 w-4" />
-            文本文件
+            文本文档
           </button>
         </div>
 
         {nonImageMaterials.length > 0 ? (
-          <div className="mb-3 flex flex-wrap gap-3">
+          <div className="scrollbar-hide mb-3 flex gap-3 overflow-x-auto overscroll-x-contain pb-1">
             {nonImageMaterials.map(renderAttachmentCard)}
           </div>
         ) : null}
@@ -286,7 +370,7 @@ export function Composer({
             <div className="min-w-0">
               <div className="font-semibold">正在生成内容</div>
               <div className="mt-1 text-xs leading-5">
-                发现提示词写错或方向偏了，可以立即停止，已输出内容会保留在当前对话中。
+                如果发现提示词写错了或方向偏了，可以立刻停止，已输出内容会保留在当前对话中。
               </div>
             </div>
             <button
@@ -301,19 +385,37 @@ export function Composer({
           </div>
         ) : null}
 
-        <div className="relative overflow-hidden rounded-[28px] border border-border bg-card shadow-sm transition focus-within:border-primary">
+        <div
+          className={`relative overflow-hidden rounded-[28px] border bg-card shadow-sm transition ${
+            isDragging
+              ? "border-brand/60 bg-brand-soft ring-4 ring-brand/10"
+              : "border-border focus-within:border-primary"
+          }`}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
           {imageMaterials.length > 0 ? (
             <div className="px-4 pt-4">
-              <div className="scrollbar-hide flex flex-row gap-3 overflow-x-auto overscroll-x-contain w-full pb-2 pt-1 px-1">
+              <div className="scrollbar-hide flex w-full flex-row gap-3 overflow-x-auto overscroll-x-contain px-1 pb-2 pt-1">
                 {imageMaterials.map((item, index) => renderImageCard(item, index))}
               </div>
             </div>
           ) : null}
+
+          {isDragging ? (
+            <div className="pointer-events-none absolute inset-x-4 top-4 z-10 rounded-3xl border border-dashed border-brand/50 bg-brand-soft/80 px-4 py-3 text-sm text-brand shadow-sm backdrop-blur-sm">
+              松开鼠标即可上传，支持图片、音频、视频与文档素材
+            </div>
+          ) : null}
+
           <textarea
             className="min-h-32 w-full resize-none bg-transparent px-5 py-4 pr-20 text-sm leading-7 text-card-foreground outline-none focus:outline-none focus:ring-0"
             data-testid="composer-textarea"
             onChange={(event) => onMessageChange(event.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder="描述你的内容需求，或上传素材让 Agent 帮你分析..."
             value={message}
           />
@@ -334,11 +436,11 @@ export function Composer({
         </div>
 
         <div className="mt-2 px-2 text-xs text-muted-foreground">
-          Enter 发送，Shift + Enter 换行
+          Enter 发送，Shift + Enter 换行。支持拖拽文件与 Ctrl+V 粘贴截图/文档。
         </div>
         {isUploading ? (
           <div className="mt-1 px-2 text-xs text-warning-foreground">
-            大文件上传和 OSS 转存可能需要 10-120 秒，请耐心等待上传完成后再发送。
+            大文件上传和 OSS 转存可能需要 10-120 秒，请等待上传完成后再发送。
           </div>
         ) : null}
       </div>
@@ -379,6 +481,7 @@ export function Composer({
         ref={textInputRef}
         type="file"
       />
+
       {previewData ? (
         <ImagePreviewModal
           images={previewData.images}

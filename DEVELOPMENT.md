@@ -317,6 +317,37 @@ Management accounts follow a separate billing policy:
   - do not create normal consumption ledger rows for internal management usage
 - the creator workspace renders these accounts as an unlimited-credit state and replaces the top-up control with a privilege badge
 
+### 7.11 Creator upload capture UX
+
+The creator workspace upload entry has been upgraded to use one shared material-ingestion pipeline:
+
+- file-picker uploads, clipboard paste, and drag-and-drop all end up in the same queue builder in `frontend/src/app/App.tsx`
+- `frontend/src/app/components/Composer.tsx` is responsible only for capturing raw `File[]` from UI events and publishing them upstream
+- frontend validation intentionally mirrors the backend contract in `app/api/v1/oss.py`
+
+Supported file types:
+
+- images: `.jpg`, `.jpeg`, `.png`, `.webp`
+- videos: `.mp4`, `.mov`, `.avi`, `.wmv`
+- audio: `.mp3`, `.wav`, `.flac`, `.m4a`, `.ogg`
+- documents: `.txt`, `.pdf`, `.md`, `.docx`
+
+Current capture limits:
+
+- up to `12` files per capture event
+- up to `9` image materials total in one composer queue
+- size limits:
+  - image and document: `15MB`
+  - audio: `100MB`
+  - video: `300MB`
+
+Current known limitations:
+
+- upload still uses one-shot `fetch + FormData`
+- chunked upload is not implemented yet
+- byte-level percentage progress is not available yet
+- the UI only exposes queue states such as `uploading`, `ready`, and `error`, plus large-file waiting hints
+
 ## 8. Backend Boundaries
 
 ### 8.1 Route groups
@@ -430,6 +461,12 @@ Recommended manual checks for the latest feature set:
    - the same chat request still succeeds
    - final billing does not reduce the balance below zero
    - no normal consumption ledger row is added for the privileged run
+10. Validate the upgraded creator upload entry:
+   - paste a screenshot into the composer with `Ctrl+V` and confirm the file enters the upload queue
+   - drag a supported file onto the composer and confirm the visual drop state appears before upload starts
+   - try an unsupported extension and confirm the warning toast is shown
+   - try an oversized file and confirm the size-limit warning is shown
+   - exceed the per-capture or image-count limit and confirm the queue is truncated with a clear warning
 
 ## 11. Commit Convention
 
