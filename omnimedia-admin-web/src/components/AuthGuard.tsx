@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 
 import { clearStoredSession, getStoredToken, getStoredUser, isAdminRole } from "../api";
+import { canAccessAdminPath, getDefaultAdminRoute } from "../adminMeta";
 
 type AuthGuardProps = {
   children?: ReactNode;
@@ -11,6 +12,7 @@ type AuthGuardProps = {
 type AuthRedirectState = {
   authError: string;
   from: string;
+  routeGuardNotice?: string;
 };
 
 export function AuthGuard(props: AuthGuardProps) {
@@ -64,6 +66,23 @@ export function AuthGuard(props: AuthGuardProps) {
           } satisfies AuthRedirectState
         }
         to="/login"
+      />
+    );
+  }
+
+  if (!canAccessAdminPath(user.role, location.pathname)) {
+    const safeWorkspace = getDefaultAdminRoute(user.role);
+    return (
+      <Navigate
+        replace
+        state={
+          {
+            authError: "您的角色权限不足，已自动为您跳转至安全工作区。",
+            from: location.pathname,
+            routeGuardNotice: "您的角色权限不足，已自动为您跳转至安全工作区。",
+          } satisfies AuthRedirectState
+        }
+        to={safeWorkspace}
       />
     );
   }

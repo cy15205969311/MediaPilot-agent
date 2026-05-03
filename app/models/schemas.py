@@ -85,6 +85,7 @@ class TaskType(str, Enum):
 class UserRole(str, Enum):
     SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
+    FINANCE = "finance"
     OPERATOR = "operator"
     PREMIUM = "premium"
     USER = "user"
@@ -425,6 +426,10 @@ class AdminUserListResponse(SchemaModel):
 
 class AdminUserStatusUpdateRequest(SchemaModel):
     status: UserAccountStatus = Field(..., description="Target account status.")
+
+
+class AdminUserRoleUpdateRequest(SchemaModel):
+    role: UserRole = Field(..., description="Target role assignment.")
 
 
 class AdminUserPasswordResetResponse(SchemaModel):

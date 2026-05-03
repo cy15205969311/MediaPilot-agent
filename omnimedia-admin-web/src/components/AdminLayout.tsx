@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
-import { adminNavigation } from "../adminMeta";
+import { getAllowedAdminNavigation } from "../adminMeta";
 import { buildAbsoluteMediaUrl } from "../api";
 import { CLIENT_APP_URL } from "../config";
 import type { AuthenticatedUser } from "../types";
@@ -53,6 +53,10 @@ export function AdminLayout(props: AdminLayoutProps) {
   const displayName = getDisplayName(currentUser);
   const initials = getInitials(displayName);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const allowedNavigation = useMemo(
+    () => getAllowedAdminNavigation(currentUser.role),
+    [currentUser.role],
+  );
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -101,7 +105,7 @@ export function AdminLayout(props: AdminLayoutProps) {
         </div>
 
         <nav className="flex-1 space-y-1 overflow-y-auto p-4">
-          {adminNavigation.map((module) => {
+          {allowedNavigation.map((module) => {
             const Icon = module.icon;
             return (
               <NavLink

@@ -18,6 +18,7 @@ import {
   fetchAdminUsers,
   isAdminRole,
   resetAdminUserPassword,
+  updateAdminUserRole,
   updateAdminUserStatus,
   updateAdminUserTokens,
 } from "../api";
@@ -28,6 +29,7 @@ import type {
   AdminUserItem,
   AdminUsersApiResponse,
   AuthenticatedUser,
+  UserRole,
 } from "../types";
 import {
   formatDate,
@@ -52,6 +54,49 @@ type AdminUsersPageProps = {
 
 const DEFAULT_PAGE_SIZE = 20;
 const TOKEN_QUICK_PACKS = [10000, 50000, 100000] as const;
+const ROLE_ASSIGNMENT_OPTIONS: Array<{
+  value: UserRole;
+  label: string;
+  description: string;
+  permissionHint: string;
+}> = [
+  {
+    value: "super_admin",
+    label: "超级管理员",
+    description: "最高权限，统筹全局配置、角色分配与关键安全操作。",
+    permissionHint: "包含全量后台权限与高危治理能力。",
+  },
+  {
+    value: "operator",
+    label: "运营人员",
+    description: "负责用户治理、内容运营与日常后台巡检。",
+    permissionHint: "包含用户管理、内容审核、数据查看等核心权限。",
+  },
+  {
+    value: "finance",
+    label: "财务人员",
+    description: "负责台账核对、充值补偿、资产导出与财务复盘。",
+    permissionHint: "包含财务报表、Token 流水、充值记录与导出权限。",
+  },
+  {
+    value: "user",
+    label: "普通用户",
+    description: "标准业务账号，不具备后台管理权限。",
+    permissionHint: "仅保留前台创作与个人资料能力。",
+  },
+  {
+    value: "admin",
+    label: "平台管理员",
+    description: "保留现有高权限兼容角色，适合全局治理或历史账号过渡。",
+    permissionHint: "默认拥有管理团队级权限与无限额度展示。",
+  },
+  {
+    value: "premium",
+    label: "高级用户",
+    description: "兼容现有会员型业务角色，不开放后台治理能力。",
+    permissionHint: "保留高级用户身份与业务侧权益展示。",
+  },
+];
 
 function getUserDisplayName(user: Pick<AdminUserItem, "nickname" | "username">): string {
   return user.nickname?.trim() || user.username;
@@ -69,12 +114,54 @@ function canAdjustToken(user: Pick<AdminUserItem, "role">): boolean {
   return !isUnlimitedTokenUser(user);
 }
 
+function canManageUserAccounts(currentUser: Pick<AuthenticatedUser, "role">): boolean {
+  return (
+    currentUser.role === "super_admin" ||
+    currentUser.role === "admin" ||
+    currentUser.role === "operator"
+  );
+}
+
+function canChangeUserRole(
+  currentUser: Pick<AuthenticatedUser, "id" | "role">,
+  user: Pick<AdminUserItem, "id" | "role">,
+): boolean {
+  return (
+    currentUser.role === "super_admin" &&
+    currentUser.id !== user.id &&
+    user.role !== "super_admin"
+  );
+}
+
+function getRoleChangeDisabledReason(
+  currentUser: Pick<AuthenticatedUser, "id" | "role">,
+  user: Pick<AdminUserItem, "id" | "role">,
+): string {
+  if (currentUser.role !== "super_admin") {
+    return "仅超级管理员可以变更角色";
+  }
+  if (currentUser.id === user.id) {
+    return "为避免误降权，当前不允许修改自己的角色";
+  }
+  if (user.role === "super_admin") {
+    return "系统最高权限账号不可变更角色";
+  }
+  return "";
+}
+
+function getRoleOption(role: UserRole) {
+  return ROLE_ASSIGNMENT_OPTIONS.find((option) => option.value === role) ?? null;
+}
+
 function getRoleBadgeClass(role: AdminUserItem["role"]): string {
   if (role === "super_admin") {
     return "bg-slate-900 text-white";
   }
   if (role === "admin") {
     return "bg-amber-50 text-amber-600";
+  }
+  if (role === "finance") {
+    return "bg-sky-50 text-sky-600";
   }
   if (role === "operator") {
     return "bg-orange-50 text-orange-600";
@@ -215,14 +302,18 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const [tokenAction, setTokenAction] = useState<AdminTokenAdjustAction>("add");
   const [tokenAmount, setTokenAmount] = useState("1000");
   const [tokenRemark, setTokenRemark] = useState("");
+  const [roleModalUser, setRoleModalUser] = useState<AdminUserItem | null>(null);
+  const [nextRole, setNextRole] = useState<UserRole>("user");
   const [revealedPassword, setRevealedPassword] = useState<PasswordRevealState>(null);
 
   const total = usersPayload?.total ?? 0;
   const items = usersPayload?.items ?? [];
+  const canGovernUserAccounts = canManageUserAccounts(currentUser);
   const currentPage = Math.floor(skip / DEFAULT_PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil(total / DEFAULT_PAGE_SIZE));
   const selectedUser = items.find((item) => item.id === selectedUserId) ?? null;
   const parsedTokenAmount = Number(tokenAmount);
+  const selectedRoleOption = getRoleOption(nextRole);
   const tokenPreviewBalance =
     tokenModalUser && Number.isInteger(parsedTokenAmount) && parsedTokenAmount >= 0
       ? tokenAction === "add"
@@ -372,9 +463,44 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     });
   };
 
+  const showGovernancePermissionToast = (actionLabel: string) => {
+    onToast({
+      tone: "warning",
+      title: "当前角色仅支持只读查看",
+      message: `当前账号暂不具备${actionLabel}权限，请使用超级管理员或治理角色执行该操作。`,
+    });
+  };
+
+  const showRoleChangeBlockedToast = (user: AdminUserItem) => {
+    onToast({
+      tone: "warning",
+      title: "角色变更已被拦截",
+      message: getRoleChangeDisabledReason(currentUser, user) || "当前不允许执行角色变更。",
+    });
+  };
+
   const openDetailDrawer = (userId: string) => {
     setSelectedUserId(userId);
     setDetailOpen(true);
+  };
+
+  const openRoleModal = (user: AdminUserItem) => {
+    if (!canChangeUserRole(currentUser, user)) {
+      showRoleChangeBlockedToast(user);
+      return;
+    }
+
+    setRoleModalUser(user);
+    setNextRole(user.role);
+  };
+
+  const closeRoleModal = (force = false) => {
+    if (isSubmitting && !force) {
+      return;
+    }
+
+    setRoleModalUser(null);
+    setNextRole("user");
   };
 
   const handleSearchSubmit = () => {
@@ -384,6 +510,11 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   };
 
   const handleToggleStatus = async (user: AdminUserItem) => {
+    if (!canGovernUserAccounts) {
+      showGovernancePermissionToast("冻结与解冻账号");
+      return;
+    }
+
     if (isProtectedSuperAdmin(user)) {
       showProtectedAccountToast(user);
       return;
@@ -419,6 +550,11 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   };
 
   const handleResetPassword = async (user: AdminUserItem) => {
+    if (!canGovernUserAccounts) {
+      showGovernancePermissionToast("重置密码");
+      return;
+    }
+
     if (isProtectedSuperAdmin(user)) {
       showProtectedAccountToast(user);
       return;
@@ -456,6 +592,11 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   };
 
   const openTokenModal = (user: AdminUserItem) => {
+    if (!canGovernUserAccounts) {
+      showGovernancePermissionToast("调整 Token 额度");
+      return;
+    }
+
     if (isProtectedSuperAdmin(user)) {
       showProtectedAccountToast(user);
       return;
@@ -552,6 +693,52 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
             : error instanceof Error
               ? error.message
               : "更新用户额度失败，请稍后重试。",
+      });
+    } finally {
+      setActiveUserId(null);
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRoleSubmit = async () => {
+    if (!roleModalUser) {
+      return;
+    }
+
+    if (!canChangeUserRole(currentUser, roleModalUser)) {
+      showRoleChangeBlockedToast(roleModalUser);
+      return;
+    }
+
+    if (nextRole === roleModalUser.role) {
+      closeRoleModal(true);
+      return;
+    }
+
+    setActiveUserId(roleModalUser.id);
+    setIsSubmitting(true);
+
+    try {
+      const updatedUser = await updateAdminUserRole(roleModalUser.id, {
+        role: nextRole,
+      });
+      replaceUserInState(updatedUser);
+      onToast({
+        tone: "success",
+        title: "角色变更成功",
+        message: `${getUserDisplayName(updatedUser)} 已切换为 ${formatRoleLabel(updatedUser.role)}。`,
+      });
+      closeRoleModal(true);
+    } catch (error) {
+      onToast({
+        tone: "error",
+        title: "角色变更失败",
+        message:
+          error instanceof APIError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : "角色变更失败，请稍后重试。",
       });
     } finally {
       setActiveUserId(null);
@@ -780,10 +967,31 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
                               <Eye className="h-4 w-4" />
                               查看详情
                             </button>
+                            {currentUser.role === "super_admin" ? (
+                              canChangeUserRole(currentUser, user) ? (
+                                <button
+                                  className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-500 transition hover:bg-red-100"
+                                  disabled={isBusy}
+                                  onClick={() => openRoleModal(user)}
+                                  type="button"
+                                >
+                                  切换角色
+                                </button>
+                              ) : (
+                                <button
+                                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm font-medium text-slate-400"
+                                  disabled
+                                  title={getRoleChangeDisabledReason(currentUser, user)}
+                                  type="button"
+                                >
+                                  切换角色
+                                </button>
+                              )
+                            ) : null}
                             {canAdjustToken(user) ? (
                               <button
                                 className="inline-flex items-center gap-2 rounded-xl bg-orange-50 px-3 py-2 text-sm font-medium text-orange-600 transition hover:bg-orange-100"
-                                disabled={isBusy}
+                                disabled={isBusy || !canGovernUserAccounts}
                                 onClick={() => openTokenModal(user)}
                                 type="button"
                               >
@@ -939,6 +1147,23 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
             ) : null}
 
             <div className="mt-6 space-y-3">
+              {currentUser.role === "super_admin" ? (
+                canChangeUserRole(currentUser, selectedUser) ? (
+                  <button
+                    className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 text-sm font-bold text-red-500 transition hover:bg-red-100"
+                    disabled={isSubmitting && activeUserId === selectedUser.id}
+                    onClick={() => openRoleModal(selectedUser)}
+                    type="button"
+                  >
+                    切换角色
+                  </button>
+                ) : (
+                  <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500">
+                    {getRoleChangeDisabledReason(currentUser, selectedUser)}
+                  </div>
+                )
+              ) : null}
+
               {!isProtectedSuperAdmin(selectedUser) ? (
                 <button
                   className={`inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-sm font-bold transition ${
@@ -946,7 +1171,9 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
                       ? "bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
                       : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                   }`}
-                  disabled={isSubmitting && activeUserId === selectedUser.id}
+                  disabled={
+                    (isSubmitting && activeUserId === selectedUser.id) || !canGovernUserAccounts
+                  }
                   onClick={() => void handleToggleStatus(selectedUser)}
                   type="button"
                 >
@@ -964,7 +1191,9 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
               {!isProtectedSuperAdmin(selectedUser) ? (
                 <button
                   className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-red-50 text-sm font-bold text-red-500 transition hover:bg-red-100"
-                  disabled={isSubmitting && activeUserId === selectedUser.id}
+                  disabled={
+                    (isSubmitting && activeUserId === selectedUser.id) || !canGovernUserAccounts
+                  }
                   onClick={() => void handleResetPassword(selectedUser)}
                   type="button"
                 >
@@ -976,7 +1205,9 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
               {canAdjustToken(selectedUser) ? (
                 <button
                   className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-orange-50 text-sm font-bold text-orange-500 transition hover:bg-orange-100"
-                  disabled={isSubmitting && activeUserId === selectedUser.id}
+                  disabled={
+                    (isSubmitting && activeUserId === selectedUser.id) || !canGovernUserAccounts
+                  }
                   onClick={() => openTokenModal(selectedUser)}
                   type="button"
                 >
@@ -986,6 +1217,81 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
               ) : null}
             </div>
           </aside>
+        </div>
+      ) : null}
+
+      {roleModalUser ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/15 p-4 backdrop-blur-[2px]">
+          <div className="w-full max-w-3xl rounded-[28px] border border-red-100 bg-[#fffdfa] p-7 shadow-[0_28px_90px_rgba(15,23,42,0.18)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-xl font-bold tracking-tight text-slate-900">切换角色</div>
+                <div className="mt-1 text-sm leading-6 text-slate-500">
+                  当前账号：{getUserDisplayName(roleModalUser)}。请选择新的角色身份，保存后将立即刷新用户中心中的角色展示。
+                </div>
+              </div>
+              <button
+                aria-label="关闭"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-red-50 text-red-500 transition hover:bg-red-100"
+                onClick={() => closeRoleModal()}
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {ROLE_ASSIGNMENT_OPTIONS.map((option) => {
+                const isSelected = nextRole === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    className={`rounded-[24px] border px-4 py-4 text-left transition ${
+                      isSelected
+                        ? "border-red-200 bg-gradient-to-br from-red-50 to-orange-50 shadow-[0_14px_32px_rgba(248,113,113,0.12)]"
+                        : "border-slate-200 bg-white hover:border-red-100 hover:bg-red-50/40"
+                    }`}
+                    onClick={() => setNextRole(option.value)}
+                    type="button"
+                  >
+                    <div className="text-sm font-semibold text-slate-900">{option.label}</div>
+                    <div className="mt-2 text-sm leading-6 text-slate-500">{option.description}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-6 rounded-[24px] border border-slate-200 bg-white p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-red-400">
+                Permission Snapshot
+              </div>
+              <div className="mt-3 text-lg font-semibold text-slate-900">
+                {selectedRoleOption?.label ?? "未选择角色"}
+              </div>
+              <div className="mt-2 text-sm leading-6 text-slate-500">
+                {selectedRoleOption?.permissionHint ?? "请选择一个角色查看其核心权限提示。"}
+              </div>
+            </div>
+
+            <div className="mt-7 flex justify-end gap-3">
+              <button
+                className="h-11 rounded-xl bg-slate-100 px-5 text-sm font-medium text-slate-600 transition hover:bg-slate-200"
+                onClick={() => closeRoleModal()}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="inline-flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-red-500 to-orange-400 px-5 text-sm font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-70"
+                disabled={isSubmitting}
+                onClick={() => void handleRoleSubmit()}
+                type="button"
+              >
+                {isSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
+                保存角色
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
 

@@ -10,6 +10,8 @@ import {
   Users,
 } from "lucide-react";
 
+import type { UserRole } from "./types";
+
 export type AdminModuleKey =
   | "dashboard"
   | "users"
@@ -27,6 +29,7 @@ export type AdminNavigationItem = {
   to: string;
   icon: LucideIcon;
   status: "ready" | "in-progress";
+  allowedRoles: UserRole[];
   badge?: string;
 };
 
@@ -45,6 +48,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/dashboard",
     icon: LayoutDashboard,
     status: "ready",
+    allowedRoles: ["super_admin", "admin"],
   },
   {
     key: "users",
@@ -53,6 +57,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/users",
     icon: Users,
     status: "ready",
+    allowedRoles: ["super_admin", "admin", "operator"],
     badge: "156",
   },
   {
@@ -62,6 +67,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/roles",
     icon: Shield,
     status: "in-progress",
+    allowedRoles: ["super_admin"],
   },
   {
     key: "tokens",
@@ -70,6 +76,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/tokens",
     icon: Activity,
     status: "in-progress",
+    allowedRoles: ["super_admin", "admin", "finance"],
   },
   {
     key: "audit",
@@ -78,6 +85,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/audit",
     icon: FileText,
     status: "in-progress",
+    allowedRoles: ["super_admin", "admin"],
   },
   {
     key: "templates",
@@ -86,6 +94,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/templates",
     icon: Database,
     status: "in-progress",
+    allowedRoles: ["super_admin", "admin", "operator"],
   },
   {
     key: "storage",
@@ -94,6 +103,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/storage",
     icon: HardDrive,
     status: "in-progress",
+    allowedRoles: ["super_admin", "admin"],
   },
   {
     key: "settings",
@@ -102,6 +112,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     to: "/settings",
     icon: Settings,
     status: "in-progress",
+    allowedRoles: ["super_admin"],
   },
 ];
 
@@ -157,26 +168,51 @@ export const adminPageMetaMap: Record<AdminModuleKey, AdminPageMeta> = {
 };
 
 export function getAdminPageMeta(pathname: string): AdminPageMeta {
-  if (pathname.startsWith("/users")) {
-    return adminPageMetaMap.users;
-  }
-  if (pathname.startsWith("/roles")) {
-    return adminPageMetaMap.roles;
-  }
-  if (pathname.startsWith("/tokens")) {
-    return adminPageMetaMap.tokens;
-  }
-  if (pathname.startsWith("/audit")) {
-    return adminPageMetaMap.audit;
-  }
-  if (pathname.startsWith("/templates")) {
-    return adminPageMetaMap.templates;
-  }
-  if (pathname.startsWith("/storage")) {
-    return adminPageMetaMap.storage;
-  }
-  if (pathname.startsWith("/settings")) {
-    return adminPageMetaMap.settings;
+  const matchedItem = matchAdminNavigationItem(pathname);
+  if (matchedItem) {
+    return adminPageMetaMap[matchedItem.key];
   }
   return adminPageMetaMap.dashboard;
+}
+
+export function getAllowedAdminNavigation(role?: UserRole | null): AdminNavigationItem[] {
+  if (!role) {
+    return [];
+  }
+  return adminNavigation.filter((item) => item.allowedRoles.includes(role));
+}
+
+export function getDefaultAdminRoute(role?: UserRole | null): string {
+  const firstAllowedItem = getAllowedAdminNavigation(role)[0];
+  return firstAllowedItem?.to ?? "/login";
+}
+
+export function canAccessAdminPath(role: UserRole | null | undefined, pathname: string): boolean {
+  if (!role) {
+    return false;
+  }
+
+  if ((pathname.trim() || "/") === "/") {
+    return true;
+  }
+
+  const matchedItem = matchAdminNavigationItem(pathname);
+  if (!matchedItem) {
+    return false;
+  }
+
+  return matchedItem.allowedRoles.includes(role);
+}
+
+function matchAdminNavigationItem(pathname: string): AdminNavigationItem | null {
+  const normalizedPath = pathname.trim() || "/";
+  const matchedItem = adminNavigation.find((item) => {
+    if (item.to === normalizedPath) {
+      return true;
+    }
+
+    return normalizedPath.startsWith(`${item.to}/`);
+  });
+
+  return matchedItem ?? null;
 }

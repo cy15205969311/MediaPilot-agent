@@ -2,7 +2,7 @@
 
 Last updated: `2026-05-03`
 
-`MediaPilot-agent` is the repository name. Some runtime labels, API titles, and legacy code paths may still reference `OmniMedia Agent`. Both names describe the same product: a shared AI content platform with a creator workspace and an admin console.
+`MediaPilot-agent` is the repository name. Runtime labels, API descriptions, and some legacy code paths may still reference `OmniMedia Agent`. Both names refer to the same product: a shared AI content platform that combines a creator workspace and an admin console.
 
 `README.md` is the Chinese engineering guide. `DEVELOPMENT.md` must remain English-only.
 
@@ -14,7 +14,7 @@ Use this document when you need to:
 - develop backend APIs in `app/`
 - work on the creator workspace in `frontend/`
 - work on the admin console in `omnimedia-admin-web/`
-- validate auth, streaming, uploads, knowledge, billing, and admin-governance behavior
+- validate auth, streaming, uploads, knowledge, billing, RBAC, and admin-governance behavior
 - prepare changes for review, commit, and push
 
 ## 2. Product Architecture
@@ -22,8 +22,8 @@ Use this document when you need to:
 The repository contains one shared backend and two web clients:
 
 - `app/`: shared `FastAPI` backend for auth, sessions, streaming chat, thread history, uploads, knowledge base, topics, templates, dashboards, admin operations, and token ledgers
-- `frontend/`: creator workspace for generation, drafting, multimodal input, artifact viewing, history, profile management, and security settings
-- `omnimedia-admin-web/`: admin console for operator authentication, dashboard views, user governance, account-status control, and token operations
+- `frontend/`: creator workspace for generation, drafting, multimodal input, asset viewing, history, profile management, and security settings
+- `omnimedia-admin-web/`: admin console for privileged users and back-office operators, including user governance, RBAC, route-aware workspaces, dashboard views, token operations, and session activity telemetry
 - `extension/`: reserved area for browser-extension or external publishing integrations
 
 Default local infrastructure:
@@ -219,68 +219,17 @@ The system enforces account freezing across backend and frontend layers:
 - admin freeze actions revoke refresh sessions and invalidate related access tokens
 - the creator workspace globally intercepts `ACCOUNT_FROZEN`, clears auth state, aborts active streams, and redirects users back to login
 
-### 7.2 Admin token operations
+### 7.2 Commercial token lifecycle
 
-Admin token adjustment uses explicit action-based commands instead of signed deltas:
+The current monetization baseline follows a prepaid model:
 
-- `add`
-- `deduct`
-- `set`
-
-The request contract requires:
-
-- `action`
-- `amount`
-- `remark`
-
-The admin UI exposes an action switcher, quick-pack inputs, preview metrics, and required audit remarks.
-
-### 7.3 Multimodal token accounting
-
-The billing flow tracks real model usage across multimodal workflows:
-
-- provider stream chunks may emit usage
-- artifact-structuring calls contribute their own usage
-- vision preprocessing nodes record usage independently
-- `GraphState` carries `token_usage` as a `{model_name: token_count}` map
-- final billing inserts one `TokenTransaction` row per model instead of estimating usage from output text
-
-### 7.4 Provider usage propagation fix
-
-The current provider baseline includes explicit usage propagation safeguards:
-
-- stream-based provider calls attempt `stream_options={"include_usage": True}`
-- `OpenAIProvider`, `CompatibleLLMProvider`, and `QwenLLMProvider` emit accumulated `token_usage` in the final `done` event
-- warning logs surface when upstream rejects `include_usage` or when a request still ends without tracked usage
-- `agent.py` logs the final `token_usage` payload before ledger persistence
-
-### 7.5 SQLite transaction isolation
-
-Because `SQLite` uses coarse-grained write locks, write paths must remain short-lived:
-
-- no streaming response should hold an open write transaction for the full generation lifecycle
-- final token-ledger writes use a dedicated `SessionLocal()` session
-- billing code performs `commit`, `rollback`, and `close` inside the ledger helper
-- read-heavy endpoints such as thread history, dashboards, and admin lists must not block behind a lingering write lock
-
-### 7.6 Commercial token lifecycle
-
-The product currently follows a first-pass prepaid token model:
-
-- user registration grants `10_000_000` initial tokens
+- registration grants `10_000_000` initial tokens
 - registration writes both the `User` row and a matching `TokenTransaction(transaction_type="grant")` row in one transaction
+- standard users with `token_balance <= 0` receive `402 INSUFFICIENT_TOKENS` before model execution begins
 - the creator workspace profile UI exposes a token asset panel for standard users
 - the top-up entry remains a placeholder until payment integration is introduced
 
-### 7.7 Pre-flight balance enforcement
-
-The media chat entrypoint performs a balance check before any expensive workflow begins:
-
-- standard users with `token_balance <= 0` receive `402 INSUFFICIENT_TOKENS`
-- the request is rejected before LangGraph execution and before any model-provider call
-- the frontend turns this into a commercial insufficient-balance prompt instead of a silent failure
-
-### 7.8 Privileged account bypass
+### 7.3 Privileged account bypass
 
 Management accounts follow a different billing policy:
 
@@ -290,43 +239,48 @@ Management accounts follow a different billing policy:
 - privileged runs do not create normal consumption ledger rows
 - the creator workspace renders these accounts as an unlimited-credit state
 
-### 7.9 Runtime generation budget guard
+### 7.4 Multimodal token accounting
 
-This update adds a stronger generation-time quota guard for standard users:
+The billing flow tracks real model usage across multimodal workflows:
 
-- `MediaChatRequest` now includes an internal `max_generation_tokens` field
+- provider stream chunks may emit usage
+- artifact-structuring calls contribute their own usage
+- vision preprocessing nodes record usage independently
+- `LangGraph` state carries `token_usage` as a `{model_name: token_count}` map
+- final billing inserts one `TokenTransaction` row per model instead of estimating usage from output text
+
+### 7.5 Provider usage propagation
+
+The provider layer includes explicit usage propagation safeguards:
+
+- stream-based provider calls attempt `stream_options={"include_usage": True}`
+- `OpenAIProvider`, `CompatibleLLMProvider`, and `QwenLLMProvider` emit accumulated `token_usage` in the final `done` event
+- warning logs surface when upstream rejects `include_usage` or when a request still ends without tracked usage
+- `agent.py` logs the final `token_usage` payload before ledger persistence
+
+### 7.6 SQLite write isolation
+
+Because `SQLite` uses coarse-grained write locks, write paths must stay short-lived:
+
+- no streaming response should hold an open write transaction for the full generation lifecycle
+- final token-ledger writes use a dedicated `SessionLocal()` session
+- billing code performs `commit`, `rollback`, and `close` inside the ledger helper
+- read-heavy endpoints such as thread history, dashboards, and admin lists must not block behind a lingering write lock
+
+### 7.7 Runtime generation budget and zero-floor billing
+
+Quota enforcement now uses both runtime budgeting and persistence protection:
+
+- `MediaChatRequest` includes an internal `max_generation_tokens` field
 - `app/services/agent.py` computes a runtime generation budget from the current user balance before calling the effective provider
 - the budget is injected only for non-privileged users
 - `app/services/providers.py` forwards the budget into compatible provider calls as `max_tokens`
+- final token deduction follows a zero-floor balance rule
+- the database no longer stores negative token balances
+- the ledger records the actual billable deduction, not a theoretical overdraft
+- for multimodel runs, the actual deducted total is allocated back across model rows for auditing consistency
 
-The goal is to reduce over-generation before the final ledger step, not only after the fact.
-
-### 7.10 Zero-floor billing protection
-
-This update also hardens final token deduction:
-
-- final ledger deduction now follows a zero-floor balance rule
-- user balances can no longer become negative in the database
-- the ledger records the actual billable deduction, not a theoretical overdraft amount
-- for multimodel runs, the actual deducted total is allocated back across model rows so the ledger stays auditable per model
-
-Even if an upstream provider does not perfectly respect `max_tokens`, the persistence layer now guarantees that balances do not fall below zero.
-
-### 7.11 Admin latest-session activity telemetry
-
-The admin user list now exposes real session-based recent-activity data:
-
-- `GET /api/v1/admin/users` includes `latest_session` for each returned user
-- `latest_session` currently contains:
-  - `device_info`
-  - `ip_address`
-  - `last_seen_at`
-  - `created_at`
-- the backend selects the newest `RefreshSession` row per user for the current page
-- the admin console renders real device information and relative activity time instead of a placeholder
-- the same session summary is also shown in the user detail drawer
-
-### 7.12 Admin user-center hardening
+### 7.8 Admin user center hardening
 
 The admin user center follows a stricter governance baseline:
 
@@ -339,7 +293,91 @@ The admin user center follows a stricter governance baseline:
 - `super_admin` and `admin` accounts are displayed as unlimited-balance accounts in the console
 - row-level floating action menus were removed in favor of the right-side detail drawer to avoid clipping caused by table `overflow`
 
-### 7.13 Creator upload capture UX
+### 7.9 Admin recent-session activity telemetry
+
+The admin user list exposes real session-based recent-activity data:
+
+- `GET /api/v1/admin/users` includes `latest_session` for each returned user
+- `latest_session` currently contains:
+  - `device_info`
+  - `ip_address`
+  - `last_seen_at`
+  - `created_at`
+- the backend selects the newest `RefreshSession` row per user for the current page
+- the admin console renders real device information and relative activity time instead of a placeholder
+- the same session summary is also shown in the user detail drawer
+
+### 7.10 Enterprise RBAC baseline
+
+The admin console now has a real RBAC chain that covers role definition, role assignment, and role-aware routing:
+
+- current persisted role values:
+  - `super_admin`
+  - `admin`
+  - `finance`
+  - `operator`
+  - `premium`
+  - `user`
+- the admin role-management page is implemented as a real screen at `/roles`
+- the page supports role cards, grouped permissions, a right-side configuration drawer, and immutable system-role behavior
+- role assignment is available from the admin user center through `PATCH /api/v1/admin/users/{user_id}/role`
+- only `super_admin` can change roles
+- self-role changes are blocked
+- peer `super_admin` role changes are blocked
+
+### 7.11 Dynamic role-aware workspaces
+
+The admin console now uses one shared route-permission map for navigation and guard behavior:
+
+- `omnimedia-admin-web/src/adminMeta.ts` defines menu items, allowed roles, page metadata, and per-role default workspaces
+- `AdminLayout` renders only the menu items that the current role is allowed to access
+- `AuthGuard` intercepts direct URL access to disallowed admin pages
+- when a user hits a forbidden route, the app redirects to that role's first safe workspace and shows a warning toast instead of leaving the page stuck in a loading state
+
+Current default workspaces:
+
+- `super_admin` -> `/dashboard`
+- `admin` -> `/dashboard`
+- `operator` -> `/users`
+- `finance` -> `/tokens`
+
+### 7.12 Admin role-summary aggregation
+
+Role membership counts are no longer mocked on the RBAC page:
+
+- backend route: `GET /api/v1/admin/roles/summary`
+- implementation: `GROUP BY User.role`
+- current authorization: `super_admin` only
+- current response shape: `{ "super_admin": 2, "operator": 6, "finance": 3, "user": 145 }`
+- the admin RBAC page loads that summary and replaces static card counts with real values
+- if the summary request fails, the page falls back to `0` and surfaces a warning toast instead of showing fake numbers
+
+### 7.13 Admin route and capability matrix
+
+The current access policy is:
+
+| Page or capability | super_admin | admin | operator | finance |
+| --- | --- | --- | --- | --- |
+| Dashboard `/dashboard` | yes | yes | no | no |
+| User Center `/users` | yes | yes | yes | no |
+| Roles `/roles` | yes | no | no | no |
+| Token Ledger `/tokens` | yes | yes | no | yes |
+| Audit `/audit` | yes | yes | no | no |
+| Templates `/templates` | yes | yes | yes | no |
+| Storage `/storage` | yes | yes | no | no |
+| Settings `/settings` | yes | no | no | no |
+| `GET /api/v1/admin/users` | yes | yes | yes | yes |
+| user status/password/token mutation | yes | yes | yes | no |
+| user role mutation | yes | no | no | no |
+| role membership summary | yes | no | no | no |
+
+Notes:
+
+- `finance` is currently a read-oriented back-office role for ledger and financial visibility
+- `admin` remains a compatible high-privilege role for governance and billing exemptions, but it is not allowed to edit system RBAC definitions
+- the visible RBAC cards currently focus on built-in system-management roles such as super admin, operator, and finance; `admin` is still a valid persisted role and can still be assigned from the user center
+
+### 7.14 Creator upload capture UX
 
 The creator workspace upload entry uses one shared material-ingestion pipeline:
 
@@ -370,7 +408,7 @@ Current known limitations:
 - byte-level percentage progress is not available
 - the UI mainly exposes queue states such as `uploading`, `ready`, and `error`
 
-### 7.14 Creator artifact asset matrix and contextual handoff
+### 7.15 Creator artifact asset matrix and contextual handoff
 
 The creator right-side result panel has been upgraded from a single-latest-artifact renderer into a thread-level artifact matrix:
 
@@ -390,15 +428,6 @@ The top task selector remains an input-task selector, not a backend multi-task b
 - switching the selector does not imply that other artifacts already exist
 - the backend still executes one task per request
 - any "one-click pipeline" experience must be implemented as explicit frontend-guided follow-up requests
-
-### 7.15 Billing diagnostics
-
-Current diagnostics now include:
-
-- provider warnings when usage is missing
-- final `token_usage` logging in `agent.py` before ledger persistence
-- skipped-ledger logging that includes the raw `token_usage` payload
-- ledger success logging that now includes both `requested_total` and `billed_total`
 
 ## 8. Backend Boundaries
 
@@ -421,14 +450,14 @@ Current route modules under `app/api/v1/` include:
 
 ### 8.2 Layering rules
 
-- `app/api/` should focus on request validation, auth dependencies, response models, and HTTP status handling
-- `app/services/` should own business logic, orchestration, parsing, providers, and persistence helpers
-- `app/db/` should own engine setup, sessions, ORM models, and migration-safe schema helpers
-- `app/models/` should own Pydantic schemas and shared API contracts
+- `app/api/` handles request validation, dependency injection, HTTP status codes, and response models
+- `app/services/` handles workflows, providers, parsing, storage, and business logic
+- `app/db/` handles the engine, sessions, ORM models, and migration compatibility
+- `app/models/` handles Pydantic schemas and shared API contracts
 
-Avoid moving database-heavy orchestration into route files when a service abstraction is more appropriate.
+Avoid pushing long-lived business orchestration and complex data-access code into the route layer.
 
-## 9. API Surface Summary
+## 9. Key API Surface
 
 ### 9.1 Auth and user endpoints
 
@@ -444,7 +473,7 @@ Avoid moving database-heavy orchestration into route files when a service abstra
 - `PATCH /api/v1/auth/profile`
 - `GET /api/v1/users/me`
 
-### 9.2 Media workflow endpoints
+### 9.2 Media and generation workflow
 
 - `POST /api/v1/media/chat/stream`
 - `GET /api/v1/media/threads`
@@ -456,7 +485,7 @@ Avoid moving database-heavy orchestration into route files when a service abstra
 - `GET /api/v1/media/dashboard/summary`
 - `GET /api/v1/models/available`
 
-### 9.3 Knowledge, templates, and topics
+### 9.3 Knowledge, template, and topic endpoints
 
 - `GET /api/v1/media/templates`
 - `POST /api/v1/media/templates`
@@ -476,67 +505,59 @@ Avoid moving database-heavy orchestration into route files when a service abstra
 - `POST /api/v1/admin/users/{user_id}/status`
 - `POST /api/v1/admin/users/{user_id}/reset-password`
 - `POST /api/v1/admin/users/{user_id}/tokens`
+- `PATCH /api/v1/admin/users/{user_id}/role`
+- `GET /api/v1/admin/roles/summary`
 - `GET /api/v1/admin/dashboard`
 
 ## 10. Validation Checklist
 
-Validate the areas you changed before pushing.
+Validate the parts you actually changed before you push.
 
-### 10.1 General checks
+### 10.1 General validation
 
 - backend syntax check: `python -m compileall app`
-- creator workspace build or targeted validation when `frontend/` changes
-- admin console build or targeted validation when `omnimedia-admin-web/` changes
-- API contract compatibility for any schema changes
-- transaction safety for any `SQLite` write-path change
+- if `frontend/` changed: run the relevant build or targeted verification
+- if `omnimedia-admin-web/` changed: run `npm run build`
+- if schemas changed: verify frontend/backend contract compatibility
+- if database write paths changed: verify `SQLite` lock release and read-endpoint responsiveness
 
-### 10.2 Current high-priority checks
+### 10.2 RBAC and admin-governance validation
 
-1. Freeze a standard user from the admin console and confirm forced logout behavior.
-2. Adjust tokens with `add`, `deduct`, and `set`, then confirm balance changes and ledger rows.
-3. Run an audio, image, or video generation flow and confirm model-specific `TokenTransaction` rows are created.
-4. Verify `GET /api/v1/media/threads` still returns promptly after streaming generation completes.
-5. If usage is still missing, inspect logs for:
-   - `include_usage rejected`
-   - `agent.stream final token_usage ...`
-   - `agent.stream token_ledger skipped ...`
-6. Set a standard user balance to `0` and confirm `POST /api/v1/media/chat/stream` returns `402 INSUFFICIENT_TOKENS`.
-7. Set a small standard-user balance, trigger a larger generation, and confirm:
-   - the request uses the runtime generation budget
-   - the final database balance never becomes negative
-   - the ledger writes only the actual billed deduction
-8. Verify an `admin` or `super_admin` account can still generate with balance `0` and does not produce normal consumption rows.
-9. Open the admin user center and confirm:
-   - real `avatar_url` values render actual images
-   - the search box auto-restores the full list when cleared
-   - `super_admin` rows expose no destructive controls
-   - latest-session activity now renders real device and time data instead of a placeholder
-10. Open the user detail drawer and confirm the recent-activity summary matches the table row.
-11. Validate the upgraded creator upload entry:
-   - paste a screenshot into the composer with `Ctrl+V`
-   - drag a supported file onto the composer
-   - try an unsupported extension
-   - try an oversized file
-12. Validate the creator artifact matrix:
-   - generate a content draft, then verify the right panel shows the draft under its local artifact tab
-   - generate another artifact type in the same thread and confirm the panel now exposes multiple tabs
-   - switch the global task selector and confirm previously generated artifacts remain available
+1. Sign in as `super_admin` and confirm that all admin menu items are visible.
+2. Sign in as `operator` and confirm that the default landing route is `/users` and that dashboard or settings entries are not rendered.
+3. Sign in as `finance` and confirm that the default landing route is `/tokens` and that user-governance entries are not rendered.
+4. Manually open a forbidden route, such as `/dashboard` as `operator`, and confirm that the app redirects to the safe workspace with a toast instead of leaving the page stuck.
+5. Change a standard user's role from the admin user center and confirm that:
+   - `PATCH /api/v1/admin/users/{user_id}/role` succeeds
+   - the user-list badge updates immediately
+   - `super_admin` cannot change its own role
+   - `super_admin` cannot change another `super_admin`
+6. Open the RBAC page and confirm that member counts come from the real summary endpoint instead of mock constants.
+7. Confirm that `super_admin` rows remain protected from freeze, password reset, and token adjustment actions.
+
+### 10.3 Billing and multimodal validation
+
+1. Freeze a standard user and confirm that the active session is revoked.
+2. Perform `add / deduct / set` token operations and confirm balance and ledger consistency.
+3. Run a multimodal task and confirm that token usage is split across real per-model `TokenTransaction` rows.
+4. Set a standard user balance to `0`, call `POST /api/v1/media/chat/stream`, and confirm `402 INSUFFICIENT_TOKENS`.
+5. Run a long task with a low-balance standard user and confirm that final balance does not fall below `0`.
 
 ## 11. Commit Convention
 
-Use Conventional Commits:
+This repository uses Conventional Commits:
 
-- `feat:` for features
-- `fix:` for bug fixes
-- `refactor:` for behavior-preserving restructuring
-- `docs:` for documentation-only changes
-- `test:` for test changes
-- `chore:` for maintenance work
+- `feat:` new user-facing capability or feature expansion
+- `fix:` bug fix
+- `refactor:` internal structural change without intended external behavior change
+- `docs:` documentation-only change
+- `test:` test addition or test adjustment
+- `chore:` maintenance work
 
 Example:
 
 ```text
-feat: harden token billing safeguards and surface admin session activity
+feat: enforce role-aware admin workspaces and aggregate live role membership
 ```
 
-When code and documentation move together in one feature delivery, prefer the commit type that describes the primary engineering outcome. For the current change set, `feat:` is the correct choice.
+When a changeset contains both feature code and documentation updates, choose the type based on the primary engineering impact. For the current admin RBAC and routing work, `feat:` is the correct type.

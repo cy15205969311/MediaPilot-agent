@@ -1,8 +1,10 @@
 import { API_BASE_URL } from "./config";
 import type {
   AdminDashboardData,
+  AdminRoleSummaryResponse,
   AdminUserItem,
   AdminUserPasswordResetApiResponse,
+  AdminUserRoleUpdatePayload,
   AdminUserStatusPayload,
   AdminUserTokenUpdateApiResponse,
   AdminUserTokenUpdatePayload,
@@ -52,7 +54,12 @@ export class APIError extends Error {
 }
 
 export function isAdminRole(role?: string | null): role is UserRole {
-  return role === "super_admin" || role === "admin" || role === "operator";
+  return (
+    role === "super_admin" ||
+    role === "admin" ||
+    role === "finance" ||
+    role === "operator"
+  );
 }
 
 export function getStoredToken(): string {
@@ -491,6 +498,16 @@ export async function fetchAdminDashboardSummary(): Promise<AdminDashboardData> 
   return (await response.json()) as AdminDashboardData;
 }
 
+export async function fetchAdminRoleSummary(): Promise<AdminRoleSummaryResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/roles/summary",
+    { method: "GET" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminRoleSummaryResponse;
+}
+
 export async function updateAdminUserStatus(
   userId: string,
   payload: AdminUserStatusPayload,
@@ -539,4 +556,23 @@ export async function updateAdminUserTokens(
   );
 
   return (await response.json()) as AdminUserTokenUpdateApiResponse;
+}
+
+export async function updateAdminUserRole(
+  userId: string,
+  payload: AdminUserRoleUpdatePayload,
+): Promise<AdminUserItem> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/users/${userId}/role`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminUserItem;
 }

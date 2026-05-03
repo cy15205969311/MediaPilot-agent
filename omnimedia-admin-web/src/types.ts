@@ -1,6 +1,7 @@
 export type UserRole =
   | "super_admin"
   | "admin"
+  | "finance"
   | "operator"
   | "premium"
   | "user";
@@ -75,6 +76,8 @@ export type AdminDashboardData = {
   model_usage_ratio: AdminDashboardModelUsageItem[];
 };
 
+export type AdminRoleSummaryResponse = Partial<Record<UserRole, number>>;
+
 export type AdminUserStatusPayload = {
   status: UserStatus;
 };
@@ -100,6 +103,27 @@ export type AdminUserTokenUpdateApiResponse = {
   amount: number;
   transaction_type: string;
   remark: string;
+};
+
+export type AdminUserRoleUpdatePayload = {
+  role: UserRole;
+};
+
+export type PermissionModule = "users" | "assets" | "content" | "finance";
+
+export type Permission = {
+  id: string;
+  label: string;
+  description: string;
+  module: PermissionModule;
+};
+
+export type Role = {
+  id: string;
+  name: string;
+  memberCount: number;
+  permissions: string[];
+  isSystem: boolean;
 };
 
 export type AdminToast = {

@@ -15,6 +15,7 @@ from app.models.schemas import (
     AdminUserListItem,
     AdminUserListResponse,
     AdminUserPasswordResetResponse,
+    AdminUserRoleUpdateRequest,
     AdminUserStatusUpdateRequest,
     AdminUserTokenUpdateRequest,
     AdminUserTokenUpdateResponse,
@@ -32,9 +33,13 @@ from app.services.persistence import resolve_media_reference
 from app.services.token_usage import LEGACY_MODEL_NAME
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-users"])
-require_admin_role = RequireRole(["super_admin", "admin", "operator"])
+require_admin_view_role = RequireRole(["super_admin", "admin", "finance", "operator"])
+require_admin_manage_role = RequireRole(["super_admin", "admin", "operator"])
+require_super_admin_role = RequireRole(["super_admin"])
+
 PASSWORD_SPECIAL_CHARS = "!@#$%^&*"
 PROTECTED_SUPER_ADMIN_DETAIL = "禁止修改超级管理员账号。"
+ROLE_CHANGE_FORBIDDEN_DETAIL = "不允许的越权操作。"
 
 
 def _resolve_admin_token_change(
@@ -149,6 +154,17 @@ def _ensure_target_user_is_mutable(user: User) -> None:
         raise HTTPException(status_code=403, detail=PROTECTED_SUPER_ADMIN_DETAIL)
 
 
+def _ensure_role_change_allowed(*, actor: User, target: User) -> None:
+    if actor.role != "super_admin":
+        raise HTTPException(status_code=403, detail=ROLE_CHANGE_FORBIDDEN_DETAIL)
+
+    if actor.id == target.id:
+        raise HTTPException(status_code=403, detail="不能修改自己的角色。")
+
+    if target.role == "super_admin":
+        raise HTTPException(status_code=403, detail="不能修改其他超级管理员的角色。")
+
+
 def _generate_random_password(length: int = 8) -> str:
     if length < 8:
         raise ValueError("Password length must be at least 8.")
@@ -172,7 +188,7 @@ async def list_admin_users(
     limit: int = Query(default=20, ge=1, le=100),
     search: str | None = Query(default=None, max_length=64),
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin_role),
+    _: User = Depends(require_admin_view_role),
 ) -> AdminUserListResponse:
     filters = []
     normalized_search = (search or "").strip()
@@ -207,12 +223,23 @@ async def list_admin_users(
     )
 
 
+@router.get("/roles/summary", response_model=dict[str, int])
+async def get_admin_role_summary(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_super_admin_role),
+) -> dict[str, int]:
+    rows = db.execute(
+        select(User.role, func.count(User.id)).group_by(User.role),
+    ).all()
+    return {str(role): int(count) for role, count in rows}
+
+
 @router.post("/users/{user_id}/status", response_model=AdminUserListItem)
 async def update_admin_user_status(
     user_id: str,
     payload: AdminUserStatusUpdateRequest,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin_role),
+    _: User = Depends(require_admin_manage_role),
 ) -> AdminUserListItem:
     user = _get_target_user_or_404(db, user_id)
     _ensure_target_user_is_mutable(user)
@@ -252,7 +279,7 @@ async def update_admin_user_status(
 async def reset_admin_user_password(
     user_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin_role),
+    _: User = Depends(require_admin_manage_role),
 ) -> AdminUserPasswordResetResponse:
     user = _get_target_user_or_404(db, user_id)
     _ensure_target_user_is_mutable(user)
@@ -292,7 +319,7 @@ async def update_admin_user_tokens(
     user_id: str,
     payload: AdminUserTokenUpdateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin_role),
+    current_user: User = Depends(require_admin_manage_role),
 ) -> AdminUserTokenUpdateResponse:
     user = _get_target_user_or_404(db, user_id)
     _ensure_target_user_is_mutable(user)
@@ -334,3 +361,27 @@ async def update_admin_user_tokens(
         transaction_type=transaction.transaction_type,
         remark=transaction.remark,
     )
+
+
+@router.patch("/users/{user_id}/role", response_model=AdminUserListItem)
+async def update_admin_user_role(
+    user_id: str,
+    payload: AdminUserRoleUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_super_admin_role),
+) -> AdminUserListItem:
+    user = _get_target_user_or_404(db, user_id)
+    _ensure_role_change_allowed(actor=current_user, target=user)
+
+    if user.role != payload.role.value:
+        user.role = payload.role.value
+
+        try:
+            db.commit()
+            db.refresh(user)
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail="角色变更失败，请稍后重试。") from exc
+
+    latest_session = _load_latest_sessions_for_users(db, user_ids=[user.id]).get(user.id)
+    return _build_admin_user_item(user, latest_session=latest_session)

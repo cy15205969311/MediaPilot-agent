@@ -8,7 +8,7 @@ from app.services.admin_dashboard import build_admin_dashboard_summary
 from app.services.auth import RequireRole
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-dashboard"])
-require_admin_dashboard_role = RequireRole(["super_admin", "admin"])
+require_admin_dashboard_role = RequireRole(["super_admin", "admin", "finance"])
 
 
 @router.get("/dashboard", response_model=AdminDashboardResponse)

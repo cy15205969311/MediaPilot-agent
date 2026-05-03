@@ -87,10 +87,13 @@ export function formatRoleLabel(role: UserRole): string {
     return "超级管理员";
   }
   if (role === "admin") {
-    return "管理员";
+    return "平台管理员";
+  }
+  if (role === "finance") {
+    return "财务人员";
   }
   if (role === "operator") {
-    return "运营成员";
+    return "运营人员";
   }
   if (role === "premium") {
     return "高级用户";

@@ -528,7 +528,7 @@ export type AuthenticatedUser = {
   nickname?: string | null;
   bio?: string | null;
   avatar_url?: string | null;
-  role?: "super_admin" | "admin" | "operator" | "premium" | "user";
+  role?: "super_admin" | "admin" | "finance" | "operator" | "premium" | "user";
   status?: "active" | "frozen";
   token_balance?: number;
   created_at: string;

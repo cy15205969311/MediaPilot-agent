@@ -6,18 +6,19 @@ import {
   FileText,
   HardDrive,
   Settings,
-  Shield,
   Wallet,
   XCircle,
 } from "lucide-react";
-import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { clearStoredSession, getStoredUser, isAdminRole, logoutAPI } from "./api";
+import { getDefaultAdminRoute } from "./adminMeta";
 import { AdminLayout } from "./components/AdminLayout";
 import { AuthGuard } from "./components/AuthGuard";
 import { ToastViewport } from "./components/ToastViewport";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
+import { AdminRolesPage } from "./pages/AdminRolesPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { Login } from "./pages/Login";
 import type { AdminToast, AuthenticatedUser } from "./types";
@@ -29,8 +30,33 @@ type ToastState = AdminToast & {
 function ProtectedShell(props: {
   currentUser: AuthenticatedUser;
   onLogout: () => Promise<void>;
+  onToast: (toast: AdminToast) => void;
 }) {
-  const { currentUser, onLogout } = props;
+  const { currentUser, onLogout, onToast } = props;
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const notice = (location.state as { routeGuardNotice?: string } | null)?.routeGuardNotice;
+    if (!notice) {
+      return;
+    }
+
+    onToast({
+      tone: "warning",
+      title: "已切换至安全工作区",
+      message: notice,
+    });
+
+    navigate(
+      {
+        pathname: location.pathname,
+        search: location.search,
+        hash: location.hash,
+      },
+      { replace: true, state: null },
+    );
+  }, [location.hash, location.pathname, location.search, location.state, navigate, onToast]);
 
   return (
     <AdminLayout currentUser={currentUser} onLogout={onLogout}>
@@ -90,6 +116,7 @@ function App() {
     currentUser !== null &&
     currentUser.status === "active" &&
     isAdminRole(currentUser.role);
+  const defaultAdminRoute = currentUser ? getDefaultAdminRoute(currentUser.role) : "/login";
 
   return (
     <>
@@ -98,7 +125,7 @@ function App() {
           path="/login"
           element={
             isCurrentUserAllowed ? (
-              <Navigate replace to="/dashboard" />
+              <Navigate replace to={defaultAdminRoute} />
             ) : (
               <Login onAuthenticated={handleAuthenticated} onToast={pushToast} />
             )
@@ -113,13 +140,17 @@ function App() {
           <Route
             element={
               currentUser ? (
-                <ProtectedShell currentUser={currentUser} onLogout={handleLogout} />
+                <ProtectedShell
+                  currentUser={currentUser}
+                  onLogout={handleLogout}
+                  onToast={pushToast}
+                />
               ) : (
                 <Navigate replace to="/login" />
               )
             }
           >
-            <Route path="/" element={<Navigate replace to="/dashboard" />} />
+            <Route path="/" element={<Navigate replace to={defaultAdminRoute} />} />
             <Route path="/dashboard" element={<AdminDashboardPage onToast={pushToast} />} />
             <Route
               path="/users"
@@ -131,24 +162,7 @@ function App() {
                 )
               }
             />
-            <Route
-              path="/roles"
-              element={
-                <AdminPlaceholderPage
-                  badge="RBAC Roadmap"
-                  ctaLabel="前往用户中心"
-                  ctaTo="/users"
-                  description="这里会继续承接角色组、菜单权限、操作授权和审批策略，后续可直接与后台权限模型对接。"
-                  highlights={[
-                    "建议将角色与菜单权限拆成独立资源，方便后续做细粒度授权。",
-                    "高风险操作可以先统一沉淀到这里，再逐步补齐审批流。",
-                    "当前路由守卫已经严格限制只有管理角色可以进入后台。",
-                  ]}
-                  icon={<Shield className="h-6 w-6" />}
-                  title="角色权限模块建设中"
-                />
-              }
-            />
+            <Route path="/roles" element={<AdminRolesPage onToast={pushToast} />} />
             <Route
               path="/tokens"
               element={
@@ -239,12 +253,13 @@ function App() {
                 />
               }
             />
+            <Route path="*" element={<Navigate replace to={defaultAdminRoute} />} />
           </Route>
         </Route>
 
         <Route
           path="*"
-          element={<Navigate replace to={isCurrentUserAllowed ? "/dashboard" : "/login"} />}
+          element={<Navigate replace to={isCurrentUserAllowed ? defaultAdminRoute : "/login"} />}
         />
       </Routes>
 
