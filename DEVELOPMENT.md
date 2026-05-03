@@ -348,6 +348,34 @@ Current known limitations:
 - byte-level percentage progress is not available yet
 - the UI only exposes queue states such as `uploading`, `ready`, and `error`, plus large-file waiting hints
 
+### 7.12 Creator artifact asset matrix and contextual handoff
+
+The creator right-side result panel has been upgraded from a single-latest-artifact renderer into a thread-level artifact matrix:
+
+- the workspace derives artifact entries from the current thread `messages` plus the latest streamed artifact state
+- artifact results are indexed by task type and exposed as local panel tabs instead of being overwritten by the latest task switch
+- the panel keeps an independent selected-artifact state so generated results do not disappear when the top task selector changes
+
+Current panel tab categories:
+
+- `content_generation`
+- `comment_reply`
+- `topic_planning`
+- `hot_post_analysis`
+
+The top task selector remains an input-task selector, not a backend multi-task batch switch:
+
+- switching the selector does not imply that other artifacts already exist
+- the backend still executes one task per request
+- any cross-stage "one-click pipeline" experience must be implemented as explicit frontend-guided follow-up requests
+
+The current contextual handoff baseline includes:
+
+- if a matching artifact already exists for the selected task type, the panel activates and renders that result
+- if the user switches to `comment_reply` while the thread already has a content draft but no comment-reply artifact, the panel shows a smart empty state instead of fake content
+- the smart empty state can trigger a follow-up request with a hidden prompt so the system generates comment replies from the existing draft context without changing backend task semantics
+- right-panel actions such as export, save-as-template, and publish must operate on the currently selected artifact, not blindly on the latest generated artifact
+
 ## 8. Backend Boundaries
 
 ### 8.1 Route groups
@@ -467,6 +495,13 @@ Recommended manual checks for the latest feature set:
    - try an unsupported extension and confirm the warning toast is shown
    - try an oversized file and confirm the size-limit warning is shown
    - exceed the per-capture or image-count limit and confirm the queue is truncated with a clear warning
+11. Validate the creator artifact asset matrix and contextual handoff:
+   - generate a content draft, then verify the right panel shows the draft under its local artifact tab
+   - generate an additional artifact type in the same thread and verify the panel now exposes multiple local tabs without losing the earlier artifact
+   - switch the global task selector and confirm the previously generated artifacts remain available in the panel
+   - switch to `comment_reply` when only a content draft exists and confirm the smart empty state appears instead of fake comment data
+   - trigger the handoff CTA and confirm a follow-up request creates a real comment-reply artifact that becomes selectable from the panel tabs
+   - run export or template actions from different tabs and confirm each action targets the currently selected artifact
 
 ## 11. Commit Convention
 

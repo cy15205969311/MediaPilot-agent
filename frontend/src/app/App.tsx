@@ -81,7 +81,7 @@ import { DraftsView } from "./components/views/DraftsView";
 import { KnowledgeView } from "./components/views/KnowledgeView";
 import { TopicsView } from "./components/views/TopicsView";
 import { TemplatesView } from "./components/views/TemplatesView";
-import { quickActions, taskOptions } from "./data";
+import { quickActions } from "./data";
 import type {
   ArtifactAction,
   ArtifactPayload,
@@ -222,6 +222,72 @@ function getPlatformDisplayLabel(platform: UiPlatform): string {
     return "抖音";
   }
   return "小红书";
+}
+
+function getTaskTypeLabel(taskType: UiTaskType): string {
+  switch (taskType) {
+    case "topic_planning":
+      return "选题策划";
+    case "hot_post_analysis":
+      return "爆款拆解";
+    case "comment_reply":
+      return "评论回复";
+    case "content_generation":
+    default:
+      return "内容生成";
+  }
+}
+
+function getTaskTypeFromArtifact(artifact: ArtifactPayload): UiTaskType {
+  switch (artifact.artifact_type) {
+    case "topic_list":
+      return "topic_planning";
+    case "hot_post_analysis":
+      return "hot_post_analysis";
+    case "comment_reply":
+      return "comment_reply";
+    case "content_draft":
+    default:
+      return "content_generation";
+  }
+}
+
+const ARTIFACT_TASK_DISPLAY_ORDER: UiTaskType[] = [
+  "content_generation",
+  "comment_reply",
+  "topic_planning",
+  "hot_post_analysis",
+];
+
+function buildArtifactTaskEntries(
+  messages: ConversationMessage[],
+  latestArtifact: ArtifactPayload | null,
+): Array<{ taskType: UiTaskType; artifact: ArtifactPayload }> {
+  const artifactMap = new Map<UiTaskType, ArtifactPayload>();
+
+  for (const message of messages) {
+    if (!message.artifact) {
+      continue;
+    }
+    artifactMap.set(getTaskTypeFromArtifact(message.artifact), message.artifact);
+  }
+
+  if (latestArtifact) {
+    artifactMap.set(getTaskTypeFromArtifact(latestArtifact), latestArtifact);
+  }
+
+  return ARTIFACT_TASK_DISPLAY_ORDER.flatMap((taskType) => {
+    const artifact = artifactMap.get(taskType);
+    return artifact ? [{ taskType, artifact }] : [];
+  });
+}
+
+function getArtifactHandoffPrompt(taskType: UiTaskType): string | null {
+  if (taskType === "comment_reply") {
+    return "请基于当前会话里已经生成的正文内容，输出一组高转化率的互动评论回复。请覆盖夸赞、质疑、价格咨询、使用反馈、催更等常见场景，并补充简短的合规提醒。";
+  }
+
+  return null;
 }
 
 function getFileExtension(filename: string): string {
@@ -1062,6 +1128,9 @@ function App() {
   const [activeView, setActiveView] = useState<WorkspaceView>("chat");
   const [platform, setPlatform] = useState<UiPlatform>("xiaohongshu");
   const [taskType, setTaskType] = useState<UiTaskType>("content_generation");
+  const [activeArtifactTaskType, setActiveArtifactTaskType] = useState<UiTaskType>(
+    "content_generation",
+  );
   const [modelOverride, setModelOverride] = useState<string>(() => {
     if (typeof window === "undefined") {
       return "";
@@ -1304,10 +1373,11 @@ function App() {
     };
   }, []);
 
-  const activeTaskLabel = useMemo(
-    () => taskOptions.find((item) => item.id === taskType)?.label ?? "内容生成",
-    [taskType],
-  );
+  useEffect(() => {
+    setActiveArtifactTaskType(taskType);
+  }, [taskType, activeThreadId]);
+
+  const activeTaskLabel = useMemo(() => getTaskTypeLabel(taskType), [taskType]);
 
   const workspaceTitle = useMemo(() => {
     if (platform === "xiaohongshu") {
@@ -1348,6 +1418,18 @@ function App() {
   const isUploading = useMemo(
     () => uploadedMaterials.some((item) => item.status === "uploading"),
     [uploadedMaterials],
+  );
+
+  const artifactTaskEntries = useMemo(
+    () => buildArtifactTaskEntries(messages, artifact),
+    [artifact, messages],
+  );
+
+  const displayedArtifact = useMemo(
+    () =>
+      artifactTaskEntries.find((entry) => entry.taskType === activeArtifactTaskType)?.artifact ??
+      null,
+    [activeArtifactTaskType, artifactTaskEntries],
   );
 
   const isDraftThread = activeThreadId === "thread-new";
@@ -3015,15 +3097,17 @@ function App() {
     });
   };
 
-  const handleSaveArtifactAsTemplate = () => {
-    if (!artifact) {
+  const handleSaveArtifactAsTemplate = (
+    targetArtifact: ArtifactPayload | null = artifact,
+  ) => {
+    if (!targetArtifact) {
       return;
     }
 
     const prefill = buildTemplatePrefillFromArtifact({
-      artifact,
+      artifact: targetArtifact,
       platform,
-      taskType,
+      taskType: getTaskTypeFromArtifact(targetArtifact),
       systemPrompt: activeSystemPrompt,
       threadTitle: activeThreadTitle,
     });
@@ -3151,33 +3235,36 @@ function App() {
     setStatusText(`已为选题绑定会话并预填草稿指令：${updatedTopic.title}`);
   };
 
-  const handleExportMarkdown = () => {
-    if (!artifact) {
+  const handleExportMarkdown = (targetArtifact: ArtifactPayload | null = artifact) => {
+    if (!targetArtifact) {
       setStatusText("当前还没有可导出的结构化结果");
       return;
     }
 
-    const markdownContent = buildArtifactMarkdown(artifact, {
-      taskLabel: activeTaskLabel,
+    const markdownContent = buildArtifactMarkdown(targetArtifact, {
+      taskLabel: getTaskTypeLabel(getTaskTypeFromArtifact(targetArtifact)),
       platformLabel: getPlatformDisplayLabel(platform),
     });
-    const downloadedFilename = downloadArtifactMarkdown(artifact, markdownContent);
+    const downloadedFilename = downloadArtifactMarkdown(targetArtifact, markdownContent);
     setStatusText(`Markdown 已导出：${downloadedFilename}`);
   };
 
-  const handlePublishToXiaohongshu = () => {
-    if (!artifact || artifact.artifact_type !== "content_draft") {
+  const handlePublishToXiaohongshu = (
+    targetArtifact: ArtifactPayload | null = artifact,
+  ) => {
+    if (!targetArtifact || targetArtifact.artifact_type !== "content_draft") {
       setStatusText("当前还没有可发布到小红书的图文草稿");
       return;
     }
 
     const preferredTitle =
-      artifact.title_candidates.find((candidate) => candidate.trim()) ?? artifact.title;
+      targetArtifact.title_candidates.find((candidate) => candidate.trim()) ??
+      targetArtifact.title;
     const publishTitle = cleanForPublishing(preferredTitle).trim();
     const publishContent = cleanForPublishing(
-      [artifact.body, artifact.platform_cta].filter(Boolean).join("\n\n"),
+      [targetArtifact.body, targetArtifact.platform_cta].filter(Boolean).join("\n\n"),
     );
-    const imageUrls = (artifact.generated_images ?? []).filter((url) => url.trim());
+    const imageUrls = (targetArtifact.generated_images ?? []).filter((url) => url.trim());
 
     if (!publishTitle && !publishContent && imageUrls.length === 0) {
       setStatusText("当前草稿内容为空，暂时无法发送到小红书发布插件");
@@ -3232,32 +3319,32 @@ function App() {
       {
         id: "export-markdown",
         label: "导出 Markdown",
-        onClick: handleExportMarkdown,
+        onClick: () => handleExportMarkdown(displayedArtifact),
       },
     ];
 
-    if (artifact) {
+    if (displayedArtifact) {
       actions.unshift({
         id: "save-as-template",
         label: "存为模板",
-        onClick: handleSaveArtifactAsTemplate,
+        onClick: () => handleSaveArtifactAsTemplate(displayedArtifact),
       });
     }
 
     if (
-      artifact?.artifact_type === "content_draft" &&
+      displayedArtifact?.artifact_type === "content_draft" &&
       (platform === "xiaohongshu" || platform === "both")
     ) {
       actions.push({
         id: "publish-xiaohongshu",
         label: "去小红书发布",
-        onClick: handlePublishToXiaohongshu,
+        onClick: () => handlePublishToXiaohongshu(displayedArtifact),
       });
     }
 
-    return actions;
+    return displayedArtifact ? actions : [];
   }, [
-    artifact,
+    displayedArtifact,
     handleExportMarkdown,
     handlePublishToXiaohongshu,
     handleSaveArtifactAsTemplate,
@@ -3453,10 +3540,13 @@ function App() {
     }
   };
 
-  const handleSubmit = async ({
-    message: draftMessage,
-    uploadedMaterials: draftMaterials,
-  }: ComposerSubmitPayload) => {
+  const submitTaskRequest = async (
+    {
+      message: draftMessage,
+      uploadedMaterials: draftMaterials,
+    }: ComposerSubmitPayload,
+    options?: { taskTypeOverride?: UiTaskType },
+  ) => {
     const trimmedMessage = draftMessage.trim();
     if (!trimmedMessage || isStreaming) {
       return;
@@ -3485,7 +3575,8 @@ function App() {
         : activeThreadTitle;
     const assistantMessageId = createId("assistant");
     const backendPlatform = mapPlatformToBackend(platform);
-    const backendTaskType = mapTaskToBackend(taskType);
+    const effectiveTaskType = options?.taskTypeOverride ?? taskType;
+    const backendTaskType = mapTaskToBackend(effectiveTaskType);
     const nowIso = new Date().toISOString();
     const readyMaterials = draftMaterials.filter((item) => item.status === "ready");
     const failedUploads = draftMaterials.filter((item) => item.status === "error");
@@ -3497,6 +3588,7 @@ function App() {
     streamErrorRef.current = false;
     setActiveView("chat");
     setArtifact(null);
+    setActiveArtifactTaskType(effectiveTaskType);
     setToolCallTimeline([]);
     setActiveThreadId(nextThreadId);
     setActiveThreadTitle(nextThreadTitle);
@@ -3617,6 +3709,28 @@ function App() {
         abortRef.current = null;
       }
     }
+  };
+
+  const handleSubmit = async (payload: ComposerSubmitPayload) => {
+    await submitTaskRequest(payload);
+  };
+
+  const handleArtifactHandoff = async (nextTaskType: UiTaskType) => {
+    const prompt = getArtifactHandoffPrompt(nextTaskType);
+    if (!prompt) {
+      setStatusText("当前任务类型暂未配置一键接力指令");
+      return;
+    }
+
+    setTaskType(nextTaskType);
+    setActiveArtifactTaskType(nextTaskType);
+    await submitTaskRequest(
+      {
+        message: prompt,
+        uploadedMaterials: [],
+      },
+      { taskTypeOverride: nextTaskType },
+    );
   };
 
   const handleAvatarUpload = async (file: File): Promise<string> => {
@@ -4008,7 +4122,7 @@ function App() {
         <AppHeader
           currentDisplayName={currentDisplayName}
           modelOverride={modelOverride}
-          onExportMarkdown={handleExportMarkdown}
+          onExportMarkdown={() => handleExportMarkdown(displayedArtifact)}
           onModelOverrideChange={setModelOverride}
           onOpenLeftSidebar={() => {
             setIsLeftSidebarCollapsed(false);
@@ -4284,20 +4398,26 @@ function App() {
           {activeView === "chat" ? (
             <RightPanel
               activeTaskLabel={activeTaskLabel}
-              artifact={artifact}
+              artifactEntries={artifactTaskEntries}
               artifactActions={artifactActions}
               isDesktopCollapsed={isRightPanelCollapsed}
+              isStreaming={isStreaming}
               onClose={() => setRightPanelOpen(false)}
               onOpen={() => {
                 setIsRightPanelCollapsed(false);
                 setRightPanelOpen(true);
               }}
+              onRequestArtifactHandoff={(nextTaskType) =>
+                void handleArtifactHandoff(nextTaskType)
+              }
+              onSelectArtifactTaskType={setActiveArtifactTaskType}
               onToggleDesktopCollapse={() =>
                 setIsRightPanelCollapsed((collapsed) => !collapsed)
               }
               open={rightPanelOpen}
               platform={platform}
-              taskType={taskType}
+              selectedArtifact={displayedArtifact}
+              selectedArtifactTaskType={activeArtifactTaskType}
             />
           ) : null}
         </div>
