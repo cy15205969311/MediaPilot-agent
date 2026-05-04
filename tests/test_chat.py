@@ -1750,29 +1750,59 @@ def test_admin_template_batch_delete_endpoint_removes_selected_shared_templates(
     assert created_ids[2] in remaining_ids
 
 
-def test_admin_template_mutations_reject_preset_templates(client: TestClient):
+def test_admin_template_mutations_allow_preset_templates(client: TestClient):
     headers = register_admin_user(client, username="admin-template-preset-guard")
 
     preset_patch = client.patch(
         "/api/v1/admin/templates/template-preset-travel-hotflow",
         headers=headers,
-        json={"title": "Should fail"},
+        json={
+            "title": "后台改写后的官方模板",
+            "prompt_content": "Admin updated preset prompt",
+            "is_preset": True,
+        },
     )
-    assert preset_patch.status_code == 403
+    assert preset_patch.status_code == 200
+    patched_payload = preset_patch.json()
+    assert patched_payload["title"] == "后台改写后的官方模板"
+    assert patched_payload["prompt_content"] == "Admin updated preset prompt"
+    assert patched_payload["is_preset"] is True
 
     single_delete = client.delete(
         "/api/v1/admin/templates/template-preset-travel-hotflow",
         headers=headers,
     )
-    assert single_delete.status_code == 403
+    assert single_delete.status_code == 200
+    assert single_delete.json() == {
+        "deleted_count": 1,
+        "deleted_ids": ["template-preset-travel-hotflow"],
+    }
+
+    list_after_single_delete = client.get("/api/v1/admin/templates", headers=headers)
+    assert list_after_single_delete.status_code == 200
+    ids_after_single_delete = {
+        item["id"] for item in list_after_single_delete.json()["items"]
+    }
+    assert "template-preset-travel-hotflow" not in ids_after_single_delete
 
     batch_delete = client.request(
         "DELETE",
         "/api/v1/admin/templates",
         headers=headers,
-        json={"template_ids": ["template-preset-travel-hotflow"]},
+        json={"template_ids": ["template-preset-finance-recovery"]},
     )
-    assert batch_delete.status_code == 403
+    assert batch_delete.status_code == 200
+    assert batch_delete.json() == {
+        "deleted_count": 1,
+        "deleted_ids": ["template-preset-finance-recovery"],
+    }
+
+    list_after_batch_delete = client.get("/api/v1/admin/templates", headers=headers)
+    assert list_after_batch_delete.status_code == 200
+    ids_after_batch_delete = {
+        item["id"] for item in list_after_batch_delete.json()["items"]
+    }
+    assert "template-preset-finance-recovery" not in ids_after_batch_delete
 
 
 def test_topic_create_and_list_endpoint_supports_status_filtering(client: TestClient):

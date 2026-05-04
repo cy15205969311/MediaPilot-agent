@@ -102,6 +102,7 @@ export type AdminTemplateCreatePayload = {
   platform: AdminTemplatePlatform;
   description: string;
   prompt_content: string;
+  is_preset: boolean;
 };
 
 export type AdminTemplateUpdatePayload = Partial<AdminTemplateCreatePayload>;

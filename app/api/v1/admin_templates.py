@@ -20,6 +20,7 @@ from app.models.schemas import (
     TemplatePlatform,
 )
 from app.services.auth import RequireRole
+from app.services.auth import hash_password
 from app.services.template_library import (
     PRESET_TEMPLATE_ORDER,
     ensure_preset_templates,
@@ -36,6 +37,7 @@ ADMIN_BATCH_DELETE_NOT_FOUND_DETAIL = "Some templates do not exist or have alrea
 ADMIN_EMPTY_TEMPLATE_TITLE_DETAIL = "Template title cannot be empty."
 ADMIN_EMPTY_TEMPLATE_PROMPT_DETAIL = "Prompt content cannot be empty."
 ADMIN_EMPTY_TEMPLATE_UPDATE_DETAIL = "At least one update field is required."
+TEMPLATE_PRESET_TOMBSTONE_USERNAME = "__template_preset_tombstone__"
 
 
 def _map_stored_platform_to_admin(platform: str) -> AdminTemplatePlatform:
@@ -114,16 +116,37 @@ def _list_shared_templates(db: Session) -> list[Template]:
     return [*preset_templates, *shared_custom_templates]
 
 
-def _get_mutable_admin_template(db: Session, *, template_id: str) -> Template:
+def _get_admin_template(db: Session, *, template_id: str) -> Template:
     template = db.get(Template, template_id)
     if template is None or template.user_id is not None:
         raise HTTPException(status_code=404, detail=ADMIN_TEMPLATE_NOT_FOUND_DETAIL)
-    if template.is_preset:
-        raise HTTPException(
-            status_code=403,
-            detail=ADMIN_PRESET_TEMPLATE_MUTATION_FORBIDDEN_DETAIL,
-        )
     return template
+
+
+def _get_or_create_template_preset_tombstone_user(db: Session) -> User:
+    tombstone_user = db.scalar(
+        select(User).where(User.username == TEMPLATE_PRESET_TOMBSTONE_USERNAME)
+    )
+    if tombstone_user is not None:
+        return tombstone_user
+
+    tombstone_user = User(
+        id=uuid4().hex,
+        username=TEMPLATE_PRESET_TOMBSTONE_USERNAME,
+        hashed_password=hash_password(uuid4().hex),
+        nickname="Template Tombstone",
+        bio="Internal system user used to hide deleted preset templates.",
+        role="user",
+        status="frozen",
+        token_balance=0,
+    )
+    db.add(tombstone_user)
+    db.flush()
+    return tombstone_user
+
+
+def _is_seeded_preset_template_id(template_id: str) -> bool:
+    return template_id in PRESET_TEMPLATE_ORDER
 
 
 def _apply_admin_template_updates(
@@ -152,6 +175,10 @@ def _apply_admin_template_updates(
         if not normalized_prompt:
             raise HTTPException(status_code=400, detail=ADMIN_EMPTY_TEMPLATE_PROMPT_DETAIL)
         template.system_prompt = normalized_prompt
+        updated = True
+
+    if payload.is_preset is not None:
+        template.is_preset = payload.is_preset
         updated = True
 
     return updated
@@ -201,7 +228,7 @@ async def create_admin_template(
         category=DEFAULT_ADMIN_TEMPLATE_CATEGORY,
         knowledge_base_scope=None,
         system_prompt=normalized_prompt,
-        is_preset=False,
+        is_preset=payload.is_preset,
     )
     db.add(template)
     db.commit()
@@ -218,7 +245,7 @@ async def update_admin_template(
     _: User = Depends(require_admin_templates_role),
 ) -> AdminTemplateListItem:
     ensure_preset_templates(db)
-    template = _get_mutable_admin_template(db, template_id=template_id)
+    template = _get_admin_template(db, template_id=template_id)
 
     if not _apply_admin_template_updates(template, payload):
         raise HTTPException(status_code=400, detail=ADMIN_EMPTY_TEMPLATE_UPDATE_DETAIL)
@@ -239,8 +266,14 @@ async def delete_admin_template(
     _: User = Depends(require_admin_templates_role),
 ) -> TemplateDeleteResponse:
     ensure_preset_templates(db)
-    template = _get_mutable_admin_template(db, template_id=template_id)
-    db.delete(template)
+    template = _get_admin_template(db, template_id=template_id)
+
+    if _is_seeded_preset_template_id(template.id):
+        tombstone_user = _get_or_create_template_preset_tombstone_user(db)
+        template.user_id = tombstone_user.id
+    else:
+        db.delete(template)
+
     db.commit()
     return TemplateDeleteResponse(deleted_count=1, deleted_ids=[template_id])
 
@@ -265,22 +298,29 @@ async def delete_admin_templates(
     if len(templates) != len(requested_ids):
         raise HTTPException(status_code=404, detail=ADMIN_BATCH_DELETE_NOT_FOUND_DETAIL)
 
-    if any(item.is_preset for item in templates):
-        raise HTTPException(
-            status_code=403,
-            detail=ADMIN_PRESET_TEMPLATE_MUTATION_FORBIDDEN_DETAIL,
-        )
-
     if any(item.user_id is not None for item in templates):
         raise HTTPException(status_code=404, detail=ADMIN_BATCH_DELETE_NOT_FOUND_DETAIL)
 
-    db.execute(
-        delete(Template).where(
-            Template.id.in_(requested_ids),
-            Template.user_id.is_(None),
-            Template.is_preset.is_(False),
+    tombstone_user: User | None = None
+    hard_delete_ids = [
+        item.id for item in templates if not _is_seeded_preset_template_id(item.id)
+    ]
+
+    for template in templates:
+        if not _is_seeded_preset_template_id(template.id):
+            continue
+
+        if tombstone_user is None:
+            tombstone_user = _get_or_create_template_preset_tombstone_user(db)
+        template.user_id = tombstone_user.id
+
+    if hard_delete_ids:
+        db.execute(
+            delete(Template).where(
+                Template.id.in_(hard_delete_ids),
+                Template.user_id.is_(None),
+            )
         )
-    )
     db.commit()
 
     return TemplateDeleteResponse(

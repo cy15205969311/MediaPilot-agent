@@ -948,16 +948,14 @@ def _apply_seed_to_template(template: Template, seed: PresetTemplateSeed) -> Non
 
 def ensure_preset_templates(db: Session) -> None:
     preset_ids = [seed.id for seed in PRESET_TEMPLATE_SEEDS]
-    existing_preset_templates = db.scalars(
-        select(Template).where(Template.is_preset.is_(True))
-    ).all()
-    existing_templates = {template.id: template for template in existing_preset_templates}
+    existing_templates = {
+        template.id: template
+        for template in db.scalars(
+            select(Template).where(Template.id.in_(preset_ids))
+        ).all()
+    }
 
     has_changes = False
-    for template in existing_preset_templates:
-        if template.id not in preset_ids:
-            db.delete(template)
-            has_changes = True
 
     for seed in PRESET_TEMPLATE_SEEDS:
         template = existing_templates.get(seed.id)
@@ -965,21 +963,6 @@ def ensure_preset_templates(db: Session) -> None:
             template = Template(id=seed.id)
             _apply_seed_to_template(template, seed)
             db.add(template)
-            has_changes = True
-            continue
-
-        next_snapshot = {
-            "user_id": None,
-            "title": seed.title,
-            "description": seed.description,
-            "platform": seed.platform,
-            "category": seed.category,
-            "knowledge_base_scope": seed.knowledge_base_scope,
-            "system_prompt": seed.system_prompt,
-            "is_preset": True,
-        }
-        if any(getattr(template, field) != value for field, value in next_snapshot.items()):
-            _apply_seed_to_template(template, seed)
             has_changes = True
 
     if has_changes:

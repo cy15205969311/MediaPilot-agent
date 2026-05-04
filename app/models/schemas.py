@@ -786,6 +786,10 @@ class AdminTemplateCreateRequest(SchemaModel):
         max_length=6000,
         description="Reusable system prompt body.",
     )
+    is_preset: bool = Field(
+        default=False,
+        description="Whether the template should be distributed as an official preset.",
+    )
 
 
 class AdminTemplateUpdateRequest(SchemaModel):
@@ -809,6 +813,10 @@ class AdminTemplateUpdateRequest(SchemaModel):
         min_length=1,
         max_length=6000,
         description="Updated reusable system prompt body.",
+    )
+    is_preset: bool | None = Field(
+        default=None,
+        description="Whether the template should remain an official preset.",
     )
 
 

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
+  Eye,
   FileText,
   PencilLine,
   Plus,
@@ -36,19 +37,19 @@ type TemplateMutationKey = null | "modal-submit" | "batch-delete" | `delete:${st
 type TemplateFormErrors = Partial<Record<"title" | "prompt_content", string>>;
 type TemplateModalForm = AdminTemplateCreatePayload & {
   industry_category: string;
-  knowledge_base_scope: string;
 };
 type DeleteConfirmState =
   | {
-      kind: "single";
-      template: AdminTemplateItem;
-    }
+    kind: "single";
+    template: AdminTemplateItem;
+  }
   | {
-      kind: "batch";
-      count: number;
-      templateIds: string[];
-    };
+    kind: "batch";
+    count: number;
+    templateIds: string[];
+  };
 
+const PAGE_SIZE = 10;
 const TAB_ORDER: TemplateTabKey[] = ["all", "小红书", "抖音", "通用", "custom"];
 const PLATFORM_OPTIONS: AdminTemplatePlatform[] = ["小红书", "抖音", "通用"];
 const INDUSTRY_OPTIONS = ["美妆护肤", "美食文旅", "数码科技", "情感心理", "家居生活"];
@@ -59,8 +60,8 @@ function createInitialForm(): TemplateModalForm {
     platform: "小红书",
     description: "",
     prompt_content: "",
+    is_preset: false,
     industry_category: INDUSTRY_OPTIONS[0],
-    knowledge_base_scope: "",
   };
 }
 
@@ -70,8 +71,8 @@ function createFormFromTemplate(template?: AdminTemplateItem | null): TemplateMo
     platform: template?.platform ?? "小红书",
     description: template?.description ?? "",
     prompt_content: template?.prompt_content ?? "",
+    is_preset: template?.is_preset ?? false,
     industry_category: INDUSTRY_OPTIONS[0],
-    knowledge_base_scope: "",
   };
 }
 
@@ -90,7 +91,7 @@ function validateTemplateForm(form: Pick<TemplateModalForm, "title" | "prompt_co
 }
 
 function canManageTemplate(template: AdminTemplateItem): boolean {
-  return !template.is_preset;
+  return Boolean(template);
 }
 
 function getTabLabel(tab: TemplateTabKey): string {
@@ -105,20 +106,12 @@ function getTabLabel(tab: TemplateTabKey): string {
 
 function getPlatformBadgeClass(platform: AdminTemplatePlatform): string {
   if (platform === "小红书") {
-    return "bg-red-50 text-red-500";
+    return "bg-rose-50 text-rose-500";
   }
   if (platform === "抖音") {
     return "bg-slate-100 text-slate-700";
   }
   return "bg-orange-50 text-orange-500";
-}
-
-function getPromptPreview(prompt: string): string {
-  const normalized = prompt.trim();
-  if (!normalized) {
-    return "系统提示词将在这里展示快照预览。";
-  }
-  return normalized;
 }
 
 function formatTemplateCardDate(value?: string | null): string {
@@ -137,6 +130,19 @@ function formatTemplateCardDate(value?: string | null): string {
   return `${year}/${month}/${day}`;
 }
 
+function getPromptPreview(prompt: string): string {
+  const normalized = prompt.trim();
+  if (!normalized) {
+    return "该模板暂未填写系统提示词。";
+  }
+
+  if (normalized.length <= 110) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 110)}...`;
+}
+
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof APIError) {
     return error.message;
@@ -149,33 +155,28 @@ function getErrorMessage(error: unknown, fallback: string): string {
 
 function TemplateCardSkeleton() {
   return (
-    <div className="rounded-[30px] border border-slate-200/80 bg-white p-5 shadow-[0_10px_30px_rgba(15,23,42,0.04)]">
+    <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-[0_16px_40px_rgba(15,23,42,0.05)]">
       <div className="animate-pulse">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex gap-2">
-            <div className="h-7 w-16 rounded-full bg-slate-100" />
-            <div className="h-7 w-20 rounded-full bg-slate-100" />
-          </div>
-          <div className="h-11 w-11 rounded-2xl bg-slate-100" />
+        <div className="mb-4 flex items-start justify-between">
+          <div className="h-12 w-12 rounded-2xl bg-slate-100" />
+          <div className="h-5 w-5 rounded bg-slate-100" />
         </div>
-        <div className="mt-5 h-8 w-3/5 rounded-full bg-slate-200" />
-        <div className="mt-3 h-4 w-4/5 rounded-full bg-slate-100" />
-        <div className="mt-2 h-4 w-3/5 rounded-full bg-slate-100" />
-        <div className="mt-5 rounded-[24px] bg-red-50/40 p-4">
-          <div className="h-3 w-28 rounded-full bg-red-100" />
-          <div className="mt-3 h-4 w-full rounded-full bg-white" />
-          <div className="mt-2 h-4 w-full rounded-full bg-white" />
-          <div className="mt-2 h-4 w-5/6 rounded-full bg-white" />
+        <div className="h-6 w-2/3 rounded-full bg-slate-200" />
+        <div className="mt-3 flex gap-2">
+          <div className="h-6 w-16 rounded-full bg-slate-100" />
+          <div className="h-6 w-20 rounded-full bg-slate-100" />
         </div>
-        <div className="mt-5 grid grid-cols-3 gap-3">
-          {Array.from({ length: 3 }).map((_, index) => (
-            <div key={index} className="rounded-2xl border border-slate-100 bg-slate-50/80 px-4 py-4">
-              <div className="mx-auto h-3 w-12 rounded-full bg-slate-100" />
-              <div className="mx-auto mt-3 h-5 w-16 rounded-full bg-slate-200" />
-            </div>
-          ))}
+        <div className="mt-4 h-4 w-full rounded-full bg-slate-100" />
+        <div className="mt-2 h-4 w-4/5 rounded-full bg-slate-100" />
+        <div className="mt-5 flex items-center justify-between">
+          <div className="h-4 w-24 rounded-full bg-slate-100" />
+          <div className="h-4 w-12 rounded-full bg-slate-100" />
         </div>
-        <div className="mt-5 h-12 rounded-2xl bg-slate-100" />
+        <div className="mt-5 flex gap-2">
+          <div className="h-11 flex-1 rounded-xl bg-slate-100" />
+          <div className="h-11 w-11 rounded-xl bg-slate-100" />
+          <div className="h-11 w-11 rounded-xl bg-slate-100" />
+        </div>
       </div>
     </div>
   );
@@ -185,11 +186,13 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
   const { onToast } = props;
   const [templatesPayload, setTemplatesPayload] = useState<AdminTemplatesApiResponse | null>(null);
   const [activeTab, setActiveTab] = useState<TemplateTabKey>("all");
+  const [currentPage, setCurrentPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [mutationKey, setMutationKey] = useState<TemplateMutationKey>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<TemplateModalMode>("create");
   const [editingTemplate, setEditingTemplate] = useState<AdminTemplateItem | null>(null);
+  const [previewTemplate, setPreviewTemplate] = useState<AdminTemplateItem | null>(null);
   const [form, setForm] = useState<TemplateModalForm>(createInitialForm);
   const [formErrors, setFormErrors] = useState<TemplateFormErrors>({});
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
@@ -212,6 +215,10 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
     });
   }, [activeTab, items]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / PAGE_SIZE));
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const pagedItems = filteredItems.slice(pageStart, pageStart + PAGE_SIZE);
+
   const tabCounts = useMemo(
     () =>
       ({
@@ -224,11 +231,18 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
     [items],
   );
 
+  const paginationText =
+    filteredItems.length === 0
+      ? "当前筛选条件下暂无模板。"
+      : `显示 ${formatNumber(pageStart + 1)}-${formatNumber(
+        Math.min(pageStart + pagedItems.length, filteredItems.length),
+      )}，共 ${formatNumber(filteredItems.length)} 条`;
+
   const emptyStateMessage =
     activeTab === "custom"
       ? "当前还没有自定义模板，可以从右上角立即新建一份团队共享模板。"
       : activeTab === "all"
-        ? "模板库暂时为空，创建后会立刻同步到共享模板资产中。"
+        ? "模板库暂时为空，创建后会立即同步到后台共享模板资产中。"
         : `当前分类下还没有 ${getTabLabel(activeTab)} 模板。`;
 
   const loadTemplates = async () => {
@@ -255,11 +269,21 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
   }, []);
 
   useEffect(() => {
-    const availableIds = new Set(
-      items.filter((item) => canManageTemplate(item)).map((item) => item.id),
-    );
+    setCurrentPage(1);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const availableIds = new Set(items.map((item) => item.id));
     setSelectedTemplateIds((current) => current.filter((id) => availableIds.has(id)));
   }, [items]);
+
+  useEffect(() => {
+    if (currentPage <= totalPages) {
+      return;
+    }
+
+    setCurrentPage(totalPages);
+  }, [currentPage, totalPages]);
 
   const handleRefresh = async () => {
     const payload = await loadTemplates();
@@ -283,11 +307,16 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
   };
 
   const openEditModal = (template: AdminTemplateItem) => {
+    setPreviewTemplate(null);
     setModalMode("edit");
     setEditingTemplate(template);
     setForm(createFormFromTemplate(template));
     setFormErrors({});
     setIsModalOpen(true);
+  };
+
+  const openPreviewModal = (template: AdminTemplateItem) => {
+    setPreviewTemplate(template);
   };
 
   const closeModal = () => {
@@ -328,6 +357,7 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
         platform: form.platform,
         description: form.description.trim(),
         prompt_content: form.prompt_content.trim(),
+        is_preset: form.is_preset,
       };
 
       if (modalMode === "create") {
@@ -341,13 +371,18 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
       setEditingTemplate(null);
       setForm(createInitialForm());
       setFormErrors({});
+
       onToast({
         tone: "success",
         title: modalMode === "create" ? "模板创建成功" : "模板更新成功",
         message:
           modalMode === "create"
-            ? "新模板已经写入共享模板库。"
-            : "模板内容已更新，后续使用会自动读取最新版本。",
+            ? form.is_preset
+              ? "新模板已作为官方预置模板写入后台模板库。"
+              : "新模板已经写入共享模板库。"
+            : form.is_preset
+              ? "官方预置模板已更新，前台调用侧会读取最新版本。"
+              : "模板内容已更新，后续使用会自动读取最新版本。",
       });
     } catch (error) {
       onToast({
@@ -416,11 +451,10 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
           ? await deleteAdminTemplate(deleteConfirmState.template.id)
           : await deleteAdminTemplates({ template_ids: deleteConfirmState.templateIds });
 
-      setSelectedTemplateIds((current) =>
-        current.filter((id) => !response.deleted_ids.includes(id)),
-      );
+      setSelectedTemplateIds((current) => current.filter((id) => !response.deleted_ids.includes(id)));
       await loadTemplates();
       setDeleteConfirmState(null);
+
       onToast({
         tone: "success",
         title: deleteConfirmState.kind === "single" ? "模板已删除" : "批量删除成功",
@@ -443,14 +477,17 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
   return (
     <>
       <div className="px-4 py-5 lg:px-6 lg:py-6">
-        <div className="mb-7 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h1 className="text-[34px] font-bold tracking-tight text-slate-900">模板库管理</h1>
+            <h1 className="text-[30px] font-bold tracking-tight text-slate-900">模板库管理</h1>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+
+            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
             <button
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-red-200 hover:bg-red-50/60 hover:text-red-500"
+              className="inline-flex h-11 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
               onClick={() => {
                 void handleRefresh();
               }}
@@ -460,7 +497,7 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
               刷新
             </button>
             <button
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#ff5f5f] to-[#ff8a45] px-4 text-sm font-semibold text-white shadow-[0_16px_36px_rgba(255,107,87,0.24)] transition hover:-translate-y-0.5"
+              className="inline-flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-[#ff6b57] to-[#ff8b4d] px-4 text-sm font-semibold text-white shadow-[0_16px_36px_rgba(255,107,87,0.24)] transition hover:-translate-y-0.5"
               onClick={openCreateModal}
               type="button"
             >
@@ -471,20 +508,26 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
         </div>
 
         <div className="mb-5 flex gap-2 overflow-x-auto pb-1">
-          {TAB_ORDER.map((tab) => {
+          {TAB_ORDER.map((tab, index) => {
             const isActive = activeTab === tab;
+
             return (
               <button
                 key={tab}
-                className={`whitespace-nowrap rounded-xl border px-4 py-2 text-sm font-medium transition ${
-                  isActive
-                    ? "border-[#f3b7c1] bg-white text-rose-500 shadow-[0_6px_18px_rgba(255,95,95,0.08)]"
-                    : "border-slate-200/80 bg-white text-slate-600 hover:border-slate-300"
-                }`}
+                className="whitespace-nowrap rounded-xl border px-4 py-2 text-sm font-medium transition"
                 onClick={() => setActiveTab(tab)}
+                style={{
+                  backgroundColor: isActive ? "#fff1f1" : "#ffffff",
+                  borderColor: isActive ? "#ff8f7d" : "#e2e8f0",
+                  color: isActive ? "#ff6b57" : "#64748b",
+                  boxShadow: isActive ? "0 10px 24px rgba(255,107,87,0.08)" : "none",
+                }}
                 type="button"
               >
-                {getTabLabel(tab)} ({formatNumber(tabCounts[tab])})
+                {getTabLabel(tab)}
+                {index > -1 ? (
+                  <span className="ml-2 text-xs opacity-70">({formatNumber(tabCounts[tab])})</span>
+                ) : null}
               </button>
             );
           })}
@@ -492,19 +535,18 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
 
         <div
           aria-hidden={!hasSelection}
-          className={`sticky top-4 z-30 mb-5 overflow-hidden transition-all duration-300 ${
-            hasSelection
-              ? "max-h-32 translate-y-0 opacity-100"
-              : "pointer-events-none max-h-0 -translate-y-3 opacity-0"
-          }`}
+          className={`sticky top-4 z-30 mb-5 overflow-hidden transition-all duration-300 ${hasSelection
+            ? "max-h-32 translate-y-0 opacity-100"
+            : "pointer-events-none max-h-0 -translate-y-3 opacity-0"
+            }`}
         >
-          <div className="flex flex-col gap-4 rounded-[28px] border border-red-100 bg-white/95 px-5 py-4 shadow-[0_20px_45px_rgba(15,23,42,0.12)] backdrop-blur-sm md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-col gap-4 rounded-[24px] border border-red-100 bg-white/95 px-5 py-4 shadow-[0_22px_50px_rgba(15,23,42,0.12)] backdrop-blur-sm md:flex-row md:items-center md:justify-between">
             <div>
               <div className="text-lg font-semibold text-slate-900">
                 已选择 {formatNumber(selectedTemplateIds.length)} 项
               </div>
               <div className="mt-1 text-sm text-slate-500">
-                仅支持删除自定义模板，确认后 C 端用户将无法继续使用这些模板。
+                支持批量删除官方模板和自定义模板，确认后前台可调用的模板资产会同步更新。
               </div>
             </div>
 
@@ -518,7 +560,7 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
                 取消选择
               </button>
               <button
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-red-500 px-5 text-sm font-semibold text-white shadow-[0_16px_32px_rgba(239,68,68,0.24)] transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-70"
+                className="inline-flex h-11 items-center gap-2 rounded-xl bg-red-500 px-5 text-sm font-semibold text-white shadow-[0_16px_32px_rgba(239,68,68,0.24)] transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-70"
                 disabled={isBatchDeleting}
                 onClick={openBatchDeleteConfirm}
                 type="button"
@@ -535,134 +577,189 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
         </div>
 
         {isLoading ? (
-          <div className="grid grid-cols-1 gap-5 xl:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {Array.from({ length: 6 }).map((_, index) => (
               <TemplateCardSkeleton key={index} />
             ))}
           </div>
-        ) : filteredItems.length > 0 ? (
-          <div className="grid grid-cols-1 gap-5 xl:grid-cols-2 2xl:grid-cols-3">
-            {filteredItems.map((item) => {
-              const isSelected = selectedTemplateIds.includes(item.id);
-              const isManageable = canManageTemplate(item);
-              const isDeleting = mutationKey === `delete:${item.id}`;
-              const isBusy = isDeleting || isSaving || isBatchDeleting;
+        ) : pagedItems.length > 0 ? (
+          <>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {pagedItems.map((item) => {
+                const isSelected = selectedTemplateIds.includes(item.id);
+                const isManageable = canManageTemplate(item);
+                const isDeleting = mutationKey === `delete:${item.id}`;
+                const isBusy = isDeleting || isSaving || isBatchDeleting;
 
-              return (
-                <article
-                  key={item.id}
-                  className={`flex h-full flex-col rounded-[30px] border bg-white p-5 shadow-[0_10px_30px_rgba(15,23,42,0.04)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_42px_rgba(15,23,42,0.08)] ${
-                    isSelected ? "border-red-300 ring-2 ring-red-200/70" : "border-slate-200/80"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                return (
+                  <article
+                    key={item.id}
+                    className={`rounded-[24px] border bg-white p-5 shadow-[0_16px_40px_rgba(15,23,42,0.05)] transition hover:-translate-y-0.5 hover:shadow-[0_20px_48px_rgba(15,23,42,0.08)] ${isSelected ? "border-red-300 ring-2 ring-red-100" : "border-slate-200/90"
+                      }`}
+                  >
+                    <div className="mb-4 flex items-start justify-between gap-3">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ff6b57] to-[#ff9a52] text-white">
+                        <FileText className="h-5 w-5" />
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium ${item.is_preset ? "bg-sky-50 text-sky-600" : "bg-slate-100 text-slate-600"
+                            }`}
+                        >
+                          {item.is_preset ? "官方预置" : "自定义"}
+                        </span>
+                        {isManageable ? (
+                          <label className="inline-flex h-5 w-5 cursor-pointer items-center justify-center rounded border border-slate-300 bg-white">
+                            <input
+                              checked={isSelected}
+                              className="h-3.5 w-3.5 rounded border-slate-300 text-[#ff6b57] focus:ring-[#ffb4a8]"
+                              disabled={isBusy}
+                              onChange={() => toggleSelected(item.id)}
+                              type="checkbox"
+                            />
+                          </label>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <h2 className="text-lg font-semibold text-slate-900">{item.title}</h2>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
                       <span
-                        className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${getPlatformBadgeClass(
+                        className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${getPlatformBadgeClass(
                           item.platform,
                         )}`}
                       >
                         {item.platform}
                       </span>
-                      <span
-                        className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${
-                          item.is_preset ? "bg-blue-50 text-blue-500" : "bg-slate-100 text-slate-500"
-                        }`}
-                      >
-                        {item.is_preset ? "官方预置" : "自定义"}
-                      </span>
+                      <span className="text-xs text-slate-400">{formatTemplateCardDate(item.created_at)}</span>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      {isManageable ? (
-                        <label className="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md border border-slate-200 bg-white">
-                          <input
-                            checked={isSelected}
-                            className="h-4 w-4 rounded border-slate-300 text-red-500 focus:ring-red-300"
-                            disabled={isBusy}
-                            onChange={() => toggleSelected(item.id)}
-                            type="checkbox"
-                          />
-                        </label>
-                      ) : null}
-                      <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ff5f6d] to-[#ff9951] text-white">
-                        <FileText className="h-5 w-5" />
+                    <p className="mt-4 min-h-[48px] text-sm leading-6 text-slate-500">
+                      {item.description.trim() || "该模板暂未填写适用场景描述，可用于沉淀团队可复用的内容策略资产。"}
+                    </p>
+
+                    <div className="mt-4 flex items-center justify-between text-sm">
+                      <div className="text-slate-500">使用 {formatNumber(item.usage_count)} 次</div>
+                      <div className="flex items-center gap-1 text-amber-500">
+                        <span>★</span>
+                        <span>{item.rating.toFixed(1)}</span>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="mt-5">
-                    <h2 className="text-[26px] font-bold leading-tight text-slate-900">{item.title}</h2>
-                    <p className="mt-2 min-h-[48px] text-sm leading-6 text-slate-500">
-                      {item.description.trim() || "该模板暂未填写适用场景描述，可用于沉淀团队可复用的 Prompt 资产。"}
-                    </p>
-                  </div>
-
-                  <div className="mt-5 rounded-[24px] border border-red-100 bg-red-50/30 p-4">
-                    <div className="text-xs font-semibold uppercase tracking-[0.22em] text-red-400">
-                      PROMPT SNAPSHOT
+                    <div className="mt-4 rounded-2xl border border-red-100/70 bg-red-50/40 px-4 py-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-red-400">
+                        Prompt Snapshot
+                      </div>
+                      <div className="mt-2 text-sm leading-6 text-slate-600">{getPromptPreview(item.prompt_content)}</div>
                     </div>
-                    <div
-                      className="mt-3 overflow-hidden text-sm leading-6 text-slate-600"
-                      style={{
-                        display: "-webkit-box",
-                        WebkitBoxOrient: "vertical",
-                        WebkitLineClamp: 5,
-                      }}
-                    >
-                      {getPromptPreview(item.prompt_content)}
-                    </div>
-                  </div>
 
-                  <div className="mt-5 grid grid-cols-3 gap-3">
-                    <TemplateStatCard label="使用次数" value={formatNumber(item.usage_count)} />
-                    <TemplateStatCard label="评分" value={item.rating.toFixed(1)} />
-                    <TemplateStatCard label="创建日期" value={formatTemplateCardDate(item.created_at)} />
-                  </div>
-
-                  {isManageable ? (
-                    <div className="mt-6 flex gap-3 border-t border-slate-100 pt-4">
-                      <button
-                        className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-[#fff2f2] px-4 text-sm font-semibold text-rose-500 transition hover:bg-[#ffe8e8] disabled:cursor-not-allowed disabled:opacity-70"
-                        disabled={isBusy}
-                        onClick={() => openEditModal(item)}
-                        type="button"
-                      >
-                        <PencilLine className="h-4 w-4" />
-                        编辑
-                      </button>
-                      <button
-                        className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-red-50 px-4 text-sm font-semibold text-red-500 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-70"
-                        disabled={isBusy}
-                        onClick={() => openSingleDeleteConfirm(item)}
-                        type="button"
-                      >
-                        {isDeleting ? (
-                          <RefreshCw className="h-4 w-4 animate-spin" />
-                        ) : (
+                    {isManageable ? (
+                      <div className="mt-5 grid grid-cols-3 gap-2">
+                        <button
+                          className="rounded-xl bg-red-50 px-3 py-2.5 text-sm font-medium text-[#ff6b57] transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-70"
+                          disabled={isBusy}
+                          onClick={() => openEditModal(item)}
+                          type="button"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="rounded-xl bg-slate-100 px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-70"
+                          disabled={isBusy}
+                          onClick={() => openPreviewModal(item)}
+                          type="button"
+                        >
+                          预览
+                        </button>
+                        <button
+                          className="inline-flex items-center justify-center gap-2 rounded-xl bg-red-500 px-3 py-2.5 text-sm font-medium text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-70"
+                          disabled={isBusy}
+                          onClick={() => openSingleDeleteConfirm(item)}
+                          type="button"
+                        >
+                          {isDeleting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                          删除
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="mt-5 flex gap-2">
+                        <button
+                          className="flex-1 rounded-xl bg-slate-100 px-3 py-2.5 text-sm font-medium text-slate-400"
+                          disabled
+                          type="button"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="inline-flex items-center justify-center rounded-xl bg-red-50 px-4 py-2.5 text-[#ff6b57] transition hover:bg-red-100"
+                          onClick={() => openPreviewModal(item)}
+                          type="button"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                        <button
+                          className="inline-flex items-center justify-center rounded-xl bg-slate-100 px-4 py-2.5 text-slate-400"
+                          disabled
+                          type="button"
+                        >
                           <Trash2 className="h-4 w-4" />
-                        )}
-                        删除
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="mt-6 border-t border-slate-100 pt-4 text-center text-sm text-slate-400">
-                      官方预置模板仅支持查看，不能编辑或删除。
-                    </div>
-                  )}
-                </article>
-              );
-            })}
-          </div>
+                        </button>
+                      </div>
+                    )}
+
+                    {isDeleting ? (
+                      <div className="mt-3 inline-flex items-center gap-2 text-xs text-red-500">
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        正在删除模板...
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+
+            <div className="mt-6 flex flex-col gap-4 rounded-[24px] border border-slate-200 bg-white px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-sm text-slate-500">{paginationText}</div>
+              <div className="flex items-center gap-3">
+                <button
+                  className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={currentPage === 1 || isLoading}
+                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                  type="button"
+                >
+                  上一页
+                </button>
+                <div className="text-sm font-medium text-slate-700">
+                  {currentPage} / {totalPages}
+                </div>
+                <button
+                  className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={currentPage >= totalPages || isLoading}
+                  onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                  type="button"
+                >
+                  下一页
+                </button>
+              </div>
+            </div>
+          </>
         ) : (
-          <div className="rounded-[30px] border border-slate-200/80 bg-white px-6 py-16 text-center shadow-[0_10px_30px_rgba(15,23,42,0.04)]">
+          <div className="rounded-[24px] border border-slate-200 bg-white px-6 py-16 text-center shadow-[0_16px_40px_rgba(15,23,42,0.05)]">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-red-400">
               <FileText className="h-6 w-6" />
             </div>
             <div className="mt-5 text-lg font-semibold text-slate-900">当前分类暂无模板</div>
-            <div className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-500">
-              {emptyStateMessage}
-            </div>
+            <div className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-500">{emptyStateMessage}</div>
+            <button
+              className="mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-[#ff6b57] to-[#ff8b4d] px-4 text-sm font-semibold text-white shadow-[0_16px_36px_rgba(255,107,87,0.24)] transition hover:-translate-y-0.5"
+              onClick={openCreateModal}
+              type="button"
+            >
+              <Plus className="h-4 w-4" />
+              新建模板
+            </button>
           </div>
         )}
       </div>
@@ -678,6 +775,12 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
         onSubmit={() => {
           void handleSubmit();
         }}
+      />
+
+      <TemplatePreviewModal
+        onEdit={(template) => openEditModal(template)}
+        onClose={() => setPreviewTemplate(null)}
+        template={previewTemplate}
       />
 
       <DeleteConfirmDialog
@@ -722,20 +825,20 @@ function TemplateModal(props: TemplateModalProps) {
       onClick={onClose}
     >
       <div
-        className="flex max-h-[min(88vh,960px)] w-full max-w-4xl flex-col overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-[0_30px_80px_rgba(15,23,42,0.18)]"
+        className="flex max-h-[min(90vh,960px)] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_30px_80px_rgba(15,23,42,0.18)]"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-6 border-b border-slate-200 px-8 py-6">
+        <div className="flex items-start justify-between gap-6 border-b border-slate-200 px-6 py-5 sm:px-8">
           <div>
-            <div className="text-[18px] font-semibold text-slate-900">
+            <div className="text-[20px] font-semibold text-slate-900">
               {isEditMode ? "编辑模板" : "新建模板"}
             </div>
             <div className="mt-2 text-sm leading-6 text-slate-500">
-              把你的人设、行业 Prompt 和知识库作用域存下来，下次创建会话时就能一键带入。
+              维护模板名称、平台、描述与系统提示词。你也可以把模板直接设为官方预置，保存后会同步分发到前台官方模板池。
             </div>
           </div>
           <button
-            aria-label="关闭模板对话框"
+            aria-label="关闭模板弹窗"
             className="inline-flex h-10 w-10 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
             onClick={onClose}
             type="button"
@@ -744,18 +847,17 @@ function TemplateModal(props: TemplateModalProps) {
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 sm:px-8">
           <div className="space-y-6">
             <div className="grid gap-5 md:grid-cols-2">
               <TemplateField label="模板名称" required>
                 <input
-                  className={`h-14 w-full rounded-2xl border bg-white px-5 text-sm text-slate-900 outline-none transition focus:ring-4 ${
-                    formErrors.title
-                      ? "border-red-300 focus:border-red-300 focus:ring-red-100"
-                      : "border-slate-200 focus:border-red-300 focus:ring-red-100"
-                  }`}
+                  className={`h-14 w-full rounded-2xl border bg-white px-5 text-sm text-slate-900 outline-none transition focus:ring-4 ${formErrors.title
+                    ? "border-red-300 focus:border-red-300 focus:ring-red-100"
+                    : "border-slate-200 focus:border-red-300 focus:ring-red-100"
+                    }`}
                   onChange={(event) => onChange({ title: event.target.value })}
-                  placeholder="例如：法拍房捡漏讲透模板"
+                  placeholder="例如：小红书新品种草模板"
                   type="text"
                   value={form.title}
                 />
@@ -800,36 +902,46 @@ function TemplateModal(props: TemplateModalProps) {
                 <input
                   className="h-14 w-full rounded-2xl border border-slate-200 bg-white px-5 text-sm text-slate-900 outline-none transition focus:border-red-300 focus:ring-4 focus:ring-red-100"
                   onChange={(event) => onChange({ description: event.target.value })}
-                  placeholder="一句话说明这个模板适合解决什么问题"
+                  placeholder="一句话说明适用场景和内容方向"
                   type="text"
                   value={form.description}
                 />
               </TemplateField>
             </div>
 
-            <TemplateField label="关联知识库">
-              <input
-                className="h-14 w-full rounded-2xl border border-slate-200 bg-white px-5 text-sm text-slate-900 outline-none transition focus:border-red-300 focus:ring-4 focus:ring-red-100"
-                onChange={(event) => onChange({ knowledge_base_scope: event.target.value })}
-                placeholder="搜索并选择已有知识库，例如：brand_guide_2026"
-                type="text"
-                value={form.knowledge_base_scope}
-              />
-              <div className="mt-2 text-xs text-slate-400">
-                当前仅作 UI 占位展示，保存时不会提交到后端。
+            <label className="flex items-center justify-between gap-4 rounded-[24px] border border-slate-200 bg-slate-50/70 px-5 py-4">
+              <div>
+                <div className="text-sm font-medium text-slate-900">设为官方预置模板</div>
+                <div className="mt-1 text-xs leading-5 text-slate-500">
+                  开启后，该模板会作为官方模板在前台工作台分发；关闭后则按后台共享自定义模板管理。
+                </div>
               </div>
-            </TemplateField>
+              <button
+                aria-checked={form.is_preset}
+                className={`relative inline-flex h-7 w-12 shrink-0 rounded-full transition ${
+                  form.is_preset ? "bg-[#ff7b5f]" : "bg-slate-300"
+                }`}
+                onClick={() => onChange({ is_preset: !form.is_preset })}
+                role="switch"
+                type="button"
+              >
+                <span
+                  className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition ${
+                    form.is_preset ? "left-6" : "left-1"
+                  }`}
+                />
+              </button>
+            </label>
 
             <TemplateField label="系统提示词" required>
               <textarea
-                className={`w-full rounded-[26px] border bg-white px-5 py-4 text-sm leading-7 text-slate-900 outline-none transition focus:ring-4 ${
-                  formErrors.prompt_content
-                    ? "border-red-300 focus:border-red-300 focus:ring-red-100"
-                    : "border-slate-200 focus:border-red-300 focus:ring-red-100"
-                }`}
+                className={`w-full rounded-[24px] border bg-white px-5 py-4 text-sm leading-7 text-slate-900 outline-none transition focus:ring-4 ${formErrors.prompt_content
+                  ? "border-red-300 focus:border-red-300 focus:ring-red-100"
+                  : "border-slate-200 focus:border-red-300 focus:ring-red-100"
+                  }`}
                 onChange={(event) => onChange({ prompt_content: event.target.value })}
-                placeholder="请输入完整的人设、目标受众、语气要求与输出结构。"
-                rows={8}
+                placeholder="请输入完整的提示词，包括人设、目标受众、语气、输出格式与约束条件。"
+                rows={9}
                 value={form.prompt_content}
               />
               {formErrors.prompt_content ? (
@@ -839,7 +951,7 @@ function TemplateModal(props: TemplateModalProps) {
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-8 py-5">
+        <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4 sm:px-8">
           <button
             className="h-11 rounded-xl bg-slate-100 px-5 text-sm font-medium text-slate-600 transition hover:bg-slate-200"
             onClick={onClose}
@@ -848,13 +960,13 @@ function TemplateModal(props: TemplateModalProps) {
             取消
           </button>
           <button
-            className="inline-flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-[#ff5f5f] to-[#ff8a45] px-5 text-sm font-semibold text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-70"
+            className="inline-flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-[#ff6b57] to-[#ff8b4d] px-5 text-sm font-semibold text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-70"
             disabled={isSubmitting}
             onClick={onSubmit}
             type="button"
           >
             {isSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
-            保存模板
+            {isEditMode ? "保存修改" : "保存模板"}
           </button>
         </div>
       </div>
@@ -863,7 +975,7 @@ function TemplateModal(props: TemplateModalProps) {
 }
 
 function TemplateField(props: {
-  children: React.ReactNode;
+  children: ReactNode;
   label: string;
   required?: boolean;
 }) {
@@ -880,13 +992,111 @@ function TemplateField(props: {
   );
 }
 
-function TemplateStatCard(props: { label: string; value: string }) {
+type TemplatePreviewModalProps = {
+  onClose: () => void;
+  onEdit: (template: AdminTemplateItem) => void;
+  template: AdminTemplateItem | null;
+};
+
+function TemplatePreviewModal(props: TemplatePreviewModalProps) {
+  const { onClose, onEdit, template } = props;
+
+  if (!template) {
+    return null;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[72] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_30px_80px_rgba(15,23,42,0.18)]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-6 border-b border-slate-200 px-6 py-5 sm:px-8">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${getPlatformBadgeClass(
+                  template.platform,
+                )}`}
+              >
+                {template.platform}
+              </span>
+              <span
+                className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${template.is_preset ? "bg-sky-50 text-sky-600" : "bg-slate-100 text-slate-600"
+                  }`}
+              >
+                {template.is_preset ? "官方预置" : "自定义"}
+              </span>
+            </div>
+            <div className="mt-3 text-[22px] font-semibold text-slate-900">{template.title}</div>
+            <div className="mt-2 text-sm leading-6 text-slate-500">
+              {template.description.trim() || "该模板暂未填写描述。"}
+            </div>
+          </div>
+          <button
+            aria-label="关闭预览"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            onClick={onClose}
+            type="button"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 sm:px-8">
+          <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="rounded-[24px] border border-red-100 bg-red-50/35 p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-red-400">
+                Prompt Snapshot
+              </div>
+              <pre className="mt-4 whitespace-pre-wrap break-words text-sm leading-7 text-slate-700">
+                {template.prompt_content.trim() || "该模板暂无系统提示词。"}
+              </pre>
+            </div>
+
+            <div className="space-y-4">
+              <PreviewMetricCard label="使用次数" value={formatNumber(template.usage_count)} />
+              <PreviewMetricCard label="评分" value={template.rating.toFixed(1)} />
+              <PreviewMetricCard label="创建日期" value={formatTemplateCardDate(template.created_at)} />
+              <div className="rounded-[24px] border border-slate-200 bg-white p-5 text-sm leading-6 text-slate-500 shadow-[0_12px_32px_rgba(15,23,42,0.04)]">
+                预览模式仅供快速校验模板资产内容。若需要修改，请进入编辑态后保存；官方预置模板的改动会同步影响前台调用侧。
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4 sm:px-8">
+          <button
+            className="h-11 rounded-xl bg-slate-100 px-5 text-sm font-medium text-slate-600 transition hover:bg-slate-200"
+            onClick={onClose}
+            type="button"
+          >
+            关闭
+          </button>
+          <button
+            className="inline-flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-[#ff6b57] to-[#ff8b4d] px-5 text-sm font-semibold text-white transition hover:brightness-105"
+            onClick={() => onEdit(template)}
+            type="button"
+          >
+            <PencilLine className="h-4 w-4" />
+            编辑模板
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PreviewMetricCard(props: { label: string; value: string }) {
   const { label, value } = props;
 
   return (
-    <div className="rounded-2xl border border-slate-100 bg-slate-50/80 px-4 py-4 text-center">
-      <div className="text-xs font-medium text-slate-400">{label}</div>
-      <div className="mt-2 text-base font-bold text-slate-900">{value}</div>
+    <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-[0_12px_32px_rgba(15,23,42,0.04)]">
+      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+      <div className="mt-3 text-xl font-semibold text-slate-900">{value}</div>
     </div>
   );
 }
@@ -908,7 +1118,7 @@ function DeleteConfirmDialog(props: DeleteConfirmDialogProps) {
   const title = confirmState.kind === "single" ? "确认删除该模板？" : "确认批量删除？";
   const description =
     confirmState.kind === "single"
-      ? `模板「${confirmState.template.title}」删除后，C 端用户将无法继续使用。该操作不可撤销。`
+      ? `模板“${confirmState.template.title}”删除后，C 端用户将无法继续使用。该操作不可撤销。`
       : `即将删除已选中的 ${confirmState.count} 个模板。删除后 C 端用户将无法继续使用这些模板，且无法恢复。`;
 
   return (

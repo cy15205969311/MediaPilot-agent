@@ -40,7 +40,7 @@ type FilterDraft = {
   endDate: string;
 };
 
-const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 5;
 
 const theme = {
   primary: "#ef4444",
@@ -576,7 +576,7 @@ export function AdminAuditLogsPage(props: AdminAuditLogsPageProps) {
 
           <div className="space-y-3 p-5">
             {isLoading ? (
-              Array.from({ length: 6 }).map((_, index) => <AuditLogSkeleton key={index} />)
+              Array.from({ length: DEFAULT_PAGE_SIZE }).map((_, index) => <AuditLogSkeleton key={index} />)
             ) : items.length ? (
               items.map((item) => {
                 const visual = getActionVisual(item.action_type);

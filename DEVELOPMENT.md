@@ -442,19 +442,21 @@ The top task selector remains an input-task selector, not a backend multi-task b
 
 The admin template workspace now supports the full shared-template lifecycle instead of create-only cards:
 
-- `omnimedia-admin-web/src/pages/AdminTemplatesPage.tsx` supports create, edit, single delete, multi-select, and batch delete
-- shared-template mutations are backed by `app/api/v1/admin_templates.py`
+- `omnimedia-admin-web/src/pages/AdminTemplatesPage.tsx` supports create, edit, preview, single delete, multi-select, and batch delete, with the grid paged at `10` items per view
+- shared-template mutations are backed by `app/api/v1/admin_templates.py`, and admin routes now allow preset-template edits and deletes
 - the admin page now uses a centered shared modal for both create and edit states instead of the older side drawer
+- the modal includes an `is_preset` switch so operators can promote or demote a template between shared-custom and official-preset states
 - template cards use a longer detail-rich layout with platform and ownership tags, a `PROMPT SNAPSHOT` preview block, and a three-column stats grid
-- deleting shared templates requires an explicit confirmation dialog
+- deleting shared templates requires an explicit confirmation dialog; seeded preset deletes are tombstoned instead of hard-deleted so they stay hidden and do not silently reappear after the next preset sync
+- `app/services/template_library.py` now backfills only missing preset templates and no longer force-overwrites admin-edited preset content
 - bulk selection uses an animated action bar with a foreground `z-index` so it stays readable above the card grid
-- the modal includes extra UI-only fields such as industry classification and knowledge-base placeholders, but the actual backend payload is still filtered down to supported template fields only
+- the modal keeps industry classification as a UI-only helper field, removes the earlier knowledge-base input, and still filters the backend payload down to supported template fields only
 
 The creator-side local template center was also extended:
 
 - `PATCH /api/v1/media/templates/{template_id}` updates user-owned templates
 - `DELETE /api/v1/media/templates` performs validated batch deletion using SQLAlchemy `delete(...)`
-- preset templates remain immutable on both the creator and admin surfaces
+- preset templates remain immutable on the creator surface, while the admin console intentionally unlocks them behind admin-role authorization
 
 ### 7.17 Admin user provisioning modal
 
@@ -474,6 +476,7 @@ The admin user center now includes a complete delete and recovery-oriented gover
 - the delete flow uses a blocking confirmation modal that clearly warns about login loss, session cleanup, and asset cleanup
 - deleting a user removes the row from the current page, recalculates pagination when the last row on a page disappears, and clears any active detail state for that target
 - the audit workspace recognizes `delete_user` as a first-class admin event with dedicated label, icon, and summary rendering
+- the audit workspace now uses a fixed `5`-row page size so governance actions are easier to scan and reconcile
 - the reset-password action remains visible in the same dropdown and now consistently communicates the fixed reset password baseline to operators
 
 ## 8. Backend Boundaries
@@ -617,10 +620,16 @@ Validate the parts you actually changed before you push.
    - the request payload sent to `POST /api/v1/admin/users` contains only those three fields
 13. Open `/templates` in the admin workspace and confirm that:
    - editing a shared template calls `PATCH /api/v1/admin/templates/{template_id}`
+   - preset and custom templates both expose edit, delete, and batch-selection affordances
    - create and edit both use the centered template modal rather than a side drawer
-   - UI-only industry and knowledge fields do not leak into the backend payload
+   - the modal exposes the `is_preset` switch and no longer renders the earlier knowledge-base input
+   - UI-only helper fields such as industry classification do not leak into the backend payload
    - single delete requires confirmation and removes the shared template
    - batch delete clears selected cards and refreshes the list
+   - deleting a seeded preset template keeps it hidden after a refresh instead of auto-reseeding it into the grid
+14. Open the audit-log workspace and confirm that:
+   - the default page size is fixed at `5`
+   - pagination, filters, and the detail panel stay consistent as you move through results
 
 ### 10.3 Billing and multimodal validation
 
