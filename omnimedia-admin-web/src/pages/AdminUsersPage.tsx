@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Check,
   Coins,
   Copy,
   Eye,
@@ -15,6 +16,7 @@ import {
 
 import {
   APIError,
+  createAdminUser,
   fetchAdminUsers,
   isAdminRole,
   resetAdminUserPassword,
@@ -26,6 +28,7 @@ import { UserAvatar } from "../components/UserAvatar";
 import type {
   AdminTokenAdjustAction,
   AdminToast,
+  AdminUserCreatePayload,
   AdminUserItem,
   AdminUsersApiResponse,
   AuthenticatedUser,
@@ -44,6 +47,8 @@ type PasswordRevealState = {
   username: string;
   password: string;
 } | null;
+
+type CreateUserFormErrors = Partial<Record<"username" | "password" | "role", string>>;
 
 type UserFilterTab = "all" | "standard" | "premium" | "frozen";
 
@@ -122,6 +127,36 @@ function canManageUserAccounts(currentUser: Pick<AuthenticatedUser, "role">): bo
   );
 }
 
+function canProvisionUsers(currentUser: Pick<AuthenticatedUser, "role">): boolean {
+  return currentUser.role === "super_admin" || currentUser.role === "admin";
+}
+
+function canAssignProvisionRole(
+  currentUser: Pick<AuthenticatedUser, "role">,
+  role: UserRole,
+): boolean {
+  if (currentUser.role === "super_admin") {
+    return true;
+  }
+
+  if (currentUser.role === "admin") {
+    return role !== "super_admin" && role !== "admin";
+  }
+
+  return false;
+}
+
+function getProvisionRoleOptions(currentUser: Pick<AuthenticatedUser, "role">) {
+  return ROLE_ASSIGNMENT_OPTIONS.filter((option) =>
+    canAssignProvisionRole(currentUser, option.value),
+  );
+}
+
+function getDefaultProvisionRole(currentUser: Pick<AuthenticatedUser, "role">): UserRole {
+  const firstOption = getProvisionRoleOptions(currentUser)[0];
+  return firstOption?.value ?? "user";
+}
+
 function canChangeUserRole(
   currentUser: Pick<AuthenticatedUser, "id" | "role">,
   user: Pick<AdminUserItem, "id" | "role">,
@@ -180,6 +215,42 @@ function getActionTitle(action: AdminTokenAdjustAction): string {
     return "扣减额度";
   }
   return "设定余额";
+}
+
+function generateProvisionPassword(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const numbers = new Uint32Array(6);
+  window.crypto.getRandomValues(numbers);
+  const suffix = Array.from(numbers, (value, index) =>
+    index < 4 ? String(value % 10) : alphabet[value % alphabet.length],
+  ).join("");
+  return `Omni@${suffix}`;
+}
+
+function validateCreateUserForm(
+  form: AdminUserCreatePayload,
+  currentUser: Pick<AuthenticatedUser, "role">,
+): CreateUserFormErrors {
+  const errors: CreateUserFormErrors = {};
+  const normalizedUsername = form.username.trim();
+
+  if (!normalizedUsername) {
+    errors.username = "请输入用户名";
+  } else if (normalizedUsername.length < 3) {
+    errors.username = "用户名至少需要 3 个字符";
+  }
+
+  if (!form.password) {
+    errors.password = "请输入初始密码";
+  } else if (form.password.length < 8) {
+    errors.password = "初始密码至少需要 8 个字符";
+  }
+
+  if (!canAssignProvisionRole(currentUser, form.role)) {
+    errors.role = "当前账号无法预分配该系统级角色";
+  }
+
+  return errors;
 }
 
 export function formatSessionDeviceInfo(value?: string | null): string {
@@ -305,15 +376,28 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const [roleModalUser, setRoleModalUser] = useState<AdminUserItem | null>(null);
   const [nextRole, setNextRole] = useState<UserRole>("user");
   const [revealedPassword, setRevealedPassword] = useState<PasswordRevealState>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [createForm, setCreateForm] = useState<AdminUserCreatePayload>(() => ({
+    username: "",
+    password: generateProvisionPassword(),
+    role: getDefaultProvisionRole(currentUser),
+  }));
+  const [createFormErrors, setCreateFormErrors] = useState<CreateUserFormErrors>({});
 
   const total = usersPayload?.total ?? 0;
   const items = usersPayload?.items ?? [];
   const canGovernUserAccounts = canManageUserAccounts(currentUser);
+  const canCreateUsers = canProvisionUsers(currentUser);
   const currentPage = Math.floor(skip / DEFAULT_PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil(total / DEFAULT_PAGE_SIZE));
   const selectedUser = items.find((item) => item.id === selectedUserId) ?? null;
   const parsedTokenAmount = Number(tokenAmount);
   const selectedRoleOption = getRoleOption(nextRole);
+  const provisionRoleOptions = useMemo(
+    () => getProvisionRoleOptions(currentUser),
+    [currentUser],
+  );
+  const isCreateUserSubmitting = isSubmitting && activeUserId === "__create_user__";
   const tokenPreviewBalance =
     tokenModalUser && Number.isInteger(parsedTokenAmount) && parsedTokenAmount >= 0
       ? tokenAction === "add"
@@ -367,16 +451,20 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
           Math.min(skip + items.length, total),
         )}，共 ${formatNumber(total)} 条`;
 
-  const loadUsers = async () => {
+  const loadUsers = async (options?: {
+    skip?: number;
+    search?: string;
+  }) => {
     setIsLoading(true);
 
     try {
       const payload = await fetchAdminUsers({
-        skip,
+        skip: options?.skip ?? skip,
         limit: DEFAULT_PAGE_SIZE,
-        search: searchKeyword,
+        search: options?.search ?? searchKeyword,
       });
       setUsersPayload(payload);
+      return payload;
     } catch (error) {
       onToast({
         tone: "error",
@@ -388,6 +476,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
               ? error.message
               : "加载用户列表失败，请稍后重试。",
       });
+      return null;
     } finally {
       setIsLoading(false);
     }
@@ -414,6 +503,17 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     setSkip(0);
     setSearchKeyword(normalizedKeyword);
   }, [debouncedSearchInput, searchKeyword]);
+
+  useEffect(() => {
+    if (provisionRoleOptions.some((option) => option.value === createForm.role)) {
+      return;
+    }
+
+    setCreateForm((current) => ({
+      ...current,
+      role: getDefaultProvisionRole(currentUser),
+    }));
+  }, [createForm.role, currentUser, provisionRoleOptions]);
 
   useEffect(() => {
     if (!items.length) {
@@ -477,6 +577,132 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
       title: "角色变更已被拦截",
       message: getRoleChangeDisabledReason(currentUser, user) || "当前不允许执行角色变更。",
     });
+  };
+
+  const resetCreateForm = () => {
+    setCreateForm({
+      username: "",
+      password: generateProvisionPassword(),
+      role: getDefaultProvisionRole(currentUser),
+    });
+    setCreateFormErrors({});
+  };
+
+  const openCreateModal = () => {
+    if (!canCreateUsers) {
+      showGovernancePermissionToast("新建用户");
+      return;
+    }
+
+    resetCreateForm();
+    setIsCreateModalOpen(true);
+  };
+
+  const closeCreateModal = (force = false) => {
+    if (isSubmitting && !force) {
+      return;
+    }
+
+    setIsCreateModalOpen(false);
+    setCreateFormErrors({});
+  };
+
+  const handleGenerateCreatePassword = () => {
+    setCreateForm((current) => ({
+      ...current,
+      password: generateProvisionPassword(),
+    }));
+    setCreateFormErrors((current) => ({
+      ...current,
+      password: undefined,
+    }));
+  };
+
+  const handleCopyCreatePassword = async () => {
+    if (!createForm.password) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(createForm.password);
+      onToast({
+        tone: "success",
+        title: "初始密码已复制",
+        message: "可直接发送给新成员完成首次登录。",
+      });
+    } catch {
+      onToast({
+        tone: "warning",
+        title: "复制失败",
+        message: "浏览器暂未授予剪贴板权限，请手动复制初始密码。",
+      });
+    }
+  };
+
+  const handleCreateUserSubmit = async () => {
+    if (!canCreateUsers) {
+      showGovernancePermissionToast("新建用户");
+      return;
+    }
+
+    const payload: AdminUserCreatePayload = {
+      username: createForm.username.trim(),
+      password: createForm.password,
+      role: createForm.role,
+    };
+    const validationErrors = validateCreateUserForm(payload, currentUser);
+    setCreateFormErrors(validationErrors);
+
+    if (Object.values(validationErrors).some(Boolean)) {
+      onToast({
+        tone: "warning",
+        title: "请先完善建号信息",
+        message:
+          validationErrors.username ||
+          validationErrors.password ||
+          validationErrors.role ||
+          "请检查用户名、密码和角色配置。",
+      });
+      return;
+    }
+
+    setActiveUserId("__create_user__");
+    setIsSubmitting(true);
+
+    try {
+      const createdUser = await createAdminUser(payload);
+      closeCreateModal(true);
+      resetCreateForm();
+
+      if (skip === 0 && !searchKeyword.trim()) {
+        await loadUsers({ skip: 0, search: "" });
+      } else {
+        setSearchInput("");
+        setDebouncedSearchInput("");
+        setSearchKeyword("");
+        setSkip(0);
+      }
+
+      onToast({
+        tone: "success",
+        title: "用户创建成功",
+        message: `${createdUser.username} 已创建，并完成 ${formatRoleLabel(createdUser.role)} 预分配。`,
+      });
+    } catch (error) {
+      onToast({
+        tone: "error",
+        title: "创建用户失败",
+        message:
+          error instanceof APIError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : "新建用户失败，请稍后重试。",
+      });
+    } finally {
+      setActiveUserId(null);
+      setIsSubmitting(false);
+    }
   };
 
   const openDetailDrawer = (userId: string) => {
@@ -779,7 +1005,26 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
           </div>
 
           <button
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-red-500 to-orange-400 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_14px_36px_rgba(248,113,113,0.28)]"
+            className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+              canCreateUsers
+                ? "bg-gradient-to-r from-red-500 to-orange-400 text-white shadow-[0_14px_36px_rgba(248,113,113,0.28)]"
+                : "cursor-not-allowed bg-slate-200 text-slate-500 shadow-none"
+            }`}
+            disabled={!canCreateUsers}
+            onClick={openCreateModal}
+            type="button"
+          >
+            <Plus className="h-4 w-4" />
+            新建用户
+          </button>
+
+          {false ? (
+          <button
+            className={`hidden inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+              canCreateUsers
+                ? "bg-gradient-to-r from-red-500 to-orange-400 text-white shadow-[0_14px_36px_rgba(248,113,113,0.28)]"
+                : "cursor-not-allowed bg-slate-200 text-slate-500 shadow-none"
+            }`}
             onClick={() =>
               onToast({
                 tone: "warning",
@@ -792,6 +1037,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
             <Plus className="h-4 w-4" />
             新建用户
           </button>
+          ) : null}
         </div>
 
         <div className="mb-6 flex flex-wrap gap-3">
@@ -1219,6 +1465,188 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
           </aside>
         </div>
       ) : null}
+
+      {isCreateModalOpen ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-5 backdrop-blur-sm sm:p-6"
+          onClick={() => closeCreateModal()}
+        >
+          <div
+            className="flex max-h-[min(780px,calc(100vh-72px))] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.18)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4 sm:px-7">
+              <div className="text-xl font-bold tracking-tight text-slate-900">新建用户</div>
+              <button
+                aria-label="关闭"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                onClick={() => closeCreateModal()}
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
+              </div>
+
+            <div className="min-h-0 overflow-y-auto px-6 py-5 sm:px-7">
+              <div className="space-y-6">
+              <section className="space-y-4">
+                <div className="text-sm font-semibold text-slate-900">基础账号信息</div>
+
+                <label className="block">
+                  <div className="mb-2 text-sm font-medium text-slate-700">用户名</div>
+                  <input
+                    className={`h-12 w-full rounded-2xl border bg-white px-4 text-sm text-slate-900 outline-none transition focus:ring-4 ${
+                      createFormErrors.username
+                        ? "border-red-300 focus:border-red-300 focus:ring-red-100"
+                        : "border-slate-200 focus:border-red-300 focus:ring-red-100"
+                    }`}
+                    onChange={(event) => {
+                      setCreateForm((current) => ({
+                        ...current,
+                        username: event.target.value,
+                      }));
+                      setCreateFormErrors((current) => ({
+                        ...current,
+                        username: undefined,
+                      }));
+                    }}
+                    placeholder="请输入用户名"
+                    type="text"
+                    value={createForm.username}
+                  />
+                  {createFormErrors.username ? (
+                    <div className="mt-2 text-xs text-red-500">{createFormErrors.username}</div>
+                  ) : (
+                    <div className="mt-2 text-xs text-slate-400">
+                      建议使用便于识别的英文名、拼音或工号
+                    </div>
+                  )}
+                </label>
+
+                <label className="block">
+                  <div className="mb-2 text-sm font-medium text-slate-700">初始密码</div>
+                  <div
+                    className={`flex items-center gap-2 rounded-2xl border bg-white px-3 py-2 transition focus-within:ring-4 ${
+                      createFormErrors.password
+                        ? "border-red-300 focus-within:border-red-300 focus-within:ring-red-100"
+                        : "border-slate-200 focus-within:border-red-300 focus-within:ring-red-100"
+                    }`}
+                  >
+                    <input
+                      className="min-w-0 flex-1 bg-transparent px-1 font-mono text-sm text-slate-900 outline-none"
+                      onChange={(event) => {
+                        setCreateForm((current) => ({
+                          ...current,
+                          password: event.target.value,
+                        }));
+                        setCreateFormErrors((current) => ({
+                          ...current,
+                          password: undefined,
+                        }));
+                      }}
+                      placeholder="至少 8 个字符"
+                      type="text"
+                      value={createForm.password}
+                    />
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        className="inline-flex h-8 items-center gap-1 rounded-full border border-orange-200 bg-orange-50 px-3 text-xs font-semibold text-orange-600 transition hover:bg-orange-100"
+                        onClick={handleGenerateCreatePassword}
+                        type="button"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        ↻ 随机生成
+                      </button>
+                      <button
+                        className="inline-flex h-8 items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+                        onClick={() => void handleCopyCreatePassword()}
+                        type="button"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        ⎘ 复制
+                      </button>
+                    </div>
+                  </div>
+                  {createFormErrors.password ? (
+                    <div className="mt-2 text-xs text-red-500">{createFormErrors.password}</div>
+                  ) : null}
+                </label>
+              </section>
+
+              <section className="space-y-4">
+                <div className="text-sm font-semibold text-slate-900">角色分配</div>
+                <div className="grid grid-cols-2 gap-4">
+                  {provisionRoleOptions.map((option) => {
+                    const isSelected = createForm.role === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        className={`relative rounded-2xl border px-4 py-3.5 text-left transition ${
+                          isSelected
+                            ? "border-[#ff7a59] bg-red-50/30 shadow-[0_12px_24px_rgba(255,122,89,0.10)]"
+                            : "border-slate-200 bg-transparent hover:border-slate-300 hover:bg-slate-50/60"
+                        }`}
+                        onClick={() => {
+                          setCreateForm((current) => ({
+                            ...current,
+                            role: option.value,
+                          }));
+                          setCreateFormErrors((current) => ({
+                            ...current,
+                            role: undefined,
+                          }));
+                        }}
+                        type="button"
+                      >
+                        {isSelected ? (
+                          <span className="absolute right-4 top-4 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#ff7a59] text-white">
+                            <Check className="h-3.5 w-3.5" />
+                          </span>
+                        ) : null}
+                        <div className="pr-8 text-sm font-semibold text-slate-900">
+                          {option.label}
+                        </div>
+                        <div className="mt-1.5 text-xs leading-5 text-slate-500">
+                          {option.description}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                {createFormErrors.role ? (
+                  <div className="text-xs text-red-500">{createFormErrors.role}</div>
+                ) : null}
+              </section>
+
+              <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3.5 text-sm leading-6 text-amber-900">
+                💡 提示：系统将根据分配的角色，自动为其发放 10,000,000 Token 的初始资产或赋予无限额度，并同步写入审计流水。
+              </section>
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center justify-end gap-3 border-t border-slate-200 px-6 py-4 sm:px-7">
+                <button
+                  className="h-11 rounded-xl bg-slate-100 px-5 text-sm font-medium text-slate-600 transition hover:bg-slate-200"
+                  onClick={() => closeCreateModal()}
+                  type="button"
+                >
+                  取消
+                </button>
+                <button
+                  className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#ff7a59] px-5 text-sm font-semibold text-white transition hover:bg-[#f26d4c] disabled:cursor-not-allowed disabled:opacity-70"
+                  disabled={isSubmitting || !canCreateUsers}
+                  onClick={() => void handleCreateUserSubmit()}
+                  type="button"
+                >
+                  {isCreateUserSubmitting ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : null}
+                  保存并创建
+                </button>
+            </div>
+          </div>
+        </div>
+        ) : null}
 
       {roleModalUser ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/15 p-4 backdrop-blur-[2px]">

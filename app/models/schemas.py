@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PlainSerializer
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -424,6 +424,12 @@ class AdminUserListResponse(SchemaModel):
     limit: int = Field(..., description="Current page size.")
 
 
+class AdminUserCreate(SchemaModel):
+    username: str = Field(..., min_length=3, max_length=64, description="Username.")
+    password: str = Field(..., min_length=8, max_length=128, description="Initial password.")
+    role: UserRole = Field(default=UserRole.USER, description="Preset role assignment.")
+
+
 class AdminUserStatusUpdateRequest(SchemaModel):
     status: UserAccountStatus = Field(..., description="Target account status.")
 
@@ -445,6 +451,18 @@ class AdminTokenAdjustAction(str, Enum):
     ADD = "add"
     DEDUCT = "deduct"
     SET = "set"
+
+
+class AuditActionType(str, Enum):
+    CREATE_USER = "create_user"
+    ROLE_CHANGE = "role_change"
+    TOPUP = "topup"
+    TOKEN_DEDUCT = "token_deduct"
+    TOKEN_SET = "token_set"
+    FREEZE = "freeze"
+    UNFREEZE = "unfreeze"
+    RESET_PASSWORD = "reset_password"
+    DELETE_TEMPLATE = "delete_template"
 
 
 class AdminUserTokenUpdateRequest(SchemaModel):
@@ -528,6 +546,30 @@ class AdminTokenTransactionStatsResponse(SchemaModel):
         default=None,
         description="Percentage change of total platform balance against the prior day baseline.",
     )
+
+
+class AdminAuditLogItem(SchemaModel):
+    id: str = Field(..., description="Audit log ID.")
+    operator_id: str | None = Field(default=None, description="Operator user ID.")
+    operator_name: str = Field(..., description="Redundant operator display name.")
+    action_type: AuditActionType = Field(..., description="Audit event category.")
+    target_id: str | None = Field(default=None, description="Target entity ID.")
+    target_name: str = Field(..., description="Target entity display name.")
+    details: dict[str, object] = Field(
+        default_factory=dict,
+        description="Structured change details or business context.",
+    )
+    created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+
+
+class AdminAuditLogListResponse(SchemaModel):
+    items: list[AdminAuditLogItem] = Field(
+        default_factory=list,
+        description="Paginated audit log rows.",
+    )
+    total: int = Field(..., description="Total row count after filtering.")
+    skip: int = Field(..., description="Current offset.")
+    limit: int = Field(..., description="Current page size.")
 
 
 class ThreadSummaryItem(SchemaModel):
@@ -698,6 +740,72 @@ class AvailableModelsResponse(SchemaModel):
     total_models: int = Field(..., description="Returned model count across all providers.")
 
 
+class AdminTemplatePlatform(str, Enum):
+    XIAOHONGSHU = "小红书"
+    DOUYIN = "抖音"
+    GENERAL = "通用"
+
+
+class AdminTemplateListItem(SchemaModel):
+    id: str = Field(..., description="Template identifier.")
+    title: str = Field(..., description="Template title shown in admin.")
+    platform: AdminTemplatePlatform = Field(..., description="Admin-facing template platform.")
+    description: str = Field(..., description="Short business-facing template summary.")
+    prompt_content: str = Field(..., description="Stored reusable system prompt.")
+    usage_count: int = Field(..., ge=0, description="Observed template usage count.")
+    rating: float = Field(..., ge=0, le=5, description="Template rating for admin cards.")
+    is_preset: bool = Field(..., description="Whether the template is a built-in preset.")
+    created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
+
+
+class AdminTemplateListResponse(SchemaModel):
+    items: list[AdminTemplateListItem] = Field(
+        default_factory=list,
+        description="Shared templates visible in admin.",
+    )
+    total: int = Field(..., description="Returned template count.")
+
+
+class AdminTemplateCreateRequest(SchemaModel):
+    title: str = Field(..., min_length=1, max_length=255, description="Template title.")
+    platform: AdminTemplatePlatform = Field(..., description="Admin-facing template platform.")
+    description: str = Field(
+        default="",
+        max_length=500,
+        description="Short template description for card display.",
+    )
+    prompt_content: str = Field(
+        ...,
+        min_length=1,
+        max_length=6000,
+        description="Reusable system prompt body.",
+    )
+
+
+class AdminTemplateUpdateRequest(SchemaModel):
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Updated template title.",
+    )
+    platform: AdminTemplatePlatform | None = Field(
+        default=None,
+        description="Updated admin-facing template platform.",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Updated short template description for card display.",
+    )
+    prompt_content: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=6000,
+        description="Updated reusable system prompt body.",
+    )
+
+
 class TemplateListItem(SchemaModel):
     id: str = Field(..., description="Template identifier.")
     title: str = Field(..., description="Template title shown in the workspace.")
@@ -713,6 +821,10 @@ class TemplateListItem(SchemaModel):
         description="Prebuilt system prompt copied into the new-thread modal.",
     )
     is_preset: bool = Field(..., description="Whether the template is a system preset.")
+    is_shared: bool = Field(
+        default=False,
+        description="Whether the template is a shared admin-created global template.",
+    )
     created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
 
 
@@ -744,6 +856,31 @@ class TemplateCreateRequest(SchemaModel):
         min_length=1,
         max_length=6000,
         description="System prompt body.",
+    )
+
+
+class TemplateUpdateRequest(SchemaModel):
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Updated template title.",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Updated short user-facing description.",
+    )
+    platform: TemplatePlatform | None = Field(
+        default=None,
+        description="Updated template platform.",
+    )
+    prompt_content: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=6000,
+        validation_alias=AliasChoices("prompt_content", "system_prompt"),
+        description="Updated system prompt body.",
     )
 
 

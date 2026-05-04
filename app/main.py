@@ -13,7 +13,9 @@ from app.config import load_environment
 load_environment()
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.admin_audit_logs import router as admin_audit_logs_router
 from app.api.v1.admin_dashboard import router as admin_dashboard_router
+from app.api.v1.admin_templates import router as admin_templates_router
 from app.api.v1.admin_tokens import router as admin_tokens_router
 from app.api.v1.admin_users import router as admin_users_router
 from app.api.v1.chat import router as media_chat_router
@@ -171,7 +173,9 @@ async def root() -> dict[str, str]:
 
 
 app.include_router(auth_router)
+app.include_router(admin_audit_logs_router)
 app.include_router(admin_dashboard_router)
+app.include_router(admin_templates_router)
 app.include_router(admin_tokens_router)
 app.include_router(admin_users_router)
 app.include_router(users_router)

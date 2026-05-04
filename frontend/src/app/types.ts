@@ -313,6 +313,7 @@ export type TemplateSummaryItem = {
   knowledge_base_scope?: string | null;
   system_prompt: string;
   is_preset: boolean;
+  is_shared?: boolean;
   created_at: string;
 };
 

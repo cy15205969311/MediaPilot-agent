@@ -433,6 +433,32 @@ The top task selector remains an input-task selector, not a backend multi-task b
 - the backend still executes one task per request
 - any "one-click pipeline" experience must be implemented as explicit frontend-guided follow-up requests
 
+### 7.16 Admin template governance lifecycle
+
+The admin template workspace now supports the full shared-template lifecycle instead of create-only cards:
+
+- `omnimedia-admin-web/src/pages/AdminTemplatesPage.tsx` supports create, edit, single delete, multi-select, and batch delete
+- shared-template mutations are backed by `app/api/v1/admin_templates.py`
+- the admin page uses one shared drawer for both create and edit states
+- deleting shared templates requires an explicit confirmation dialog
+- bulk selection uses an animated action bar with a foreground `z-index` so it stays readable above the card grid
+
+The creator-side local template center was also extended:
+
+- `PATCH /api/v1/media/templates/{template_id}` updates user-owned templates
+- `DELETE /api/v1/media/templates` performs validated batch deletion using SQLAlchemy `delete(...)`
+- preset templates remain immutable on both the creator and admin surfaces
+
+### 7.17 Admin user provisioning modal
+
+The create-user entry in `omnimedia-admin-web/src/pages/AdminUsersPage.tsx` has been refocused into a compact centered modal:
+
+- payload is intentionally limited to `username`, `password`, and `role`
+- the password field supports inline random generation and clipboard copy
+- role assignment uses card-based single selection instead of a dropdown
+- the modal uses a bounded height with internal scrolling so it does not feel full-screen on shorter viewports
+- the bottom banner explains that the backend will automatically grant the initial token asset or unlimited quota according to role and record the action in audit history
+
 ## 8. Backend Boundaries
 
 ### 8.1 Route groups
@@ -452,6 +478,8 @@ Current route modules under `app/api/v1/` include:
 - `admin_users.py`
 - `admin_dashboard.py`
 - `admin_tokens.py`
+- `admin_templates.py`
+- `admin_audit_logs.py`
 
 ### 8.2 Layering rules
 
@@ -494,7 +522,10 @@ Avoid pushing long-lived business orchestration and complex data-access code int
 
 - `GET /api/v1/media/templates`
 - `POST /api/v1/media/templates`
+- `PATCH /api/v1/media/templates/{template_id}`
 - `DELETE /api/v1/media/templates/{template_id}`
+- `DELETE /api/v1/media/templates`
+- `GET /api/v1/media/skills/search`
 - `GET /api/v1/media/topics`
 - `POST /api/v1/media/topics`
 - `PATCH /api/v1/media/topics/{topic_id}`
@@ -507,14 +538,22 @@ Avoid pushing long-lived business orchestration and complex data-access code int
 ### 9.4 Admin endpoints
 
 - `GET /api/v1/admin/users`
+- `POST /api/v1/admin/users`
 - `POST /api/v1/admin/users/{user_id}/status`
 - `POST /api/v1/admin/users/{user_id}/reset-password`
 - `POST /api/v1/admin/users/{user_id}/tokens`
 - `PATCH /api/v1/admin/users/{user_id}/role`
+- `GET /api/v1/admin/templates`
+- `POST /api/v1/admin/templates`
+- `PATCH /api/v1/admin/templates/{template_id}`
+- `DELETE /api/v1/admin/templates/{template_id}`
+- `DELETE /api/v1/admin/templates`
 - `GET /api/v1/admin/roles/summary`
 - `GET /api/v1/admin/dashboard`
 - `GET /api/v1/admin/transactions`
 - `GET /api/v1/admin/transactions/stats`
+- `GET /api/v1/admin/audit-logs`
+- `GET /api/v1/admin/audit-logs/export`
 
 ## 10. Validation Checklist
 
@@ -542,6 +581,14 @@ Validate the parts you actually changed before you push.
 6. Open the RBAC page and confirm that member counts come from the real summary endpoint instead of mock constants.
 7. Confirm that `super_admin` rows remain protected from freeze, password reset, and token adjustment actions.
 8. Open `/tokens` as `finance` or `super_admin` and confirm that KPI cards come from the live stats endpoint, keyword filtering is debounced, and pagination keeps row counts aligned with the backend total.
+9. Open the create-user modal and confirm that:
+   - it is centered instead of using a side drawer
+   - the visible form only includes `username`, `password`, and `role`
+   - the request payload sent to `POST /api/v1/admin/users` contains only those three fields
+10. Open `/templates` in the admin workspace and confirm that:
+   - editing a shared template calls `PATCH /api/v1/admin/templates/{template_id}`
+   - single delete requires confirmation and removes the shared template
+   - batch delete clears selected cards and refreshes the list
 
 ### 10.3 Billing and multimodal validation
 

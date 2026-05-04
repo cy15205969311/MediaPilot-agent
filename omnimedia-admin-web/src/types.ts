@@ -78,6 +78,43 @@ export type AdminDashboardData = {
 
 export type AdminRoleSummaryResponse = Partial<Record<UserRole, number>>;
 
+export type AdminTemplatePlatform = "小红书" | "抖音" | "通用";
+
+export type AdminTemplateItem = {
+  id: string;
+  title: string;
+  platform: AdminTemplatePlatform;
+  description: string;
+  prompt_content: string;
+  usage_count: number;
+  rating: number;
+  is_preset: boolean;
+  created_at: string;
+};
+
+export type AdminTemplatesApiResponse = {
+  items: AdminTemplateItem[];
+  total: number;
+};
+
+export type AdminTemplateCreatePayload = {
+  title: string;
+  platform: AdminTemplatePlatform;
+  description: string;
+  prompt_content: string;
+};
+
+export type AdminTemplateUpdatePayload = Partial<AdminTemplateCreatePayload>;
+
+export type AdminTemplateDeletePayload = {
+  template_ids: string[];
+};
+
+export type AdminTemplateDeleteApiResponse = {
+  deleted_count: number;
+  deleted_ids: string[];
+};
+
 export type AdminTokenTransactionItem = {
   id: string;
   created_at: string;
@@ -106,8 +143,50 @@ export type AdminTokenStats = {
   total_balance_change_percent?: number | null;
 };
 
+export type AdminAuditActionType =
+  | "create_user"
+  | "role_change"
+  | "topup"
+  | "token_deduct"
+  | "token_set"
+  | "freeze"
+  | "unfreeze"
+  | "reset_password"
+  | "delete_template";
+
+export type AdminAuditLogItem = {
+  id: string;
+  operator_id?: string | null;
+  operator_name: string;
+  action_type: AdminAuditActionType;
+  target_id?: string | null;
+  target_name: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AdminAuditLogsApiResponse = {
+  items: AdminAuditLogItem[];
+  total: number;
+  skip: number;
+  limit: number;
+};
+
+export type AdminAuditLogsFilters = {
+  operatorKeyword?: string;
+  actionType?: AdminAuditActionType | "";
+  startDate?: string;
+  endDate?: string;
+};
+
 export type AdminUserStatusPayload = {
   status: UserStatus;
+};
+
+export type AdminUserCreatePayload = {
+  username: string;
+  password: string;
+  role: UserRole;
 };
 
 export type AdminUserPasswordResetApiResponse = {

@@ -2,22 +2,22 @@ import { useEffect, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
-  Database,
-  FileText,
   HardDrive,
   Settings,
   XCircle,
 } from "lucide-react";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-import { clearStoredSession, getStoredUser, isAdminRole, logoutAPI } from "./api";
 import { getDefaultAdminRoute } from "./adminMeta";
+import { clearStoredSession, getStoredUser, isAdminRole, logoutAPI } from "./api";
 import { AdminLayout } from "./components/AdminLayout";
 import { AuthGuard } from "./components/AuthGuard";
 import { ToastViewport } from "./components/ToastViewport";
+import { AdminAuditLogsPage } from "./pages/AdminAuditLogsPage";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
 import { AdminRolesPage } from "./pages/AdminRolesPage";
+import { AdminTemplatesPage } from "./pages/AdminTemplatesPage";
 import { AdminTokensPage } from "./pages/AdminTokensPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { Login } from "./pages/Login";
@@ -100,14 +100,14 @@ function App() {
     try {
       await logoutAPI();
     } catch {
-      // If logout fails remotely we still clear the local admin session.
+      // Even if remote logout fails, local state should still be cleared.
     } finally {
       clearStoredSession();
       setCurrentUser(null);
       pushToast({
         tone: "success",
         title: "已退出登录",
-        message: "后台会话已安全清除。",
+        message: "后台会话已经安全清除。",
       });
     }
   };
@@ -134,9 +134,7 @@ function App() {
 
         <Route path="/register" element={<Navigate replace to="/login" />} />
 
-        <Route
-          element={<AuthGuard onUnauthorized={() => setCurrentUser(null)} />}
-        >
+        <Route element={<AuthGuard onUnauthorized={() => setCurrentUser(null)} />}>
           <Route
             element={
               currentUser ? (
@@ -163,46 +161,9 @@ function App() {
               }
             />
             <Route path="/roles" element={<AdminRolesPage onToast={pushToast} />} />
-            <Route
-              path="/tokens"
-              element={<AdminTokensPage onToast={pushToast} />}
-            />
-            <Route
-              path="/audit"
-              element={
-                <AdminPlaceholderPage
-                  badge="Ops Trace"
-                  ctaLabel="查看数据总览"
-                  ctaTo="/dashboard"
-                  description="审计日志适合收口冻结账号、重置密码、调整 Token 额度以及系统配置变更等关键后台动作。"
-                  highlights={[
-                    "建议按动作类型、操作人、时间范围与目标账号提供组合筛选。",
-                    "这类数据能显著提升运营追踪与复盘效率。",
-                    "当前用户中心的真实操作入口已经具备沉淀审计事件的基础。",
-                  ]}
-                  icon={<FileText className="h-6 w-6" />}
-                  title="审计日志模块建设中"
-                />
-              }
-            />
-            <Route
-              path="/templates"
-              element={
-                <AdminPlaceholderPage
-                  badge="Template Ops"
-                  ctaLabel="打开用户中心"
-                  ctaTo="/users"
-                  description="模板库用于管理官方内容模板、发布状态、分类标签和试跑结果。"
-                  highlights={[
-                    "建议把模板类型、适用平台和启停状态统一沉淀为可筛选字段。",
-                    "热门模板可以接入使用次数、评分和最近更新数据，辅助运营决策。",
-                    "后续接入真实模板接口后，可以直接替换当前占位数据结构。",
-                  ]}
-                  icon={<Database className="h-6 w-6" />}
-                  title="模板库模块建设中"
-                />
-              }
-            />
+            <Route path="/tokens" element={<AdminTokensPage onToast={pushToast} />} />
+            <Route path="/audit" element={<AdminAuditLogsPage onToast={pushToast} />} />
+            <Route path="/templates" element={<AdminTemplatesPage onToast={pushToast} />} />
             <Route
               path="/storage"
               element={
@@ -228,7 +189,7 @@ function App() {
                   badge="System Controls"
                   ctaLabel="返回数据总览"
                   ctaTo="/dashboard"
-                  description="系统设置页可以统一管理后台环境变量、模型策略、功能开关和平台级说明，避免配置散落。"
+                  description="系统设置页可集中管理后台环境变量、模型策略、功能开关和平台级说明，避免配置散落。"
                   highlights={[
                     "高风险配置建议拆成只读信息卡与受控修改流程。",
                     "如果后续要支持多环境切换，也适合在这里做统一展示。",

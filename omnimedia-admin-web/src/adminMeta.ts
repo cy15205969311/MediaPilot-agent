@@ -93,7 +93,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     description: "内容模板管理",
     to: "/templates",
     icon: Database,
-    status: "in-progress",
+    status: "ready",
     allowedRoles: ["super_admin", "admin", "operator"],
   },
   {

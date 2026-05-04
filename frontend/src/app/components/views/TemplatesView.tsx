@@ -217,6 +217,24 @@ function matchesSearch(template: TemplateSummaryItem, normalizedSearch: string):
     .includes(normalizedSearch);
 }
 
+function isSharedTemplate(template: TemplateSummaryItem): boolean {
+  return template.is_shared === true;
+}
+
+function isDeletableTemplate(template: TemplateSummaryItem): boolean {
+  return !template.is_preset && !isSharedTemplate(template);
+}
+
+function getTemplateSourceLabel(template: TemplateSummaryItem): string {
+  if (template.is_preset) {
+    return "鏈湴棰勭疆";
+  }
+  if (isSharedTemplate(template)) {
+    return "鍥㈤槦鍏变韩";
+  }
+  return "鎴戠殑妯℃澘";
+}
+
 export function TemplatesView(props: TemplatesViewProps) {
   const {
     templates,
@@ -249,7 +267,9 @@ export function TemplatesView(props: TemplatesViewProps) {
 
   useEffect(() => {
     const availableIds = new Set(
-      templates.filter((template) => !template.is_preset).map((template) => template.id),
+      templates
+        .filter((template) => isDeletableTemplate(template))
+        .map((template) => template.id),
     );
     setSelectedIds((current) => current.filter((id) => availableIds.has(id)));
   }, [templates]);
@@ -698,12 +718,17 @@ export function TemplatesView(props: TemplatesViewProps) {
                               <ShieldCheck className="h-3.5 w-3.5" />
                               官方预置
                             </span>
+                          ) : isSharedTemplate(template) ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2.5 py-1 text-[11px] font-medium text-secondary-foreground">
+                              <BookOpen className="h-3.5 w-3.5" />
+                              Team Shared
+                            </span>
                           ) : null}
                         </div>
                       </div>
                     </div>
 
-                    {!template.is_preset ? (
+                    {isDeletableTemplate(template) ? (
                       <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-border bg-card px-3 py-2 text-xs font-medium text-muted-foreground transition hover:border-brand/40 hover:text-foreground">
                         <input
                           checked={isSelected}
@@ -744,7 +769,7 @@ export function TemplatesView(props: TemplatesViewProps) {
                     </div>
 
                     <div className="flex items-center gap-2">
-                      {!template.is_preset ? (
+                      {isDeletableTemplate(template) ? (
                         <button
                           className="inline-flex items-center justify-center rounded-2xl border border-border px-3 py-2 text-sm text-muted-foreground transition hover:border-destructive/40 hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
                           data-testid={`template-delete-${template.id}`}

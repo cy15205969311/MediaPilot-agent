@@ -423,6 +423,32 @@ npx playwright install chromium
 - 记账跳过日志会带上原始 `token_usage`
 - 记账成功日志会打印 `requested_total` 与 `billed_total`
 
+### 7.15 模板资产治理闭环
+
+Admin 模板库已从“只支持新建”升级为完整的共享模板治理工作台：
+
+- `omnimedia-admin-web/src/pages/AdminTemplatesPage.tsx` 支持新建、编辑、单体删除、多选与批量删除
+- `app/api/v1/admin_templates.py` 提供后台共享模板的增删改查与批量清理能力
+- 创建与编辑共用同一套抽屉交互，避免状态分裂
+- 单体删除与批量删除都带二次确认，降低误删对 C 端模板可用性的影响
+- 批量选择后会显示带动画的操作栏，并通过更高层级覆盖卡片区域
+
+C 端本地模板中心也同步补齐了生命周期能力：
+
+- `PATCH /api/v1/media/templates/{template_id}` 支持编辑用户自有模板
+- `DELETE /api/v1/media/templates` 支持使用 SQLAlchemy `delete(...)` 执行批量删除
+- 系统预置模板在 C 端与 Admin 端都保持只读，不支持编辑或删除
+
+### 7.16 新建用户居中 Modal
+
+`omnimedia-admin-web/src/pages/AdminUsersPage.tsx` 中的“新建用户”入口已经重构为更轻量的居中弹窗：
+
+- 提交到 `POST /api/v1/admin/users` 的请求体仅包含 `username`、`password`、`role`
+- 初始密码区域支持随机生成与一键复制
+- 角色分配使用卡片式单选，直接展示角色职责说明
+- Modal 使用最大高度限制与内部滚动，避免“顶天立地”的全屏观感
+- 底部提示横幅明确说明了初始 Token / 无限额度与审计流水的自动发放逻辑
+
 ## 8. 后端边界与分层规则
 
 ### 8.1 路由分组
@@ -442,6 +468,8 @@ npx playwright install chromium
 - `admin_users.py`
 - `admin_dashboard.py`
 - `admin_tokens.py`
+- `admin_templates.py`
+- `admin_audit_logs.py`
 
 ### 8.2 分层原则
 
@@ -484,7 +512,10 @@ npx playwright install chromium
 
 - `GET /api/v1/media/templates`
 - `POST /api/v1/media/templates`
+- `PATCH /api/v1/media/templates/{template_id}`
 - `DELETE /api/v1/media/templates/{template_id}`
+- `DELETE /api/v1/media/templates`
+- `GET /api/v1/media/skills/search`
 - `GET /api/v1/media/topics`
 - `POST /api/v1/media/topics`
 - `PATCH /api/v1/media/topics/{topic_id}`
@@ -497,14 +528,22 @@ npx playwright install chromium
 ### 9.4 管理端
 
 - `GET /api/v1/admin/users`
+- `POST /api/v1/admin/users`
 - `POST /api/v1/admin/users/{user_id}/status`
 - `POST /api/v1/admin/users/{user_id}/reset-password`
 - `POST /api/v1/admin/users/{user_id}/tokens`
 - `PATCH /api/v1/admin/users/{user_id}/role`
+- `GET /api/v1/admin/templates`
+- `POST /api/v1/admin/templates`
+- `PATCH /api/v1/admin/templates/{template_id}`
+- `DELETE /api/v1/admin/templates/{template_id}`
+- `DELETE /api/v1/admin/templates`
 - `GET /api/v1/admin/roles/summary`
 - `GET /api/v1/admin/dashboard`
 - `GET /api/v1/admin/transactions`
 - `GET /api/v1/admin/transactions/stats`
+- `GET /api/v1/admin/audit-logs`
+- `GET /api/v1/admin/audit-logs/export`
 
 ## 10. 验证清单
 
@@ -531,6 +570,14 @@ npx playwright install chromium
 6. 打开角色权限页，确认成员数量来自真实聚合而非写死 mock。
 7. 确认 `super_admin` 行仍然受保护，不能冻结、重置密码或调整 Token。
 8. 使用 `finance` 或 `super_admin` 打开 `/tokens`，确认顶部 KPI 卡片来自真实接口，用户名筛选支持防抖，分页翻页后记录与总数同步更新。
+9. 打开“新建用户” Modal，确认：
+   - 弹窗为居中模式，并使用内部滚动而不是全高侧边抽屉
+   - 表单只包含 `username`、`password`、`role`
+   - 发往 `POST /api/v1/admin/users` 的请求体也只包含这三个字段
+10. 打开 Admin 模板库，确认：
+   - 编辑共享模板会调用 `PATCH /api/v1/admin/templates/{template_id}`
+   - 单体删除需要二次确认，且成功后会从列表移除
+   - 批量删除后选中状态会清空，列表会自动刷新
 
 ### 10.3 计费与多模态验证
 

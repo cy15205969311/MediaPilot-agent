@@ -115,6 +115,10 @@ class User(Base):
         back_populates="operator",
         foreign_keys="TokenTransaction.operator_id",
     )
+    operated_audit_logs: Mapped[list["AuditLog"]] = relationship(
+        back_populates="operator",
+        foreign_keys="AuditLog.operator_id",
+    )
 
 
 class TokenTransaction(Base):
@@ -456,4 +460,55 @@ class AccessTokenBlacklist(Base):
     expires_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         nullable=False,
+    )
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid4().hex,
+    )
+    operator_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    operator_name: Mapped[str] = mapped_column(
+        String(64),
+        index=True,
+        nullable=False,
+    )
+    action_type: Mapped[str] = mapped_column(
+        String(64),
+        index=True,
+        nullable=False,
+    )
+    target_id: Mapped[str | None] = mapped_column(
+        String(64),
+        index=True,
+        nullable=True,
+    )
+    target_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        default="",
+    )
+    details: Mapped[dict[str, object]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utcnow,
+        nullable=False,
+        index=True,
+    )
+
+    operator: Mapped[User | None] = relationship(
+        back_populates="operated_audit_logs",
+        foreign_keys=[operator_id],
     )

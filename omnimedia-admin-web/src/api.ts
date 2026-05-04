@@ -1,8 +1,17 @@
 import { API_BASE_URL } from "./config";
 import type {
+  AdminAuditLogsApiResponse,
+  AdminAuditLogsFilters,
   AdminDashboardData,
   AdminRoleSummaryResponse,
+  AdminTemplateCreatePayload,
+  AdminTemplateDeleteApiResponse,
+  AdminTemplateDeletePayload,
+  AdminTemplateItem,
+  AdminTemplateUpdatePayload,
+  AdminTemplatesApiResponse,
   AdminTokenStats,
+  AdminUserCreatePayload,
   AdminTokenTransactionsApiResponse,
   AdminUserItem,
   AdminUserPasswordResetApiResponse,
@@ -490,6 +499,24 @@ export async function fetchAdminUsers(params?: {
   return (await response.json()) as AdminUsersApiResponse;
 }
 
+export async function createAdminUser(
+  payload: AdminUserCreatePayload,
+): Promise<AdminUserItem> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/users",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminUserItem;
+}
+
 export async function fetchAdminDashboardSummary(): Promise<AdminDashboardData> {
   const response = await fetchWithInterceptor(
     "/api/v1/admin/dashboard",
@@ -508,6 +535,85 @@ export async function fetchAdminRoleSummary(): Promise<AdminRoleSummaryResponse>
   );
 
   return (await response.json()) as AdminRoleSummaryResponse;
+}
+
+export async function fetchAdminTemplates(): Promise<AdminTemplatesApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/templates",
+    { method: "GET" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminTemplatesApiResponse;
+}
+
+export async function createAdminTemplate(
+  payload: AdminTemplateCreatePayload,
+): Promise<AdminTemplateItem> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/templates",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminTemplateItem;
+}
+
+export async function updateAdminTemplate(
+  templateId: string,
+  payload: AdminTemplateUpdatePayload,
+): Promise<AdminTemplateItem> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/templates/${templateId}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminTemplateItem;
+}
+
+export async function deleteAdminTemplate(
+  templateId: string,
+): Promise<AdminTemplateDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/templates/${templateId}`,
+    {
+      method: "DELETE",
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminTemplateDeleteApiResponse;
+}
+
+export async function deleteAdminTemplates(
+  payload: AdminTemplateDeletePayload,
+): Promise<AdminTemplateDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/templates",
+    {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminTemplateDeleteApiResponse;
 }
 
 export async function fetchAdminTokenTransactions(params?: {
@@ -539,6 +645,85 @@ export async function fetchAdminTokenStats(): Promise<AdminTokenStats> {
   );
 
   return (await response.json()) as AdminTokenStats;
+}
+
+function buildAdminAuditLogSearchParams(
+  params?: AdminAuditLogsFilters & {
+    skip?: number;
+    limit?: number;
+  },
+): URLSearchParams {
+  const searchParams = new URLSearchParams();
+  if (typeof params?.skip === "number") {
+    searchParams.set("skip", String(params.skip));
+  }
+  if (typeof params?.limit === "number") {
+    searchParams.set("limit", String(params.limit));
+  }
+  if (params?.operatorKeyword?.trim()) {
+    searchParams.set("operator_keyword", params.operatorKeyword.trim());
+  }
+  if (params?.actionType?.trim()) {
+    searchParams.set("action_type", params.actionType.trim());
+  }
+  if (params?.startDate?.trim()) {
+    searchParams.set("start_date", params.startDate.trim());
+  }
+  if (params?.endDate?.trim()) {
+    searchParams.set("end_date", params.endDate.trim());
+  }
+  return searchParams;
+}
+
+export async function fetchAdminAuditLogs(params?: {
+  skip?: number;
+  limit?: number;
+} & AdminAuditLogsFilters): Promise<AdminAuditLogsApiResponse> {
+  const searchParams = buildAdminAuditLogSearchParams({
+    skip: params?.skip ?? 0,
+    limit: params?.limit ?? 20,
+    operatorKeyword: params?.operatorKeyword,
+    actionType: params?.actionType,
+    startDate: params?.startDate,
+    endDate: params?.endDate,
+  });
+
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/audit-logs?${searchParams.toString()}`,
+    { method: "GET" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminAuditLogsApiResponse;
+}
+
+export async function downloadAdminAuditLogsCsv(
+  filters?: AdminAuditLogsFilters,
+): Promise<string> {
+  const searchParams = buildAdminAuditLogSearchParams(filters);
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/audit-logs/export?${searchParams.toString()}`,
+    { method: "GET" },
+    { timeoutMs: 30000 },
+  );
+
+  const blob = await response.blob();
+  const downloadUrl = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filenameMatch = disposition.match(/filename="?([^"]+)"?/i);
+  const filename = filenameMatch?.[1] ?? "audit_logs_export.csv";
+
+  link.href = downloadUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => {
+    window.URL.revokeObjectURL(downloadUrl);
+  }, 1000);
+
+  return filename;
 }
 
 export async function updateAdminUserStatus(

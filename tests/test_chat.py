@@ -26,9 +26,12 @@ from app.db.models import (
 )
 from app.main import app
 from app.models.schemas import (
+    AdminTemplatePlatform,
     CommentReplyArtifactPayload,
     ContentGenerationArtifactPayload,
     HotPostAnalysisArtifactPayload,
+    TemplateCategory,
+    TemplatePlatform,
     TopicPlanningArtifactPayload,
 )
 from app.services.auth import ACCESS_TOKEN_TYPE, create_access_token, decode_token_payload
@@ -71,6 +74,24 @@ def register_user(
     payload = register_auth_response(client, username=username, password=password)
     token = payload["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+def register_admin_user(
+    client: TestClient,
+    *,
+    username: str,
+    password: str = "super-secret-123",
+    role: str = "admin",
+) -> dict[str, str]:
+    headers = register_user(client, username=username, password=password)
+
+    with client.app.state.testing_session_local() as db:
+        user = db.scalar(select(User).where(User.username == username))
+        assert user is not None
+        user.role = role
+        db.commit()
+
+    return headers
 
 
 def register_auth_response(
@@ -1522,6 +1543,55 @@ def test_template_delete_endpoint_removes_only_owned_custom_template(
     assert bob_delete.status_code == 404
 
 
+def test_template_update_endpoint_updates_only_owned_custom_template(
+    client: TestClient,
+):
+    alice_headers = register_user(client, username="alice-template-update")
+    bob_headers = register_user(client, username="bob-template-update")
+
+    create_response = client.post(
+        "/api/v1/media/templates",
+        headers=alice_headers,
+        json={
+            "title": "Alice 鏈湴妯℃澘",
+            "description": "Original description",
+            "platform": TemplatePlatform.XIAOHONGSHU.value,
+            "category": TemplateCategory.TRAVEL.value,
+            "knowledge_base_scope": "travel_scope",
+            "system_prompt": "Original prompt",
+        },
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+
+    update_response = client.patch(
+        f"/api/v1/media/templates/{created['id']}",
+        headers=alice_headers,
+        json={
+            "title": "Alice 鏇存柊鍚庢ā鏉?",
+            "description": "",
+            "platform": TemplatePlatform.DOUYIN.value,
+            "prompt_content": "Updated prompt",
+        },
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["id"] == created["id"]
+    assert updated["title"] == "Alice 鏇存柊鍚庢ā鏉?"
+    assert updated["description"] == ""
+    assert updated["platform"] == TemplatePlatform.DOUYIN.value
+    assert updated["category"] == TemplateCategory.TRAVEL.value
+    assert updated["knowledge_base_scope"] == "travel_scope"
+    assert updated["system_prompt"] == "Updated prompt"
+
+    bob_update = client.patch(
+        f"/api/v1/media/templates/{created['id']}",
+        headers=bob_headers,
+        json={"title": "Bob should not update"},
+    )
+    assert bob_update.status_code == 404
+
+
 def test_template_batch_delete_endpoint_removes_selected_custom_templates(
     client: TestClient,
 ):
@@ -1569,6 +1639,13 @@ def test_template_batch_delete_endpoint_removes_selected_custom_templates(
 def test_template_delete_rejects_preset_templates(client: TestClient):
     headers = register_user(client, username="alice-template-preset-guard")
 
+    preset_patch = client.patch(
+        "/api/v1/media/templates/template-preset-travel-hotflow",
+        headers=headers,
+        json={"title": "Should fail"},
+    )
+    assert preset_patch.status_code == 403
+
     single_delete = client.delete(
         "/api/v1/media/templates/template-preset-travel-hotflow",
         headers=headers,
@@ -1578,6 +1655,120 @@ def test_template_delete_rejects_preset_templates(client: TestClient):
     batch_delete = client.request(
         "DELETE",
         "/api/v1/media/templates",
+        headers=headers,
+        json={"template_ids": ["template-preset-travel-hotflow"]},
+    )
+    assert batch_delete.status_code == 403
+
+
+def test_admin_template_crud_endpoints_manage_shared_templates(client: TestClient):
+    headers = register_admin_user(client, username="admin-template-crud")
+
+    create_response = client.post(
+        "/api/v1/admin/templates",
+        headers=headers,
+        json={
+            "title": "鍏变韩鎺㈠簵妯℃澘",
+            "platform": AdminTemplatePlatform.XIAOHONGSHU.value,
+            "description": "Shared template",
+            "prompt_content": "Original shared prompt",
+        },
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+    assert created["id"].startswith("template-admin-")
+    assert created["is_preset"] is False
+
+    update_response = client.patch(
+        f"/api/v1/admin/templates/{created['id']}",
+        headers=headers,
+        json={
+            "title": "鏇存柊鍚庡叡浜ā鏉?",
+            "platform": AdminTemplatePlatform.GENERAL.value,
+            "description": "",
+            "prompt_content": "Updated shared prompt",
+        },
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["title"] == "鏇存柊鍚庡叡浜ā鏉?"
+    assert updated["platform"] == AdminTemplatePlatform.GENERAL.value
+    assert updated["description"] == ""
+    assert updated["prompt_content"] == "Updated shared prompt"
+
+    delete_response = client.delete(
+        f"/api/v1/admin/templates/{created['id']}",
+        headers=headers,
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {
+        "deleted_count": 1,
+        "deleted_ids": [created["id"]],
+    }
+
+
+def test_admin_template_batch_delete_endpoint_removes_selected_shared_templates(
+    client: TestClient,
+):
+    headers = register_admin_user(client, username="admin-template-batch-delete")
+
+    created_ids: list[str] = []
+    for title, platform in [
+        ("鍏变韩妯℃澘 A", AdminTemplatePlatform.XIAOHONGSHU.value),
+        ("鍏变韩妯℃澘 B", AdminTemplatePlatform.DOUYIN.value),
+        ("鍏变韩妯℃澘 C", AdminTemplatePlatform.GENERAL.value),
+    ]:
+        response = client.post(
+            "/api/v1/admin/templates",
+            headers=headers,
+            json={
+                "title": title,
+                "platform": platform,
+                "description": f"{title} description",
+                "prompt_content": f"{title} prompt",
+            },
+        )
+        assert response.status_code == 201
+        created_ids.append(response.json()["id"])
+
+    delete_response = client.request(
+        "DELETE",
+        "/api/v1/admin/templates",
+        headers=headers,
+        json={"template_ids": created_ids[:2]},
+    )
+    assert delete_response.status_code == 200
+    delete_payload = delete_response.json()
+    assert delete_payload["deleted_count"] == 2
+    assert set(delete_payload["deleted_ids"]) == set(created_ids[:2])
+
+    list_response = client.get("/api/v1/admin/templates", headers=headers)
+    assert list_response.status_code == 200
+    remaining_ids = {item["id"] for item in list_response.json()["items"]}
+    assert created_ids[0] not in remaining_ids
+    assert created_ids[1] not in remaining_ids
+    assert created_ids[2] in remaining_ids
+
+
+def test_admin_template_mutations_reject_preset_templates(client: TestClient):
+    headers = register_admin_user(client, username="admin-template-preset-guard")
+
+    preset_patch = client.patch(
+        "/api/v1/admin/templates/template-preset-travel-hotflow",
+        headers=headers,
+        json={"title": "Should fail"},
+    )
+    assert preset_patch.status_code == 403
+
+    single_delete = client.delete(
+        "/api/v1/admin/templates/template-preset-travel-hotflow",
+        headers=headers,
+    )
+    assert single_delete.status_code == 403
+
+    batch_delete = client.request(
+        "DELETE",
+        "/api/v1/admin/templates",
         headers=headers,
         json={"template_ids": ["template-preset-travel-hotflow"]},
     )

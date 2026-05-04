@@ -11,6 +11,8 @@ from app.db.database import get_db
 from app.db.models import RefreshSession, TokenTransaction, User
 from app.models.schemas import (
     AdminTokenAdjustAction,
+    AuditActionType,
+    AdminUserCreate,
     AdminUserLatestSessionItem,
     AdminUserListItem,
     AdminUserListResponse,
@@ -20,13 +22,16 @@ from app.models.schemas import (
     AdminUserTokenUpdateRequest,
     AdminUserTokenUpdateResponse,
 )
+from app.services.audit_logs import append_audit_log, get_audit_target_name
 from app.services.auth import (
     JWT_ACCESS_EXPIRE_MINUTES,
     RequireRole,
     blacklist_access_token_jti,
+    get_user_by_username,
     hash_password,
     list_active_refresh_sessions,
     mark_user_password_changed,
+    normalize_username,
     revoke_other_refresh_sessions,
 )
 from app.services.persistence import resolve_media_reference
@@ -35,9 +40,13 @@ from app.services.token_usage import LEGACY_MODEL_NAME
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-users"])
 require_admin_view_role = RequireRole(["super_admin", "admin", "finance", "operator"])
 require_admin_manage_role = RequireRole(["super_admin", "admin", "operator"])
+require_admin_provision_role = RequireRole(["super_admin", "admin"])
 require_super_admin_role = RequireRole(["super_admin"])
 
 PASSWORD_SPECIAL_CHARS = "!@#$%^&*"
+ADMIN_INITIAL_GRANT_TOKENS = 10_000_000
+ADMIN_INITIAL_GRANT_REMARK = "管理员后台新建账号初始赠送"
+SYSTEM_LEVEL_ROLES = {"super_admin", "admin"}
 PROTECTED_SUPER_ADMIN_DETAIL = "禁止修改超级管理员账号。"
 ROLE_CHANGE_FORBIDDEN_DETAIL = "不允许的越权操作。"
 
@@ -142,6 +151,18 @@ def _build_admin_user_item(
     )
 
 
+def _is_system_level_role(role: str) -> bool:
+    return role in SYSTEM_LEVEL_ROLES
+
+
+def _ensure_admin_can_create_role(*, actor: User, target_role: str) -> None:
+    if actor.role == "admin" and target_role in SYSTEM_LEVEL_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="权限不足，无法创建高于或等于自身权限的系统级账号",
+        )
+
+
 def _get_target_user_or_404(db: Session, user_id: str) -> User:
     user = db.get(User, user_id)
     if user is None:
@@ -234,15 +255,89 @@ async def get_admin_role_summary(
     return {str(role): int(count) for role, count in rows}
 
 
+@router.post("/users", response_model=AdminUserListItem, status_code=201)
+async def create_admin_user(
+    payload: AdminUserCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_provision_role),
+) -> AdminUserListItem:
+    username = normalize_username(payload.username)
+    password = payload.password
+    target_role = payload.role.value
+
+    if not username:
+        raise HTTPException(status_code=400, detail="用户名不能为空。")
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="用户名至少需要 3 个字符。")
+    if not password:
+        raise HTTPException(status_code=400, detail="密码不能为空。")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="密码至少需要 8 个字符。")
+    if get_user_by_username(db, username) is not None:
+        raise HTTPException(status_code=409, detail="该用户名已存在，请更换后重试。")
+
+    _ensure_admin_can_create_role(actor=current_user, target_role=target_role)
+
+    initial_token_balance = (
+        0 if _is_system_level_role(target_role) else ADMIN_INITIAL_GRANT_TOKENS
+    )
+    user = User(
+        username=username,
+        hashed_password=hash_password(password),
+        role=target_role,
+        token_balance=initial_token_balance,
+    )
+    db.add(user)
+
+    try:
+        db.flush()
+        if initial_token_balance > 0:
+            db.add(
+                TokenTransaction(
+                    user_id=user.id,
+                    amount=initial_token_balance,
+                    transaction_type="grant",
+                    model_name=LEGACY_MODEL_NAME,
+                    remark=ADMIN_INITIAL_GRANT_REMARK,
+                    operator_id=current_user.id,
+                )
+            )
+        append_audit_log(
+            db=db,
+            operator=current_user,
+            action_type=AuditActionType.CREATE_USER.value,
+            target_id=user.id,
+            target_name=get_audit_target_name(user),
+            details={
+                "username": user.username,
+                "role": target_role,
+                "initial_token_balance": int(initial_token_balance),
+                "grant_tokens": int(initial_token_balance),
+                "is_system_role": _is_system_level_role(target_role),
+            },
+        )
+        db.commit()
+        db.refresh(user)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="创建用户失败，请稍后重试。",
+        ) from exc
+
+    return _build_admin_user_item(user)
+
+
 @router.post("/users/{user_id}/status", response_model=AdminUserListItem)
 async def update_admin_user_status(
     user_id: str,
     payload: AdminUserStatusUpdateRequest,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin_manage_role),
+    current_user: User = Depends(require_admin_manage_role),
 ) -> AdminUserListItem:
     user = _get_target_user_or_404(db, user_id)
     _ensure_target_user_is_mutable(user)
+    previous_status = user.status
 
     active_sessions = []
     is_freezing = payload.status.value == "frozen"
@@ -265,6 +360,22 @@ async def update_admin_user_status(
                     expires_at=datetime.now(timezone.utc)
                     + timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
                 )
+        append_audit_log(
+            db=db,
+            operator=current_user,
+            action_type=(
+                AuditActionType.FREEZE.value
+                if payload.status.value == "frozen"
+                else AuditActionType.UNFREEZE.value
+            ),
+            target_id=user.id,
+            target_name=get_audit_target_name(user),
+            details={
+                "previous_status": previous_status,
+                "next_status": payload.status.value,
+                "revoked_sessions": len(active_sessions) if is_freezing else 0,
+            },
+        )
         db.commit()
         db.refresh(user)
     except SQLAlchemyError as exc:
@@ -279,7 +390,7 @@ async def update_admin_user_status(
 async def reset_admin_user_password(
     user_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin_manage_role),
+    current_user: User = Depends(require_admin_manage_role),
 ) -> AdminUserPasswordResetResponse:
     user = _get_target_user_or_404(db, user_id)
     _ensure_target_user_is_mutable(user)
@@ -302,6 +413,17 @@ async def reset_admin_user_password(
                 expires_at=datetime.now(timezone.utc)
                 + timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
             )
+        append_audit_log(
+            db=db,
+            operator=current_user,
+            action_type=AuditActionType.RESET_PASSWORD.value,
+            target_id=user.id,
+            target_name=get_audit_target_name(user),
+            details={
+                "revoked_sessions": revoked_sessions,
+                "password_length": len(new_password),
+            },
+        )
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
@@ -323,6 +445,7 @@ async def update_admin_user_tokens(
 ) -> AdminUserTokenUpdateResponse:
     user = _get_target_user_or_404(db, user_id)
     _ensure_target_user_is_mutable(user)
+    previous_balance = user.token_balance
 
     normalized_remark = payload.remark.strip()
     if not normalized_remark:
@@ -346,6 +469,28 @@ async def update_admin_user_tokens(
     try:
         user.token_balance = next_balance
         db.add(transaction)
+        append_audit_log(
+            db=db,
+            operator=current_user,
+            action_type=(
+                AuditActionType.TOPUP.value
+                if payload.action == AdminTokenAdjustAction.ADD
+                else AuditActionType.TOKEN_DEDUCT.value
+                if payload.action == AdminTokenAdjustAction.DEDUCT
+                else AuditActionType.TOKEN_SET.value
+            ),
+            target_id=user.id,
+            target_name=get_audit_target_name(user),
+            details={
+                "action": payload.action.value,
+                "amount": int(payload.amount),
+                "delta": int(delta),
+                "previous_balance": int(previous_balance),
+                "next_balance": int(next_balance),
+                "transaction_type": transaction_type,
+                "remark": normalized_remark,
+            },
+        )
         db.flush()
         db.commit()
         db.refresh(user)
@@ -372,11 +517,23 @@ async def update_admin_user_role(
 ) -> AdminUserListItem:
     user = _get_target_user_or_404(db, user_id)
     _ensure_role_change_allowed(actor=current_user, target=user)
+    previous_role = user.role
 
     if user.role != payload.role.value:
         user.role = payload.role.value
 
         try:
+            append_audit_log(
+                db=db,
+                operator=current_user,
+                action_type=AuditActionType.ROLE_CHANGE.value,
+                target_id=user.id,
+                target_name=get_audit_target_name(user),
+                details={
+                    "previous_role": previous_role,
+                    "next_role": payload.role.value,
+                },
+            )
             db.commit()
             db.refresh(user)
         except SQLAlchemyError as exc:
