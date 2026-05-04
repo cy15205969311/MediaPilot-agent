@@ -4,17 +4,18 @@ import {
   ChevronRight,
   Coins,
   RefreshCw,
-  Search,
   TrendingDown,
   TrendingUp,
   Wallet,
 } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 
 import {
   APIError,
   fetchAdminTokenStats,
   fetchAdminTokenTransactions,
 } from "../api";
+import { StandardSearchInput } from "../components/common/StandardSearchInput";
 import type {
   AdminTokenStats,
   AdminTokenTransactionItem,
@@ -27,7 +28,28 @@ type AdminTokensPageProps = {
   onToast: (toast: AdminToast) => void;
 };
 
-const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 10;
+const MEDIA_CHAT_REMARK_PREFIX = "media_chat:";
+const MEDIA_CHAT_TASK_LABELS: Record<string, string> = {
+  topic_planning: "选题规划",
+  content_generation: "内容生成",
+  hot_post_analysis: "爆款拆解",
+  comment_reply: "评论回复",
+  article_writing: "文章撰写",
+};
+const REMARK_MAP: Record<string, string> = {
+  "新用户注册千万算力福利": "新用户注册福利",
+  "管理员后台新建账号初始赠送": "后台新建用户赠送",
+  new_user_bonus: "新用户注册福利",
+  admin_grant: "系统人工赠送",
+  user_topup: "在线充值",
+  image_generation: "图片生成",
+  "media_chat:topic_planning": "选题规划",
+  "media_chat:content_generation": "内容生成",
+  "media_chat:hot_post_analysis": "爆款拆解",
+  "media_chat:comment_reply": "评论回复",
+  "media_chat:article_writing": "文章撰写",
+};
 
 const theme = {
   primary: "#ef4444",
@@ -117,6 +139,25 @@ function getTransactionTagStyles(item: AdminTokenTransactionItem): {
   };
 }
 
+function formatTransactionRemark(remark: string): string {
+  const normalizedRemark = remark.trim();
+  if (!normalizedRemark) {
+    return "--";
+  }
+
+  const mappedRemark = REMARK_MAP[normalizedRemark];
+  if (mappedRemark) {
+    return mappedRemark;
+  }
+
+  if (normalizedRemark.startsWith(MEDIA_CHAT_REMARK_PREFIX)) {
+    const taskKey = normalizedRemark.slice(MEDIA_CHAT_REMARK_PREFIX.length).trim();
+    return MEDIA_CHAT_TASK_LABELS[taskKey] || normalizedRemark;
+  }
+
+  return normalizedRemark;
+}
+
 function StatCardSkeleton() {
   return (
     <div
@@ -161,14 +202,14 @@ function TableSkeleton() {
 
 export function AdminTokensPage(props: AdminTokensPageProps) {
   const { onToast } = props;
+  const [searchParams] = useSearchParams();
+  const initialSearchTerm = searchParams.get("search")?.trim() ?? "";
   const [stats, setStats] = useState<AdminTokenStats | null>(null);
   const [transactionsPayload, setTransactionsPayload] =
     useState<AdminTokenTransactionsApiResponse | null>(null);
   const [isStatsLoading, setIsStatsLoading] = useState(true);
   const [isTableLoading, setIsTableLoading] = useState(true);
-  const [searchInput, setSearchInput] = useState("");
-  const [debouncedSearchInput, setDebouncedSearchInput] = useState("");
-  const [searchKeyword, setSearchKeyword] = useState("");
+  const [searchKeyword, setSearchKeyword] = useState(initialSearchTerm);
   const [skip, setSkip] = useState(0);
 
   const items = transactionsPayload?.items ?? [];
@@ -215,24 +256,6 @@ export function AdminTokensPage(props: AdminTokensPageProps) {
       active = false;
     };
   }, [onToast]);
-
-  useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      setDebouncedSearchInput(searchInput);
-    }, 320);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [searchInput]);
-
-  useEffect(() => {
-    const normalizedKeyword = debouncedSearchInput.trim();
-    if (normalizedKeyword === searchKeyword) {
-      return;
-    }
-
-    setSkip(0);
-    setSearchKeyword(normalizedKeyword);
-  }, [debouncedSearchInput, searchKeyword]);
 
   useEffect(() => {
     let active = true;
@@ -364,6 +387,11 @@ export function AdminTokensPage(props: AdminTokensPageProps) {
           Math.min(skip + items.length, total),
         )}，共 ${formatNumber(total)} 条`;
 
+  const handleSearchChange = (nextValue: string) => {
+    setSkip(0);
+    setSearchKeyword((current) => (current === nextValue ? current : nextValue));
+  };
+
   return (
     <div className="p-4 lg:p-6">
       <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
@@ -376,21 +404,28 @@ export function AdminTokensPage(props: AdminTokensPageProps) {
           </p>
         </div>
 
-        <button
-          className="inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors hover:bg-red-50"
-          onClick={() => {
-            void handleRefresh();
-          }}
-          style={{
-            backgroundColor: theme.cardBg,
-            borderColor: theme.cardBorder,
-            color: theme.textSecondary,
-          }}
-          type="button"
-        >
-          <RefreshCw className="h-4 w-4" />
-          刷新数据
-        </button>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <StandardSearchInput
+            className="w-full sm:min-w-[300px]"
+            onSearchChange={handleSearchChange}
+            placeholder="搜索用户名或流水备注..."
+          />
+          <button
+            className="inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors hover:bg-red-50"
+            onClick={() => {
+              void handleRefresh();
+            }}
+            style={{
+              backgroundColor: theme.cardBg,
+              borderColor: theme.cardBorder,
+              color: theme.textSecondary,
+            }}
+            type="button"
+          >
+            <RefreshCw className="h-4 w-4" />
+            刷新数据
+          </button>
+        </div>
       </div>
 
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -449,36 +484,21 @@ export function AdminTokensPage(props: AdminTokensPageProps) {
               </p>
             </div>
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <label
-                className="flex min-w-[280px] items-center gap-2 rounded-xl border px-4 py-3"
+            {searchKeyword ? (
+              <div
+                className="w-fit rounded-full px-3 py-2 text-xs font-medium"
                 style={{
-                  backgroundColor: theme.surface,
-                  borderColor: theme.cardBorder,
+                  backgroundColor: theme.dangerSoft,
+                  color: theme.primary,
                 }}
               >
-                <Search className="h-4 w-4" style={{ color: theme.textMuted }} />
-                <input
-                  className="w-full border-none bg-transparent text-sm outline-none placeholder:text-slate-400"
-                  onChange={(event) => setSearchInput(event.target.value)}
-                  placeholder="输入用户名搜索流水..."
-                  type="text"
-                  value={searchInput}
-                />
-              </label>
-
-              {searchKeyword ? (
-                <div
-                  className="rounded-full px-3 py-2 text-xs font-medium"
-                  style={{
-                    backgroundColor: theme.dangerSoft,
-                    color: theme.primary,
-                  }}
-                >
-                  当前筛选：{searchKeyword}
-                </div>
-              ) : null}
-            </div>
+                当前筛选：{searchKeyword}
+              </div>
+            ) : (
+              <div className="text-sm" style={{ color: theme.textMuted }}>
+                当前未应用关键词筛选
+              </div>
+            )}
           </div>
         </div>
 
@@ -515,10 +535,10 @@ export function AdminTokensPage(props: AdminTokensPageProps) {
                           className="transition-colors hover:bg-red-50/50"
                           style={{ borderTop: `1px solid ${theme.cardBorder}` }}
                         >
-                          <td className="px-5 py-4 text-sm" style={{ color: theme.textSecondary }}>
+                          <td className="px-5 py-5 text-sm" style={{ color: theme.textSecondary }}>
                             {formatDateTime(item.created_at)}
                           </td>
-                          <td className="px-5 py-4 text-sm">
+                          <td className="px-5 py-5 text-sm">
                             <div className="font-medium" style={{ color: theme.textPrimary }}>
                               {getTransactionDisplayName(item)}
                             </div>
@@ -526,7 +546,7 @@ export function AdminTokensPage(props: AdminTokensPageProps) {
                               @{item.username}
                             </div>
                           </td>
-                          <td className="px-5 py-4 text-sm">
+                          <td className="px-5 py-5 text-sm">
                             <span
                               className="inline-flex rounded-full px-3 py-1 text-xs font-semibold"
                               style={tagStyles}
@@ -534,12 +554,14 @@ export function AdminTokensPage(props: AdminTokensPageProps) {
                               {getTransactionTypeLabel(item.transaction_type)}
                             </span>
                           </td>
-                          <td className="px-5 py-4 text-sm font-semibold" style={{ color: amountTone }}>
+                          <td className="px-5 py-5 text-sm font-semibold" style={{ color: amountTone }}>
                             {item.amount > 0 ? "+" : ""}
                             {formatNumber(item.amount)}
                           </td>
-                          <td className="px-5 py-4 text-sm" style={{ color: theme.textSecondary }}>
-                            {item.remark || "--"}
+                          <td className="px-5 py-5 text-sm" style={{ color: theme.textSecondary }}>
+                            <span className="inline-flex rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">
+                              {formatTransactionRemark(item.remark)}
+                            </span>
                           </td>
                         </tr>
                       );

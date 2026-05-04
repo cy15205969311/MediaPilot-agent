@@ -26,6 +26,17 @@ def _infer_existing_revision(connection) -> str | None:
     if not user_tables:
         return None
 
+    if "system_settings" in existing_tables:
+        return "20260504_01"
+
+    if "audit_logs" in existing_tables:
+        return "ec9a6cfec2b0"
+
+    if "token_transactions" in existing_tables:
+        token_columns = _get_table_columns(inspector, "token_transactions")
+        if "model_name" in token_columns:
+            return "1fed5e89f316"
+
     if "access_token_blacklist" in existing_tables:
         return "20260430_01"
 

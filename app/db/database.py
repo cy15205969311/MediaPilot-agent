@@ -36,7 +36,8 @@ class Base(DeclarativeBase):
 
 def run_startup_migrations() -> None:
     inspector = inspect(engine)
-    if "users" not in inspector.get_table_names():
+    existing_tables = set(inspector.get_table_names())
+    if "users" not in existing_tables:
         return
 
     user_columns = {column["name"] for column in inspector.get_columns("users")}
@@ -56,12 +57,29 @@ def run_startup_migrations() -> None:
         )
 
     if not column_statements:
+        from app.db.models import SystemNotification, SystemSetting
+
+        SystemSetting.__table__.create(bind=engine, checkfirst=True)
+        SystemNotification.__table__.create(bind=engine, checkfirst=True)
+        with SessionLocal() as db:
+            from app.services.system_settings import seed_default_system_settings
+
+            seed_default_system_settings(db, commit=True)
         return
 
     logger.info("Applying startup schema migrations for users table.")
     with engine.begin() as connection:
         for statement in column_statements:
             connection.exec_driver_sql(statement)
+
+    from app.db.models import SystemNotification, SystemSetting
+
+    SystemSetting.__table__.create(bind=engine, checkfirst=True)
+    SystemNotification.__table__.create(bind=engine, checkfirst=True)
+    with SessionLocal() as db:
+        from app.services.system_settings import seed_default_system_settings
+
+        seed_default_system_settings(db, commit=True)
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -463,6 +463,40 @@ class AccessTokenBlacklist(Base):
     )
 
 
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[object] = mapped_column(JSON, nullable=False)
+    category: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    description: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+
+
+class SystemNotification(Base):
+    __tablename__ = "system_notifications"
+
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid4().hex,
+    )
+    type: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    is_read: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utcnow,
+        nullable=False,
+        index=True,
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

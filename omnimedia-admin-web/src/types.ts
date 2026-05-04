@@ -76,6 +76,106 @@ export type AdminDashboardData = {
   model_usage_ratio: AdminDashboardModelUsageItem[];
 };
 
+export type AdminNotificationType = "info" | "warning" | "success";
+
+export type AdminNotificationItem = {
+  id: string;
+  type: AdminNotificationType;
+  title: string;
+  content: string;
+  is_read: boolean;
+  created_at: string;
+};
+
+export type AdminNotificationsApiResponse = {
+  items: AdminNotificationItem[];
+  unread_count: number;
+  limit: number;
+};
+
+export type AdminNotificationsReadAllResponse = {
+  updated_count: number;
+  unread_count: number;
+};
+
+export type AdminPendingTasks = {
+  abnormal_users: number;
+  storage_warnings: number;
+};
+
+export type AdminGlobalSearchUserItem = {
+  id: string;
+  username: string;
+  nickname?: string | null;
+  role: UserRole;
+  status: UserStatus;
+};
+
+export type AdminGlobalSearchTemplateItem = {
+  id: string;
+  title: string;
+  platform: AdminTemplatePlatform;
+  is_preset: boolean;
+};
+
+export type AdminGlobalSearchAuditLogItem = {
+  id: string;
+  action_type: AdminAuditActionType;
+  operator_name: string;
+  target_name: string;
+  created_at: string;
+};
+
+export type AdminGlobalSearchResponse = {
+  users: AdminGlobalSearchUserItem[];
+  templates: AdminGlobalSearchTemplateItem[];
+  audit_logs: AdminGlobalSearchAuditLogItem[];
+};
+
+export type AdminStorageDistribution = {
+  image: number;
+  video: number;
+  audio: number;
+  document: number;
+  other: number;
+};
+
+export type AdminStorageStats = {
+  total_bytes: number;
+  capacity_bytes: number;
+  distribution: AdminStorageDistribution;
+};
+
+export type AdminStorageUserItem = {
+  user_id: string;
+  username: string;
+  nickname?: string | null;
+  total_size_bytes: number;
+  file_count: number;
+  last_upload_time?: string | null;
+};
+
+export type AdminStorageUsersApiResponse = {
+  items: AdminStorageUserItem[];
+  limit: number;
+};
+
+export type AdminSystemSettingValue = string | number | boolean | null;
+
+export type AdminSystemSettingItem = {
+  key: string;
+  value: AdminSystemSettingValue;
+  default_value: AdminSystemSettingValue;
+  category: string;
+  description: string;
+};
+
+export type AdminSystemSettingsApiResponse = {
+  categories: Record<string, AdminSystemSettingItem[]>;
+};
+
+export type AdminSystemSettingsUpdatePayload = Record<string, AdminSystemSettingValue>;
+
 export type AdminRoleSummaryResponse = Partial<Record<UserRole, number>>;
 
 export type AdminTemplatePlatform = "小红书" | "抖音" | "通用";
@@ -154,7 +254,9 @@ export type AdminAuditActionType =
   | "freeze"
   | "unfreeze"
   | "reset_password"
-  | "delete_template";
+  | "delete_template"
+  | "update_system_settings"
+  | "rollback_system_settings";
 
 export type AdminAuditLogItem = {
   id: string;
@@ -179,6 +281,12 @@ export type AdminAuditLogsFilters = {
   actionType?: AdminAuditActionType | "";
   startDate?: string;
   endDate?: string;
+};
+
+export type AdminSystemSettingsRollbackApiResponse = {
+  snapshot_audit_log_id: string;
+  rollback_audit_log_id: string;
+  rolled_back_keys: string[];
 };
 
 export type AdminUserStatusPayload = {

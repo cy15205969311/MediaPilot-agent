@@ -22,7 +22,7 @@ require_admin_tokens_role = RequireRole(["super_admin", "finance"])
 @router.get("/transactions", response_model=AdminTokenTransactionListResponse)
 async def list_admin_token_transactions(
     skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=10, ge=1, le=100),
     user_keyword: str | None = Query(default=None, max_length=64),
     db: Session = Depends(get_db),
     _: User = Depends(require_admin_tokens_role),

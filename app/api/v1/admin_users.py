@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -20,7 +20,10 @@ from app.models.schemas import (
     AdminUserStatusUpdateRequest,
     AdminUserTokenUpdateRequest,
     AdminUserTokenUpdateResponse,
+    SystemNotificationType,
+    UserAccountStatus,
 )
+from app.services.admin_notifications import append_system_notification
 from app.services.audit_logs import append_audit_log, get_audit_target_name
 from app.services.auth import (
     JWT_ACCESS_EXPIRE_MINUTES,
@@ -34,6 +37,7 @@ from app.services.auth import (
     revoke_other_refresh_sessions,
 )
 from app.services.persistence import resolve_media_reference
+from app.services.system_settings import get_int_system_setting, seed_default_system_settings
 from app.services.token_usage import LEGACY_MODEL_NAME
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-users"])
@@ -42,7 +46,6 @@ require_admin_manage_role = RequireRole(["super_admin", "admin", "operator"])
 require_admin_provision_role = RequireRole(["super_admin", "admin"])
 require_super_admin_role = RequireRole(["super_admin"])
 
-ADMIN_INITIAL_GRANT_TOKENS = 10_000_000
 ADMIN_RESET_PASSWORD = "12345678"
 ADMIN_INITIAL_GRANT_REMARK = "管理员后台新建账号初始赠送"
 SYSTEM_LEVEL_ROLES = {"super_admin", "admin"}
@@ -190,13 +193,21 @@ async def list_admin_users(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     search: str | None = Query(default=None, max_length=64),
+    status: UserAccountStatus | None = Query(default=None),
     db: Session = Depends(get_db),
     _: User = Depends(require_admin_view_role),
 ) -> AdminUserListResponse:
     filters = []
     normalized_search = (search or "").strip()
     if normalized_search:
-        filters.append(User.username.ilike(f"%{normalized_search}%"))
+        filters.append(
+            or_(
+                User.username.ilike(f"%{normalized_search}%"),
+                User.id == normalized_search,
+            )
+        )
+    if status is not None:
+        filters.append(User.status == status.value)
 
     count_statement = select(func.count()).select_from(User)
     list_statement = select(User).order_by(User.created_at.desc()).offset(skip).limit(limit)
@@ -259,9 +270,12 @@ async def create_admin_user(
         raise HTTPException(status_code=409, detail="该用户名已存在，请更换后重试。")
 
     _ensure_admin_can_create_role(actor=current_user, target_role=target_role)
+    seed_default_system_settings(db, commit=False)
 
     initial_token_balance = (
-        0 if _is_system_level_role(target_role) else ADMIN_INITIAL_GRANT_TOKENS
+        0
+        if _is_system_level_role(target_role)
+        else get_int_system_setting(db, "new_user_bonus", fallback=0)
     )
     user = User(
         username=username,
@@ -297,6 +311,15 @@ async def create_admin_user(
                 "grant_tokens": int(initial_token_balance),
                 "is_system_role": _is_system_level_role(target_role),
             },
+        )
+        append_system_notification(
+            db,
+            notification_type=SystemNotificationType.SUCCESS,
+            title="新建用户成功",
+            content=(
+                f"管理员 {current_user.username} 新建了用户 {user.username}，"
+                f"角色为 {target_role}。"
+            ),
         )
         db.commit()
         db.refresh(user)
@@ -358,6 +381,19 @@ async def update_admin_user_status(
                 "revoked_sessions": len(active_sessions) if is_freezing else 0,
             },
         )
+        append_system_notification(
+            db,
+            notification_type=(
+                SystemNotificationType.WARNING
+                if is_freezing
+                else SystemNotificationType.SUCCESS
+            ),
+            title="用户状态已更新",
+            content=(
+                f"用户 {user.username} 已被"
+                f"{'冻结' if is_freezing else '恢复为正常状态'}。"
+            ),
+        )
         db.commit()
         db.refresh(user)
     except SQLAlchemyError as exc:
@@ -405,6 +441,15 @@ async def reset_admin_user_password(
                 "revoked_sessions": revoked_sessions,
                 "password_length": len(new_password),
             },
+        )
+        append_system_notification(
+            db,
+            notification_type=SystemNotificationType.WARNING,
+            title="用户密码已重置",
+            content=(
+                f"用户 {user.username} 的初始密码已重置为 12345678，"
+                f"并强制下线 {revoked_sessions} 个会话。"
+            ),
         )
         db.commit()
     except SQLAlchemyError as exc:
@@ -461,6 +506,12 @@ async def delete_admin_user(
                 "role": deleted_role,
                 "revoked_sessions": revoked_sessions,
             },
+        )
+        append_system_notification(
+            db,
+            notification_type=SystemNotificationType.WARNING,
+            title="用户已删除",
+            content=f"管理员 {current_user.username} 删除了用户 {deleted_username}。",
         )
         db.delete(user)
         db.commit()
@@ -529,6 +580,15 @@ async def update_admin_user_tokens(
                 "remark": normalized_remark,
             },
         )
+        append_system_notification(
+            db,
+            notification_type=SystemNotificationType.INFO,
+            title="用户资产已调整",
+            content=(
+                f"用户 {user.username} 的 Token 余额已更新，"
+                f"当前操作为 {payload.action.value}。"
+            ),
+        )
         db.flush()
         db.commit()
         db.refresh(user)
@@ -571,6 +631,15 @@ async def update_admin_user_role(
                     "previous_role": previous_role,
                     "next_role": payload.role.value,
                 },
+            )
+            append_system_notification(
+                db,
+                notification_type=SystemNotificationType.INFO,
+                title="用户角色已变更",
+                content=(
+                    f"用户 {user.username} 的角色已从 {previous_role} "
+                    f"调整为 {payload.role.value}。"
+                ),
             )
             db.commit()
             db.refresh(user)

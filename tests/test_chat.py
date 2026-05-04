@@ -7,7 +7,7 @@ from asyncio import tasks as asyncio_tasks
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 import app.services.agent as agent_module
@@ -18,10 +18,13 @@ import app.services.providers as providers_module
 from app.db.database import Base, get_db
 from app.db.models import (
     AccessTokenBlacklist,
+    AuditLog,
     ArtifactRecord,
     Message,
+    SystemNotification,
     Thread,
     TokenTransaction,
+    UploadRecord,
     User,
 )
 from app.main import app
@@ -306,6 +309,348 @@ def test_auth_register_and_login(client: TestClient):
     assert login_response.status_code == 200
     assert isinstance(login_response.json()["refresh_token"], str)
     assert login_response.json()["user"]["username"] == "alice"
+
+
+def test_admin_settings_update_bonus_affects_register_and_admin_provisioning(
+    client: TestClient,
+):
+    headers = register_admin_user(
+        client,
+        username="super-admin-settings",
+        role="super_admin",
+    )
+
+    get_response = client.get("/api/v1/admin/settings", headers=headers)
+    assert get_response.status_code == 200
+    grouped_payload = get_response.json()["categories"]
+    token_settings = {
+        item["key"]: item for item in grouped_payload["token"]
+    }
+    assert token_settings["new_user_bonus"]["value"] == 10_000_000
+    assert token_settings["token_price"]["value"] == 0.008
+
+    update_response = client.put(
+        "/api/v1/admin/settings",
+        headers=headers,
+        json={
+            "system_name": "MediaPilot Console",
+            "new_user_bonus": "5000",
+            "two_factor_auth": False,
+        },
+    )
+    assert update_response.status_code == 200
+    updated_payload = update_response.json()["categories"]
+    updated_basic_settings = {
+        item["key"]: item for item in updated_payload["basic"]
+    }
+    updated_token_settings = {
+        item["key"]: item for item in updated_payload["token"]
+    }
+    updated_security_settings = {
+        item["key"]: item for item in updated_payload["security"]
+    }
+    assert updated_basic_settings["system_name"]["value"] == "MediaPilot Console"
+    assert updated_token_settings["new_user_bonus"]["value"] == 5000
+    assert updated_security_settings["two_factor_auth"]["value"] is False
+
+    with client.app.state.testing_session_local() as db:
+        audit_log = db.scalar(
+            select(AuditLog)
+            .where(AuditLog.action_type == "update_system_settings")
+            .order_by(AuditLog.created_at.desc())
+        )
+        assert audit_log is not None
+        assert audit_log.target_name == "系统配置"
+        assert set(audit_log.details["changed_keys"]) == {
+            "system_name",
+            "new_user_bonus",
+            "two_factor_auth",
+        }
+
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={"username": "alice-settings-bonus", "password": "super-secret-123"},
+    )
+    assert register_response.status_code == 200
+    assert register_response.json()["user"]["token_balance"] == 5000
+
+    create_response = client.post(
+        "/api/v1/admin/users",
+        headers=headers,
+        json={
+            "username": "managed-settings-bonus",
+            "password": "super-secret-123",
+            "role": "user",
+        },
+    )
+    assert create_response.status_code == 201
+    assert create_response.json()["token_balance"] == 5000
+
+    with client.app.state.testing_session_local() as db:
+        managed_user = db.scalar(
+            select(User).where(User.username == "managed-settings-bonus")
+        )
+        assert managed_user is not None
+        grant_transactions = list(
+            db.scalars(
+                select(TokenTransaction).where(
+                    TokenTransaction.user_id == managed_user.id,
+                    TokenTransaction.transaction_type == "grant",
+                )
+            ).all()
+        )
+        assert len(grant_transactions) == 1
+        assert grant_transactions[0].amount == 5000
+
+
+def test_admin_settings_security_controls_apply_dynamic_expiry_and_ip_whitelist(
+    client: TestClient,
+):
+    headers = register_admin_user(
+        client,
+        username="super-admin-security-settings",
+        role="super_admin",
+    )
+
+    update_response = client.put(
+        "/api/v1/admin/settings",
+        headers={**headers, "X-Forwarded-For": "10.0.0.1"},
+        json={
+            "ip_whitelist_enabled": True,
+            "ip_whitelist_ips": "10.0.0.1, 10.0.0.3",
+            "session_timeout_enabled": True,
+            "session_timeout_minutes": 5,
+        },
+    )
+    assert update_response.status_code == 200
+    security_settings = {
+        item["key"]: item for item in update_response.json()["categories"]["security"]
+    }
+    assert security_settings["ip_whitelist_enabled"]["value"] is True
+    assert security_settings["ip_whitelist_ips"]["value"] == "10.0.0.1, 10.0.0.3"
+    assert security_settings["session_timeout_minutes"]["value"] == 5
+
+    blocked_response = client.get(
+        "/api/v1/admin/settings",
+        headers={**headers, "X-Forwarded-For": "10.0.0.2"},
+    )
+    assert blocked_response.status_code == 403
+    assert blocked_response.json()["detail"] == "您的 IP 地址不在安全访问白名单内"
+
+    allowed_response = client.get(
+        "/api/v1/admin/settings",
+        headers={**headers, "X-Forwarded-For": "10.0.0.1"},
+    )
+    assert allowed_response.status_code == 200
+
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={"username": "alice-security-expiry", "password": "super-secret-123"},
+        headers={"X-Forwarded-For": "10.0.0.9"},
+    )
+    assert register_response.status_code == 200
+    access_token_payload = decode_access_token(register_response.json()["access_token"])
+    access_token_duration_seconds = (
+        access_token_payload.expires_at - access_token_payload.issued_at
+    ).total_seconds()
+    assert 295 <= access_token_duration_seconds <= 305
+
+
+def test_admin_settings_rollback_restores_snapshot_and_writes_audit_log(
+    client: TestClient,
+):
+    headers = register_admin_user(
+        client,
+        username="super-admin-settings-rollback",
+        role="super_admin",
+    )
+
+    update_response = client.put(
+        "/api/v1/admin/settings",
+        headers=headers,
+        json={
+            "token_price": "0.009",
+            "new_user_bonus": "7777",
+        },
+    )
+    assert update_response.status_code == 200
+
+    with client.app.state.testing_session_local() as db:
+        snapshot_log = db.scalar(
+            select(AuditLog)
+            .where(AuditLog.action_type == "update_system_settings")
+            .order_by(AuditLog.created_at.desc())
+        )
+        assert snapshot_log is not None
+        assert snapshot_log.details["changes"]["token_price"]["previous_value"] == 0.008
+        assert snapshot_log.details["changes"]["new_user_bonus"]["previous_value"] == 10_000_000
+
+    rollback_response = client.post(
+        f"/api/v1/admin/settings/rollback/{snapshot_log.id}",
+        headers=headers,
+    )
+    assert rollback_response.status_code == 200
+    rollback_payload = rollback_response.json()
+    assert rollback_payload["snapshot_audit_log_id"] == snapshot_log.id
+    assert set(rollback_payload["rolled_back_keys"]) == {"token_price", "new_user_bonus"}
+
+    settings_response = client.get("/api/v1/admin/settings", headers=headers)
+    assert settings_response.status_code == 200
+    token_settings = {
+        item["key"]: item for item in settings_response.json()["categories"]["token"]
+    }
+    assert token_settings["token_price"]["value"] == 0.008
+    assert token_settings["new_user_bonus"]["value"] == 10_000_000
+
+    with client.app.state.testing_session_local() as db:
+        rollback_log = db.scalar(
+            select(AuditLog)
+            .where(AuditLog.action_type == "rollback_system_settings")
+            .order_by(AuditLog.created_at.desc())
+        )
+        assert rollback_log is not None
+        assert rollback_log.details["snapshot_audit_log_id"] == snapshot_log.id
+        assert set(rollback_log.details["changed_keys"]) == {"token_price", "new_user_bonus"}
+        assert rollback_log.details["changes"]["token_price"]["previous_value"] == 0.009
+        assert rollback_log.details["changes"]["token_price"]["next_value"] == 0.008
+
+    duplicate_rollback_response = client.post(
+        f"/api/v1/admin/settings/rollback/{snapshot_log.id}",
+        headers=headers,
+    )
+    assert duplicate_rollback_response.status_code == 400
+    assert duplicate_rollback_response.json()["detail"] == "当前配置已是该状态，无需回滚。"
+
+
+def test_admin_notifications_and_pending_tasks_workflow(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OMNIMEDIA_STORAGE_CAPACITY_BYTES", "1000")
+    headers = register_admin_user(
+        client,
+        username="super-admin-notifications",
+        role="super_admin",
+    )
+
+    create_response = client.post(
+        "/api/v1/admin/users",
+        headers=headers,
+        json={
+            "username": "ops-notification-user",
+            "password": "super-secret-123",
+            "role": "user",
+        },
+    )
+    assert create_response.status_code == 201
+    created_user = create_response.json()
+
+    freeze_response = client.post(
+        f"/api/v1/admin/users/{created_user['id']}/status",
+        headers=headers,
+        json={"status": "frozen"},
+    )
+    assert freeze_response.status_code == 200
+
+    with client.app.state.testing_session_local() as db:
+        db.add(
+            UploadRecord(
+                user_id=created_user["id"],
+                filename="warning-video.mp4",
+                file_path="/tmp/warning-video.mp4",
+                mime_type="video/mp4",
+                file_size=950,
+                purpose="material",
+            )
+        )
+        db.commit()
+
+    notifications_response = client.get(
+        "/api/v1/admin/notifications?limit=5",
+        headers=headers,
+    )
+    assert notifications_response.status_code == 200
+    notifications_payload = notifications_response.json()
+    assert notifications_payload["unread_count"] >= 2
+    assert len(notifications_payload["items"]) >= 2
+    notification_titles = {item["title"] for item in notifications_payload["items"]}
+    assert "新建用户成功" in notification_titles
+    assert "用户状态已更新" in notification_titles
+    assert any(item["is_read"] is False for item in notifications_payload["items"])
+
+    pending_response = client.get(
+        "/api/v1/admin/dashboard/pending-tasks",
+        headers=headers,
+    )
+    assert pending_response.status_code == 200
+    assert pending_response.json() == {
+        "abnormal_users": 1,
+        "storage_warnings": 1,
+    }
+
+    read_all_response = client.put(
+        "/api/v1/admin/notifications/read_all",
+        headers=headers,
+    )
+    assert read_all_response.status_code == 200
+    assert read_all_response.json()["unread_count"] == 0
+
+    with client.app.state.testing_session_local() as db:
+        unread_count = db.scalar(
+            select(func.count(SystemNotification.id)).where(
+                SystemNotification.is_read.is_(False)
+            )
+        )
+        assert unread_count == 0
+
+
+def test_admin_user_list_supports_status_filter(client: TestClient):
+    headers = register_admin_user(
+        client,
+        username="super-admin-filter-status",
+        role="super_admin",
+    )
+
+    first_user_response = client.post(
+        "/api/v1/admin/users",
+        headers=headers,
+        json={
+            "username": "filter-frozen-user",
+            "password": "super-secret-123",
+            "role": "user",
+        },
+    )
+    assert first_user_response.status_code == 201
+    first_user = first_user_response.json()
+
+    second_user_response = client.post(
+        "/api/v1/admin/users",
+        headers=headers,
+        json={
+            "username": "filter-active-user",
+            "password": "super-secret-123",
+            "role": "user",
+        },
+    )
+    assert second_user_response.status_code == 201
+
+    freeze_response = client.post(
+        f"/api/v1/admin/users/{first_user['id']}/status",
+        headers=headers,
+        json={"status": "frozen"},
+    )
+    assert freeze_response.status_code == 200
+
+    filtered_response = client.get(
+        "/api/v1/admin/users?status=frozen",
+        headers=headers,
+    )
+    assert filtered_response.status_code == 200
+    filtered_payload = filtered_response.json()
+    assert filtered_payload["total"] == 1
+    assert len(filtered_payload["items"]) == 1
+    assert filtered_payload["items"][0]["username"] == "filter-frozen-user"
+    assert filtered_payload["items"][0]["status"] == "frozen"
 
 
 def test_refresh_token_issues_new_session_tokens(client: TestClient):
@@ -1443,6 +1788,34 @@ def test_template_list_endpoint_returns_preset_templates(client: TestClient):
     assert "[Variables]" in emotion_item["system_prompt"]
     assert all(item["is_preset"] is True for item in payload["items"])
     assert all(item["created_at"].endswith("Z") for item in payload["items"])
+
+
+def test_template_list_endpoint_supports_pagination_and_filters(client: TestClient):
+    headers = register_user(client, username="alice-template-pagination")
+
+    response = client.get(
+        "/api/v1/media/templates",
+        headers=headers,
+        params={
+            "page": 1,
+            "page_size": 9,
+            "category": TemplateCategory.TECH.value,
+            "view_mode": "preset",
+            "search": "IoT",
+        },
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["page"] == 1
+    assert payload["page_size"] == 9
+    assert payload["total_pages"] >= 1
+    assert payload["total"] >= 1
+    assert payload["preset_total"] >= payload["total"]
+    assert payload["custom_total"] == 0
+    assert 1 <= len(payload["items"]) <= 9
+    assert all(item["category"] == TemplateCategory.TECH.value for item in payload["items"])
+    assert all(item["is_preset"] is True for item in payload["items"])
 
 
 def test_template_create_endpoint_persists_user_template(client: TestClient):

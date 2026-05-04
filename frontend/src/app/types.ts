@@ -304,6 +304,8 @@ export type TemplateCategory =
   | "母婴/宠物"
   | "情感/心理";
 
+export type TemplateViewMode = "all" | "preset" | "custom";
+
 export type TemplateSummaryItem = {
   id: string;
   title: string;
@@ -320,6 +322,19 @@ export type TemplateSummaryItem = {
 export type TemplatesApiResponse = {
   items: TemplateSummaryItem[];
   total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  preset_total: number;
+  custom_total: number;
+};
+
+export type TemplateListQuery = {
+  page: number;
+  page_size: number;
+  search: string;
+  category: TemplateCategory | null;
+  view_mode: TemplateViewMode;
 };
 
 export type TemplateCreatePayload = {

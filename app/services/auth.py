@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import load_environment
+from app.core.security import get_access_token_expiry_minutes
 from app.db.database import get_db
 from app.db.models import (
     AccessTokenBlacklist,
@@ -111,11 +112,16 @@ def _create_token(
     )
 
 
-def create_access_token(*, subject: str, session_jti: str | None = None) -> IssuedToken:
+def create_access_token(
+    *,
+    subject: str,
+    session_jti: str | None = None,
+    expires_delta: timedelta | None = None,
+) -> IssuedToken:
     return _create_token(
         subject=subject,
         token_type=ACCESS_TOKEN_TYPE,
-        expires_delta=timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
+        expires_delta=expires_delta or timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
         session_jti=session_jti,
     )
 
@@ -299,9 +305,14 @@ def issue_token_pair(
     ip_address: str | None = None,
 ) -> tuple[str, str]:
     refresh_token = create_refresh_token(subject=user_id)
+    access_token_expiry_minutes = get_access_token_expiry_minutes(
+        db,
+        default_minutes=JWT_ACCESS_EXPIRE_MINUTES,
+    )
     access_token = create_access_token(
         subject=user_id,
         session_jti=refresh_token.jti,
+        expires_delta=timedelta(minutes=access_token_expiry_minutes),
     )
 
     refresh_session = RefreshSession(

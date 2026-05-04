@@ -3,7 +3,15 @@ import type {
   AdminAuditLogsApiResponse,
   AdminAuditLogsFilters,
   AdminDashboardData,
+  AdminGlobalSearchResponse,
+  AdminNotificationsApiResponse,
+  AdminNotificationsReadAllResponse,
+  AdminPendingTasks,
   AdminRoleSummaryResponse,
+  AdminSystemSettingsApiResponse,
+  AdminSystemSettingsRollbackApiResponse,
+  AdminSystemSettingsUpdatePayload,
+  AdminStorageStats,
   AdminTemplateCreatePayload,
   AdminTemplateDeleteApiResponse,
   AdminTemplateDeletePayload,
@@ -11,6 +19,7 @@ import type {
   AdminTemplateUpdatePayload,
   AdminTemplatesApiResponse,
   AdminTokenStats,
+  AdminStorageUsersApiResponse,
   AdminUserCreatePayload,
   AdminUserDeleteApiResponse,
   AdminTokenTransactionsApiResponse,
@@ -483,12 +492,16 @@ export async function fetchAdminUsers(params?: {
   skip?: number;
   limit?: number;
   search?: string;
+  status?: "active" | "frozen";
 }): Promise<AdminUsersApiResponse> {
   const searchParams = new URLSearchParams();
   searchParams.set("skip", String(params?.skip ?? 0));
   searchParams.set("limit", String(params?.limit ?? 20));
   if (params?.search?.trim()) {
     searchParams.set("search", params.search.trim());
+  }
+  if (params?.status) {
+    searchParams.set("status", params.status);
   }
 
   const response = await fetchWithInterceptor(
@@ -526,6 +539,117 @@ export async function fetchAdminDashboardSummary(): Promise<AdminDashboardData> 
   );
 
   return (await response.json()) as AdminDashboardData;
+}
+
+export async function fetchAdminNotifications(params?: {
+  limit?: number;
+}): Promise<AdminNotificationsApiResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("limit", String(params?.limit ?? 5));
+
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/notifications?${searchParams.toString()}`,
+    { method: "GET" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminNotificationsApiResponse;
+}
+
+export async function markAllAdminNotificationsRead(): Promise<AdminNotificationsReadAllResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/notifications/read_all",
+    { method: "PUT" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminNotificationsReadAllResponse;
+}
+
+export async function fetchAdminPendingTasks(): Promise<AdminPendingTasks> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/dashboard/pending-tasks",
+    { method: "GET" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminPendingTasks;
+}
+
+export async function fetchAdminGlobalSearch(
+  query: string,
+  options?: {
+    limit?: number;
+    signal?: AbortSignal;
+  },
+): Promise<AdminGlobalSearchResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("q", query.trim());
+  searchParams.set("limit", String(options?.limit ?? 3));
+
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/global-search?${searchParams.toString()}`,
+    {
+      method: "GET",
+      signal: options?.signal,
+    },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminGlobalSearchResponse;
+}
+
+export async function fetchAdminStorageStats(): Promise<AdminStorageStats> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/storage/stats",
+    { method: "GET" },
+    { timeoutMs: 20000 },
+  );
+
+  return (await response.json()) as AdminStorageStats;
+}
+
+export async function fetchAdminStorageUsers(params?: {
+  limit?: number;
+}): Promise<AdminStorageUsersApiResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("limit", String(params?.limit ?? 10));
+
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/storage/users?${searchParams.toString()}`,
+    { method: "GET" },
+    { timeoutMs: 20000 },
+  );
+
+  return (await response.json()) as AdminStorageUsersApiResponse;
+}
+
+export async function fetchAdminSystemSettings(): Promise<AdminSystemSettingsApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/settings",
+    { method: "GET" },
+    { timeoutMs: 20000 },
+  );
+
+  return (await response.json()) as AdminSystemSettingsApiResponse;
+}
+
+export async function updateAdminSystemSettings(
+  payload: AdminSystemSettingsUpdatePayload,
+): Promise<AdminSystemSettingsApiResponse> {
+  const response = await fetchWithInterceptor(
+    "/api/v1/admin/settings",
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 20000 },
+  );
+
+  return (await response.json()) as AdminSystemSettingsApiResponse;
 }
 
 export async function fetchAdminRoleSummary(): Promise<AdminRoleSummaryResponse> {
@@ -624,7 +748,7 @@ export async function fetchAdminTokenTransactions(params?: {
 }): Promise<AdminTokenTransactionsApiResponse> {
   const searchParams = new URLSearchParams();
   searchParams.set("skip", String(params?.skip ?? 0));
-  searchParams.set("limit", String(params?.limit ?? 20));
+  searchParams.set("limit", String(params?.limit ?? 10));
   if (params?.userKeyword?.trim()) {
     searchParams.set("user_keyword", params.userKeyword.trim());
   }
@@ -725,6 +849,20 @@ export async function downloadAdminAuditLogsCsv(
   }, 1000);
 
   return filename;
+}
+
+export async function rollbackAdminSystemSettings(
+  auditLogId: string,
+): Promise<AdminSystemSettingsRollbackApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/settings/rollback/${auditLogId}`,
+    {
+      method: "POST",
+    },
+    { timeoutMs: 20000 },
+  );
+
+  return (await response.json()) as AdminSystemSettingsRollbackApiResponse;
 }
 
 export async function updateAdminUserStatus(

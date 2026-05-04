@@ -102,7 +102,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     description: "OSS 容量与资源",
     to: "/storage",
     icon: HardDrive,
-    status: "in-progress",
+    status: "ready",
     allowedRoles: ["super_admin", "admin"],
   },
   {
@@ -111,7 +111,7 @@ export const adminNavigation: AdminNavigationItem[] = [
     description: "平台配置中心",
     to: "/settings",
     icon: Settings,
-    status: "in-progress",
+    status: "ready",
     allowedRoles: ["super_admin"],
   },
 ];

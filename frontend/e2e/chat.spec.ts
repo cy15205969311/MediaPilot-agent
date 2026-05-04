@@ -465,6 +465,43 @@ test("creates a custom template and batch deletes selected templates", async ({
   await expect(page.getByTestId("template-card-template-preset-travel-hotflow")).toBeVisible();
 });
 
+test("keeps the current page stable while paginating the template gallery", async ({
+  page,
+}) => {
+  const pagedTemplates = Array.from({ length: 12 }, (_, index) =>
+    createMockTemplate({
+      id: `template-preset-page-${index + 1}`,
+      title: `分页模板 ${index + 1}`,
+      description: `用于验证分页状态稳定性的模板 ${index + 1}`,
+      platform: "小红书",
+      category: "美食文旅",
+      is_preset: true,
+    }),
+  );
+
+  await openWorkspace(page, {
+    templates: pagedTemplates,
+    responseDelayMsByPath: {
+      "/api/v1/media/templates": 600,
+    },
+  });
+
+  await page.getByTestId("sidebar-shortcut-templates").click();
+  await expect(page.getByTestId("templates-view")).toBeVisible();
+  await expect(page.getByTestId("template-card-template-preset-page-1")).toBeVisible();
+
+  await page.getByTestId("template-pagination-next").click();
+  await expect(page.getByText("正在更新模板")).toBeVisible();
+  await expect(page.getByTestId("template-card-template-preset-page-1")).toBeVisible();
+  await expect(page.getByTestId("template-pagination-page-2")).toHaveClass(/bg-primary/);
+  await expect(page.getByTestId("template-card-template-preset-page-10")).toBeVisible();
+
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId("template-pagination-page-2")).toHaveClass(/bg-primary/);
+  await expect(page.getByTestId("template-card-template-preset-page-10")).toBeVisible();
+  await expect(page.getByTestId("template-card-template-preset-page-1")).toHaveCount(0);
+});
+
 test("saves the latest artifact into a prefilled template draft", async ({ page }) => {
   const threadId = "thread-save-template";
   const artifact = {

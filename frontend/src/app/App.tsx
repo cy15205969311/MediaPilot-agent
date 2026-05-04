@@ -1,5 +1,5 @@
 ﻿import type { ChangeEvent, FormEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   AlertCircle,
@@ -106,6 +106,7 @@ import type {
   TopicUpdatePayload,
   TemplateCategory,
   TemplateCreatePayload,
+  TemplateListQuery,
   TemplatePlatform,
   TemplateSkillDiscoveryItem,
   TemplateSummaryItem,
@@ -164,6 +165,15 @@ type PublishToastState = {
   error?: string;
 };
 
+type TemplatePaginationState = {
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  presetTotal: number;
+  customTotal: number;
+};
+
 type MaterialCaptureSource = "picker" | "paste" | "drop";
 
 const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
@@ -178,8 +188,26 @@ const UNSUPPORTED_FILE_WARNING_MESSAGE =
 const DEFAULT_UPLOAD_LIMIT_BYTES = 15 * 1024 * 1024;
 const AUDIO_UPLOAD_LIMIT_BYTES = 100 * 1024 * 1024;
 const VIDEO_UPLOAD_LIMIT_BYTES = 300 * 1024 * 1024;
+const TEMPLATE_PAGE_SIZE = 9;
 const DOCX_MIME_TYPE =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+const initialTemplateQuery: TemplateListQuery = {
+  page: 1,
+  page_size: TEMPLATE_PAGE_SIZE,
+  search: "",
+  category: null,
+  view_mode: "all",
+};
+
+const initialTemplatePaginationState: TemplatePaginationState = {
+  total: 0,
+  page: 1,
+  pageSize: TEMPLATE_PAGE_SIZE,
+  totalPages: 1,
+  presetTotal: 0,
+  customTotal: 0,
+};
 
 const MATERIAL_FILE_RULES: Array<{
   kind: UploadedMaterialKind;
@@ -417,6 +445,29 @@ function createConversationMessage(
   return {
     ...message,
     createdAt: message.createdAt ?? new Date().toISOString(),
+  };
+}
+
+function areTemplateQueriesEqual(
+  left: TemplateListQuery,
+  right: TemplateListQuery,
+): boolean {
+  return (
+    left.page === right.page &&
+    left.page_size === right.page_size &&
+    left.search === right.search &&
+    left.category === right.category &&
+    left.view_mode === right.view_mode
+  );
+}
+
+function buildNextTemplateQuery(
+  current: TemplateListQuery,
+  patch: Partial<TemplateListQuery>,
+): TemplateListQuery {
+  return {
+    ...current,
+    ...patch,
   };
 }
 
@@ -1151,6 +1202,11 @@ function App() {
   const [knowledgeScopes, setKnowledgeScopes] = useState<KnowledgeScopeItem[]>([]);
   const [topics, setTopics] = useState<TopicItem[]>([]);
   const [templates, setTemplates] = useState<TemplateSummaryItem[]>([]);
+  const [templateQuery, setTemplateQuery] = useState<TemplateListQuery>(initialTemplateQuery);
+  const [templatePagination, setTemplatePagination] = useState<TemplatePaginationState>(
+    initialTemplatePaginationState,
+  );
+  const [hasLoadedTemplates, setHasLoadedTemplates] = useState(false);
   const [templateSkills, setTemplateSkills] = useState<TemplateSkillDiscoveryItem[]>([]);
   const [uploadedMaterials, setUploadedMaterials] = useState<UploadedMaterial[]>([]);
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
@@ -1218,6 +1274,7 @@ function App() {
   const streamErrorRef = useRef(false);
   const hasInitializedHistoryRef = useRef(false);
   const uploadedMaterialsRef = useRef<UploadedMaterial[]>([]);
+  const templateRequestIdRef = useRef(0);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
@@ -1237,6 +1294,8 @@ function App() {
   const isAuthenticated = Boolean(
     currentUser && (getStoredToken() || getStoredRefreshToken()),
   );
+  const isInitialTemplatesLoading = isLoadingTemplates && !hasLoadedTemplates;
+  const isFetchingTemplatesPage = isLoadingTemplates && hasLoadedTemplates;
   const currentDisplayName = useMemo(() => getDisplayName(currentUser), [currentUser]);
   const openXiaohongshuCreatorCenter = () => {
     window.open(XIAOHONGSHU_CREATOR_URL, "_blank", "noopener,noreferrer");
@@ -1533,6 +1592,9 @@ function App() {
     setKnowledgeScopes([]);
     setTopics([]);
     setTemplates([]);
+    setTemplateQuery(initialTemplateQuery);
+    setTemplatePagination(initialTemplatePaginationState);
+    setHasLoadedTemplates(false);
     setTemplateSkills([]);
     setIsLoadingDrafts(false);
     setIsLoadingKnowledgeScopes(false);
@@ -1974,16 +2036,57 @@ function App() {
     }
   };
 
-  const loadTemplates = async () => {
+  const updateTemplateQuery = useCallback((patch: Partial<TemplateListQuery>) => {
+    setTemplateQuery((current) => {
+      const next = buildNextTemplateQuery(current, patch);
+      return areTemplateQueriesEqual(current, next) ? current : next;
+    });
+  }, []);
+
+  const loadTemplates = async (
+    query: TemplateListQuery = templateQuery,
+    options?: { suppressSuccessStatus?: boolean },
+  ) => {
+    const requestId = templateRequestIdRef.current + 1;
+    templateRequestIdRef.current = requestId;
     setIsLoadingTemplates(true);
 
     try {
-      const payload = await fetchTemplates();
+      const payload = await fetchTemplates(query);
+      if (templateRequestIdRef.current !== requestId) {
+        return;
+      }
+
       setTemplates(payload.items);
-      setStatusText(
-        payload.total > 0 ? `已载入 ${payload.total} 个模板` : "暂无可用模板",
-      );
+      setTemplatePagination({
+        total: payload.total,
+        page: payload.page,
+        pageSize: payload.page_size,
+        totalPages: payload.total_pages,
+        presetTotal: payload.preset_total,
+        customTotal: payload.custom_total,
+      });
+      setHasLoadedTemplates(true);
+      setTemplateQuery((current) => {
+        const normalizedQuery: TemplateListQuery = {
+          ...query,
+          page: payload.page,
+          page_size: payload.page_size,
+          search: query.search.trim(),
+        };
+        return areTemplateQueriesEqual(current, normalizedQuery) ? current : normalizedQuery;
+      });
+
+      if (!options?.suppressSuccessStatus) {
+        setStatusText(
+          payload.total > 0 ? `已载入 ${payload.total} 个模板` : "暂无可用模板",
+        );
+      }
     } catch (error) {
+      if (templateRequestIdRef.current !== requestId) {
+        return;
+      }
+
       if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
         return;
@@ -2004,7 +2107,9 @@ function App() {
         content: errorMessage,
       });
     } finally {
-      setIsLoadingTemplates(false);
+      if (templateRequestIdRef.current === requestId) {
+        setIsLoadingTemplates(false);
+      }
     }
   };
 
@@ -2462,7 +2567,6 @@ function App() {
     }
 
     const deletedIdSet = new Set(deletedIds);
-    setTemplates((current) => current.filter((template) => !deletedIdSet.has(template.id)));
     setSelectedTemplate((current) =>
       current && deletedIdSet.has(current.id) ? null : current,
     );
@@ -2476,16 +2580,7 @@ function App() {
 
     try {
       const createdTemplate = await createTemplate(payload);
-      setTemplates((current) => {
-        const presets = current.filter((template) => template.is_preset);
-        const customs = current.filter((template) => !template.is_preset);
-        return [createdTemplate, ...customs, ...presets].sort((left, right) => {
-          if (left.is_preset !== right.is_preset) {
-            return left.is_preset ? -1 : 1;
-          }
-          return right.created_at.localeCompare(left.created_at);
-        });
-      });
+      void loadTemplates(templateQuery, { suppressSuccessStatus: true });
       setStatusText(`模板已创建：${createdTemplate.title}`);
       return createdTemplate;
     } catch (error) {
@@ -2524,6 +2619,7 @@ function App() {
     try {
       const response = await deleteTemplate(template.id);
       removeTemplatesFromState(response.deleted_ids);
+      void loadTemplates(templateQuery, { suppressSuccessStatus: true });
       setStatusText(`模板已删除：${template.title}`);
       return true;
     } catch (error) {
@@ -2564,6 +2660,7 @@ function App() {
     try {
       const response = await deleteTemplates({ template_ids: templateIds });
       removeTemplatesFromState(response.deleted_ids);
+      void loadTemplates(templateQuery, { suppressSuccessStatus: true });
       setStatusText(`已删除 ${response.deleted_count} 个模板`);
       return true;
     } catch (error) {
@@ -2817,8 +2914,8 @@ function App() {
       return;
     }
 
-    void loadTemplates();
-  }, [activeView, isAuthenticated]);
+    void loadTemplates(templateQuery);
+  }, [activeView, isAuthenticated, templateQuery]);
 
   const triggerFilePicker = (kind: UploadedMaterialKind) => {
     if (kind === "image") {
@@ -3959,6 +4056,9 @@ function App() {
       setKnowledgeScopes([]);
       setTopics([]);
       setTemplates([]);
+      setTemplateQuery(initialTemplateQuery);
+      setTemplatePagination(initialTemplatePaginationState);
+      setHasLoadedTemplates(false);
       setTemplateSkills([]);
       setIsLoadingDrafts(false);
       setIsLoadingKnowledgeScopes(false);
@@ -4149,7 +4249,11 @@ function App() {
             isLoading={isLoadingThreads}
             mutatingThreadId={mutatingThreadId}
             topicCount={topics.length > 0 ? topics.length : undefined}
-            templateCount={templates.length > 0 ? templates.length : undefined}
+            templateCount={
+              templatePagination.presetTotal + templatePagination.customTotal > 0
+                ? templatePagination.presetTotal + templatePagination.customTotal
+                : undefined
+            }
             onCreateThread={openNewThreadModal}
             onDeleteThread={(thread) => void handleDeleteThread(thread)}
             onLogout={() => void handleLogout()}
@@ -4371,15 +4475,25 @@ function App() {
             ) : activeView === "templates" ? (
               <TemplatesView
                 creationRequest={templateCreationRequest}
-                isLoading={isLoadingTemplates}
+                currentPage={templatePagination.page}
+                customTotal={templatePagination.customTotal}
+                isLoading={isInitialTemplatesLoading}
+                isPageFetching={isFetchingTemplatesPage}
                 isMutating={isMutatingTemplates}
                 mutatingTemplateId={mutatingTemplateId}
                 onCreationRequestHandled={() => setTemplateCreationRequest(null)}
                 onCreateTemplate={(payload) => handleCreateTemplate(payload)}
                 onDeleteTemplate={(template) => handleDeleteTemplate(template)}
                 onDeleteTemplates={(templateIds) => handleDeleteTemplates(templateIds)}
+                onQueryChange={updateTemplateQuery}
                 onUseTemplate={handleUseTemplate}
+                presetTotal={templatePagination.presetTotal}
+                queryCategory={templateQuery.category}
+                querySearch={templateQuery.search}
+                queryViewMode={templateQuery.view_mode}
                 selectedTemplateId={selectedTemplate?.id ?? null}
+                totalPages={templatePagination.totalPages}
+                totalTemplates={templatePagination.presetTotal + templatePagination.customTotal}
                 templates={templates}
               />
             ) : (

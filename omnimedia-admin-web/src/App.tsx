@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
-  HardDrive,
-  Settings,
   XCircle,
 } from "lucide-react";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -15,8 +13,9 @@ import { AuthGuard } from "./components/AuthGuard";
 import { ToastViewport } from "./components/ToastViewport";
 import { AdminAuditLogsPage } from "./pages/AdminAuditLogsPage";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
-import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
 import { AdminRolesPage } from "./pages/AdminRolesPage";
+import { AdminSettingsPage } from "./pages/AdminSettingsPage";
+import { AdminStoragePage } from "./pages/AdminStoragePage";
 import { AdminTemplatesPage } from "./pages/AdminTemplatesPage";
 import { AdminTokensPage } from "./pages/AdminTokensPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
@@ -59,7 +58,7 @@ function ProtectedShell(props: {
   }, [location.hash, location.pathname, location.search, location.state, navigate, onToast]);
 
   return (
-    <AdminLayout currentUser={currentUser} onLogout={onLogout}>
+    <AdminLayout currentUser={currentUser} onLogout={onLogout} onToast={onToast}>
       <Outlet />
     </AdminLayout>
   );
@@ -164,42 +163,8 @@ function App() {
             <Route path="/tokens" element={<AdminTokensPage onToast={pushToast} />} />
             <Route path="/audit" element={<AdminAuditLogsPage onToast={pushToast} />} />
             <Route path="/templates" element={<AdminTemplatesPage onToast={pushToast} />} />
-            <Route
-              path="/storage"
-              element={
-                <AdminPlaceholderPage
-                  badge="Storage"
-                  ctaLabel="查看数据总览"
-                  ctaTo="/dashboard"
-                  description="存储治理页用于汇总 OSS 容量、文件类型分布、用户占用排行和异常上传风险。"
-                  highlights={[
-                    "建议优先接入总容量、剩余容量和用户用量排行，形成治理闭环。",
-                    "文件类型分布可以帮助判断图片、视频、文档等资源的增长趋势。",
-                    "高风险上传记录可与审计日志联动，便于追踪异常操作。",
-                  ]}
-                  icon={<HardDrive className="h-6 w-6" />}
-                  title="存储治理模块建设中"
-                />
-              }
-            />
-            <Route
-              path="/settings"
-              element={
-                <AdminPlaceholderPage
-                  badge="System Controls"
-                  ctaLabel="返回数据总览"
-                  ctaTo="/dashboard"
-                  description="系统设置页可集中管理后台环境变量、模型策略、功能开关和平台级说明，避免配置散落。"
-                  highlights={[
-                    "高风险配置建议拆成只读信息卡与受控修改流程。",
-                    "如果后续要支持多环境切换，也适合在这里做统一展示。",
-                    "当前页面已经预留完整的路由与轻量化视觉结构，后续可逐步补全。",
-                  ]}
-                  icon={<Settings className="h-6 w-6" />}
-                  title="系统设置模块建设中"
-                />
-              }
-            />
+            <Route path="/storage" element={<AdminStoragePage onToast={pushToast} />} />
+            <Route path="/settings" element={<AdminSettingsPage onToast={pushToast} />} />
             <Route path="*" element={<Navigate replace to={defaultAdminRoute} />} />
           </Route>
         </Route>

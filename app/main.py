@@ -6,15 +6,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import load_environment
+from app.core.security import get_security_settings, is_client_ip_allowed
 
 load_environment()
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.admin_audit_logs import router as admin_audit_logs_router
 from app.api.v1.admin_dashboard import router as admin_dashboard_router
+from app.api.v1.admin_notifications import router as admin_notifications_router
+from app.api.v1.admin_search import router as admin_search_router
+from app.api.v1.admin_settings import router as admin_settings_router
+from app.api.v1.admin_storage import router as admin_storage_router
 from app.api.v1.admin_templates import router as admin_templates_router
 from app.api.v1.admin_tokens import router as admin_tokens_router
 from app.api.v1.admin_users import router as admin_users_router
@@ -27,8 +33,9 @@ from app.api.v1.oss import UPLOADS_DIR, router as media_upload_router
 from app.api.v1.templates import router as media_templates_router
 from app.api.v1.topics import router as media_topics_router
 from app.api.v1.users import router as users_router
-from app.db.database import engine, run_startup_migrations
+from app.db.database import SessionLocal, engine, run_startup_migrations
 from app.db.models import Base
+from app.services.auth import extract_client_ip
 from app.services.scheduler import (
     create_scheduler,
     run_material_cleanup_job,
@@ -43,6 +50,7 @@ DEFAULT_LOCAL_DEV_CORS_ORIGINS = [
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
 ]
+ADMIN_API_PREFIX = "/api/v1/admin"
 logger = logging.getLogger(f"{APP_LOGGER_NAME}.main")
 
 
@@ -86,6 +94,8 @@ configure_application_logging()
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     run_startup_migrations()
+    with SessionLocal() as db:
+        get_security_settings(db, force_refresh=True)
     scheduler = create_scheduler()
     scheduler.start()
     await run_oss_lifecycle_rollout_job()
@@ -116,6 +126,33 @@ app.add_middleware(
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
+
+
+@app.middleware("http")
+async def enforce_admin_ip_whitelist(request: Request, call_next):
+    path = request.url.path
+    is_admin_route = path == ADMIN_API_PREFIX or path.startswith(f"{ADMIN_API_PREFIX}/")
+    if request.method == "OPTIONS" or not is_admin_route:
+        return await call_next(request)
+
+    session_factory = getattr(request.app.state, "testing_session_local", SessionLocal)
+    with session_factory() as db:
+        security_settings = get_security_settings(db)
+
+    client_ip = extract_client_ip(request)
+    if not is_client_ip_allowed(client_ip, security_settings):
+        logger.warning(
+            "security.admin_ip_blocked path=%s client_ip=%s allowed_ips=%s",
+            path,
+            client_ip or "unknown",
+            ",".join(security_settings.ip_whitelist_ips) or "<empty>",
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "您的 IP 地址不在安全访问白名单内"},
+        )
+
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -175,6 +212,10 @@ async def root() -> dict[str, str]:
 app.include_router(auth_router)
 app.include_router(admin_audit_logs_router)
 app.include_router(admin_dashboard_router)
+app.include_router(admin_notifications_router)
+app.include_router(admin_search_router)
+app.include_router(admin_settings_router)
+app.include_router(admin_storage_router)
 app.include_router(admin_templates_router)
 app.include_router(admin_tokens_router)
 app.include_router(admin_users_router)

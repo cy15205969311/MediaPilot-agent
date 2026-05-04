@@ -18,6 +18,8 @@ import {
   fetchAdminTemplates,
   updateAdminTemplate,
 } from "../api";
+import { StandardSearchInput } from "../components/common/StandardSearchInput";
+import { useSearchParams } from "react-router-dom";
 import type {
   AdminTemplateCreatePayload,
   AdminTemplateItem,
@@ -53,6 +55,7 @@ const PAGE_SIZE = 10;
 const TAB_ORDER: TemplateTabKey[] = ["all", "小红书", "抖音", "通用", "custom"];
 const PLATFORM_OPTIONS: AdminTemplatePlatform[] = ["小红书", "抖音", "通用"];
 const INDUSTRY_OPTIONS = ["美妆护肤", "美食文旅", "数码科技", "情感心理", "家居生活"];
+const TEMPLATE_SEARCH_CLEAR_PARAM_KEYS = ["templateId"];
 
 function createInitialForm(): TemplateModalForm {
   return {
@@ -184,6 +187,7 @@ function TemplateCardSkeleton() {
 
 export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
   const { onToast } = props;
+  const [searchParams, setSearchParams] = useSearchParams();
   const [templatesPayload, setTemplatesPayload] = useState<AdminTemplatesApiResponse | null>(null);
   const [activeTab, setActiveTab] = useState<TemplateTabKey>("all");
   const [currentPage, setCurrentPage] = useState(1);
@@ -202,9 +206,21 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
   const isSaving = mutationKey === "modal-submit";
   const isBatchDeleting = mutationKey === "batch-delete";
   const hasSelection = selectedTemplateIds.length > 0;
+  const activeTemplateId = searchParams.get("templateId")?.trim() ?? "";
+  const activeKeyword = searchParams.get("keyword")?.trim().toLowerCase() ?? "";
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
+      const matchesRouteSearch =
+        (!activeTemplateId || item.id === activeTemplateId) &&
+        (!activeKeyword ||
+          item.title.toLowerCase().includes(activeKeyword) ||
+          item.description.toLowerCase().includes(activeKeyword));
+
+      if (!matchesRouteSearch) {
+        return false;
+      }
+
       if (activeTab === "all") {
         return true;
       }
@@ -213,7 +229,7 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
       }
       return item.platform === activeTab;
     });
-  }, [activeTab, items]);
+  }, [activeKeyword, activeTab, activeTemplateId, items]);
 
   const totalPages = Math.max(1, Math.ceil(filteredItems.length / PAGE_SIZE));
   const pageStart = (currentPage - 1) * PAGE_SIZE;
@@ -273,6 +289,32 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
   }, [activeTab]);
 
   useEffect(() => {
+    if (!activeTemplateId && !activeKeyword) {
+      return;
+    }
+
+    setActiveTab("all");
+    setCurrentPage(1);
+  }, [activeKeyword, activeTemplateId]);
+
+  useEffect(() => {
+    if (!activeTemplateId || activeKeyword || items.length === 0) {
+      return;
+    }
+
+    const matchedTemplate = items.find((item) => item.id === activeTemplateId);
+    if (!matchedTemplate) {
+      return;
+    }
+
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("keyword", matchedTemplate.title);
+      return next;
+    });
+  }, [activeKeyword, activeTemplateId, items, setSearchParams]);
+
+  useEffect(() => {
     const availableIds = new Set(items.map((item) => item.id));
     setSelectedTemplateIds((current) => current.filter((id) => availableIds.has(id)));
   }, [items]);
@@ -296,6 +338,10 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
       title: "模板库已刷新",
       message: "最新模板资产和统计信息已经同步完成。",
     });
+  };
+
+  const handleSearchChange = () => {
+    setCurrentPage(1);
   };
 
   const openCreateModal = () => {
@@ -481,7 +527,7 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
           <div>
             <h1 className="text-[30px] font-bold tracking-tight text-slate-900">模板库管理</h1>
             <p className="mt-2 text-sm leading-6 text-slate-500">
-
+              统一管理官方预置与共享模板资产，支持按平台检索、预览、编辑以及批量清理。
             </p>
           </div>
 
@@ -507,30 +553,42 @@ export function AdminTemplatesPage(props: AdminTemplatesPageProps) {
           </div>
         </div>
 
-        <div className="mb-5 flex gap-2 overflow-x-auto pb-1">
-          {TAB_ORDER.map((tab, index) => {
-            const isActive = activeTab === tab;
+        <div className="mb-5 flex items-center justify-between gap-4">
+          <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1 pr-2">
+            {TAB_ORDER.map((tab, index) => {
+              const isActive = activeTab === tab;
 
-            return (
-              <button
-                key={tab}
-                className="whitespace-nowrap rounded-xl border px-4 py-2 text-sm font-medium transition"
-                onClick={() => setActiveTab(tab)}
-                style={{
-                  backgroundColor: isActive ? "#fff1f1" : "#ffffff",
-                  borderColor: isActive ? "#ff8f7d" : "#e2e8f0",
-                  color: isActive ? "#ff6b57" : "#64748b",
-                  boxShadow: isActive ? "0 10px 24px rgba(255,107,87,0.08)" : "none",
-                }}
-                type="button"
-              >
-                {getTabLabel(tab)}
-                {index > -1 ? (
-                  <span className="ml-2 text-xs opacity-70">({formatNumber(tabCounts[tab])})</span>
-                ) : null}
-              </button>
-            );
-          })}
+              return (
+                <button
+                  key={tab}
+                  className="whitespace-nowrap rounded-xl border px-4 py-2 text-sm font-medium transition"
+                  onClick={() => setActiveTab(tab)}
+                  style={{
+                    backgroundColor: isActive ? "#fff1f1" : "#ffffff",
+                    borderColor: isActive ? "#ff8f7d" : "#e2e8f0",
+                    color: isActive ? "#ff6b57" : "#64748b",
+                    boxShadow: isActive ? "0 10px 24px rgba(255,107,87,0.08)" : "none",
+                  }}
+                  type="button"
+                >
+                  {getTabLabel(tab)}
+                  {index > -1 ? (
+                    <span className="ml-2 text-xs opacity-70">({formatNumber(tabCounts[tab])})</span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="w-64 shrink-0">
+            <StandardSearchInput
+              className="w-full"
+              clearParamKeys={TEMPLATE_SEARCH_CLEAR_PARAM_KEYS}
+              onSearchChange={handleSearchChange}
+              paramKey="keyword"
+              placeholder="搜索模板名称或描述..."
+            />
+          </div>
         </div>
 
         <div

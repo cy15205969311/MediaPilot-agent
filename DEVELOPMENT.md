@@ -223,8 +223,11 @@ The system enforces account freezing across backend and frontend layers:
 
 The current monetization baseline follows a prepaid model:
 
-- registration grants `10_000_000` initial tokens
-- registration writes both the `User` row and a matching `TokenTransaction(transaction_type="grant")` row in one transaction
+- the initial-token grant is no longer hardcoded in auth or admin provisioning routes
+- `SystemSetting(key="new_user_bonus")` is the live source of truth for initial grants
+- both `POST /api/v1/auth/register` and `POST /api/v1/admin/users` read `new_user_bonus` at runtime for non-system roles
+- when the setting is missing or invalid, the grant safely falls back to `0`
+- every non-zero grant still writes both the `User` row update and a matching `TokenTransaction(transaction_type="grant")` row in one transaction
 - standard users with `token_balance <= 0` receive `402 INSUFFICIENT_TOKENS` before model execution begins
 - the creator workspace profile UI exposes a token asset panel for standard users
 - the top-up entry remains a placeholder until payment integration is introduced
@@ -479,6 +482,87 @@ The admin user center now includes a complete delete and recovery-oriented gover
 - the audit workspace now uses a fixed `5`-row page size so governance actions are easier to scan and reconcile
 - the reset-password action remains visible in the same dropdown and now consistently communicates the fixed reset password baseline to operators
 
+### 7.19 System setting KV control plane
+
+The admin settings workspace is now backed by a real database-owned KV configuration center:
+
+- `app/db/models.py` defines `SystemSetting` with `key`, `value`, `category`, and `description`
+- `app/services/system_settings.py` owns the settings catalog, default seeding, grouped admin responses, typed coercion, and update validation
+- startup initialization ensures the table exists and seeds missing defaults before the admin console starts relying on them
+- `GET /api/v1/admin/settings` returns grouped settings for the admin console
+- `PUT /api/v1/admin/settings` persists updates and writes an `update_system_settings` audit event containing both `changed_keys` and structured `changes`
+- security-sensitive settings are cached in-process through `app/core/security.py` so request-time checks do not hit the database on every admin request
+- saving settings immediately refreshes the security-settings cache
+
+### 7.20 Security baseline from settings
+
+Security controls now read from the shared settings control plane instead of fixed constants:
+
+- admin-session access-token expiry is derived from `session_timeout_enabled` and `session_timeout_minutes`
+- `/api/v1/admin/*` is protected by an IP-whitelist middleware backed by `ip_whitelist_enabled` and `ip_whitelist_ips`
+- loopback addresses remain locally safe, and an empty whitelist does not hard-lock the instance during development
+- the admin settings page progressively expands the whitelist textarea and timeout input only when the corresponding switches are enabled
+
+### 7.21 Audit detail drawer and diff rendering
+
+The audit workspace now exposes a richer investigation surface:
+
+- each audit row includes a right-side detail drawer entry point
+- `update_system_settings` events render GitHub-style before/after diff blocks from `details.changes`
+- all other event types render the structured audit payload as formatted JSON for operator review
+- the drawer keeps the existing `5`-row pagination baseline while giving operators access to the full change payload without leaving the page
+
+### 7.22 Admin notification center and pending-task aggregation
+
+The admin shell now includes a real message stream and task-warning layer:
+
+- `SystemNotification` is persisted in `app/db/models.py`
+- `GET /api/v1/admin/notifications` returns recent notifications plus `unread_count`
+- `PUT /api/v1/admin/notifications/read_all` marks unread entries as read in one operation
+- high-impact admin actions such as system-setting updates and rollbacks append notifications automatically
+- `GET /api/v1/admin/dashboard/pending-tasks` aggregates live governance warnings, currently including:
+  - `abnormal_users`
+  - `storage_warnings`
+- `AdminLayout` renders the bell popover and the lower-left pending-task widget, with role-aware navigation to `/users?status=frozen` and `/storage`
+
+### 7.23 Live storage-governance analytics
+
+The storage-governance workspace now reads real upload data instead of mock values:
+
+- `GET /api/v1/admin/storage/stats` returns:
+  - `total_bytes`
+  - `capacity_bytes`
+  - grouped `image / video / audio / document / other` distribution
+- `GET /api/v1/admin/storage/users` returns per-user rankings with:
+  - total stored bytes
+  - file count
+  - latest upload timestamp
+- frontend rendering uses human-readable byte formatting (`KB / MB / GB / TB`) instead of raw byte counts
+- the current user-ranking endpoint defaults to `limit=10`
+
+### 7.24 System-setting rollback path
+
+The admin settings stack now includes a reversible recovery flow:
+
+- `POST /api/v1/admin/settings/rollback/{audit_log_id}` restores system-setting values from a recorded audit snapshot
+- rollback validates the snapshot type, extracts previous values, updates `SystemSetting`, writes a new `rollback_system_settings` audit row, and appends a new admin notification
+- the rollback path is wrapped in one database transaction so config recovery and audit persistence succeed or fail together
+- the audit detail drawer exposes a dedicated rollback action with a confirmation dialog
+
+### 7.25 Admin search-entry simplification and creator template-grid stability
+
+The latest UI baseline deliberately removes redundant search entry points:
+
+- the admin header no longer exposes a global cross-module search box
+- the audit workspace intentionally relies only on its advanced filter drawer and no longer renders a second free-text search input
+- `omnimedia-admin-web/src/components/common/StandardSearchInput.tsx` is now the shared local-search primitive for:
+  - admin users
+  - token ledger
+  - template library
+- the shared search input handles local buffering, debounced URL sync, reverse URL hydration, and one-click clear behavior
+- the template-library toolbar constrains the local search box to a fixed width so it no longer crushes the tab bar
+- the creator template center keeps a 3x3 `page_size=9` gallery, uses `content-start` to avoid last-page card stretching, and keeps cards aligned with `h-full + flex-col`
+
 ## 8. Backend Boundaries
 
 ### 8.1 Route groups
@@ -497,6 +581,10 @@ Current route modules under `app/api/v1/` include:
 - `oss.py`
 - `admin_users.py`
 - `admin_dashboard.py`
+- `admin_storage.py`
+- `admin_settings.py`
+- `admin_notifications.py`
+- `admin_search.py`
 - `admin_tokens.py`
 - `admin_templates.py`
 - `admin_audit_logs.py`
@@ -509,6 +597,15 @@ Current route modules under `app/api/v1/` include:
 - `app/models/` handles Pydantic schemas and shared API contracts
 
 Avoid pushing long-lived business orchestration and complex data-access code into the route layer.
+
+### 8.3 System setting and security layering
+
+Mutable commercial, security, and notification baselines should follow the KV control-plane path:
+
+- persist defaults and runtime overrides in `SystemSetting`
+- read typed values through `app/services/system_settings.py` for normal business flows
+- read cached security values through `app/core/security.py` for middleware and token-issuance decisions
+- avoid introducing new hardcoded business defaults inside route handlers when the value is expected to be operator-managed
 
 ## 9. Key API Surface
 
@@ -571,8 +668,17 @@ Avoid pushing long-lived business orchestration and complex data-access code int
 - `DELETE /api/v1/admin/templates`
 - `GET /api/v1/admin/roles/summary`
 - `GET /api/v1/admin/dashboard`
+- `GET /api/v1/admin/storage/stats`
+- `GET /api/v1/admin/storage/users`
 - `GET /api/v1/admin/transactions`
 - `GET /api/v1/admin/transactions/stats`
+- `GET /api/v1/admin/notifications`
+- `PUT /api/v1/admin/notifications/read_all`
+- `GET /api/v1/admin/dashboard/pending-tasks`
+- `GET /api/v1/admin/global-search`
+- `GET /api/v1/admin/settings`
+- `PUT /api/v1/admin/settings`
+- `POST /api/v1/admin/settings/rollback/{audit_log_id}`
 - `GET /api/v1/admin/audit-logs`
 - `GET /api/v1/admin/audit-logs/export`
 
@@ -587,6 +693,21 @@ Validate the parts you actually changed before you push.
 - if `omnimedia-admin-web/` changed: run `npm run build`
 - if schemas changed: verify frontend/backend contract compatibility
 - if database write paths changed: verify `SQLite` lock release and read-endpoint responsiveness
+- if ORM models or Alembic revisions changed: run `alembic upgrade head` before release
+- historical migration patches must stay idempotent; do not assume a legacy table or column already exists when hardening an old revision
+- recommended migration smoke test:
+
+```powershell
+$env:DATABASE_URL = "sqlite:///./tmp_migration_smoke.db"
+alembic upgrade head
+Remove-Item .\tmp_migration_smoke.db
+```
+
+- recommended security-settings regression command after touching auth, admin settings, or middleware:
+
+```powershell
+python -m pytest tests/test_chat.py -k "auth_register_and_login or admin_settings_update_bonus_affects_register_and_admin_provisioning or admin_settings_security_controls_apply_dynamic_expiry_and_ip_whitelist"
+```
 
 ### 10.2 RBAC and admin-governance validation
 
@@ -630,6 +751,22 @@ Validate the parts you actually changed before you push.
 14. Open the audit-log workspace and confirm that:
    - the default page size is fixed at `5`
    - pagination, filters, and the detail panel stay consistent as you move through results
+   - `update_system_settings` rows open a right-side drawer with readable before/after diff blocks
+   - non-settings rows still show their structured audit JSON in the same drawer
+15. Update any system setting and confirm that:
+   - the bell notification center receives a new message
+   - the audit list records an `update_system_settings` event
+   - the detail drawer shows the structured diff payload
+16. Trigger rollback from a system-setting audit snapshot and confirm that:
+   - the setting value is restored
+   - a `rollback_system_settings` audit row is created
+   - the notification center shows a rollback message
+17. Open the storage-governance workspace and confirm that:
+   - total usage, distribution, and user rankings come from live aggregation endpoints
+   - file sizes are rendered as `KB / MB / GB / TB` instead of raw bytes
+18. Open the admin users, token ledger, and template library pages and confirm that:
+   - local search inputs clear and resync with URL state correctly
+   - the template-library search control stays fixed-width and does not collapse the tab bar
 
 ### 10.3 Billing and multimodal validation
 
@@ -653,7 +790,7 @@ This repository uses Conventional Commits:
 Example:
 
 ```text
-feat: enforce role-aware admin workspaces and aggregate live role membership
+feat: 打通系统设置回滚链路与后台治理工作台
 ```
 
 When a changeset contains both feature code and documentation updates, choose the type based on the primary engineering impact. For the current admin RBAC and routing work, `feat:` is the correct type.

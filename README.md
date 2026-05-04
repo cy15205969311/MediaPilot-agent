@@ -247,10 +247,13 @@ npx playwright install chromium
 
 ### 7.2 Token 商业化基础链路
 
-- 新用户注册会在同一事务中完成：
-  - 创建 `User`
-  - 设置初始 `token_balance = 10_000_000`
-  - 写入一条 `TokenTransaction(transaction_type="grant")`
+- 初始 Token 赠送额度不再硬编码在注册或后台建号逻辑里
+- `SystemSetting(key="new_user_bonus")` 是当前唯一的初始赠送配置源
+- `POST /api/v1/auth/register` 与 `POST /api/v1/admin/users` 会在运行时动态读取 `new_user_bonus`
+- 当配置缺失、未播种或值异常时，赠送额度会安全兜底为 `0`
+- 只要赠送额度大于 `0`，系统仍会在同一事务里同步完成：
+  - 创建或更新 `User.token_balance`
+  - 写入一条匹配的 `TokenTransaction(transaction_type="grant")`
 - 普通用户在 `token_balance <= 0` 时，请求 `POST /api/v1/media/chat/stream` 会收到 `402 INSUFFICIENT_TOKENS`
 - `super_admin` 与 `admin` 为资产豁免角色：
   - 跳过事前余额拦截
@@ -467,6 +470,88 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 审计日志页当前固定为每页 `5` 条，方便后台核对删除、重置密码与角色治理动作
 - 重置密码动作仍保留在同一菜单中，便于运营在删除前先执行找回或交接
 
+### 7.18 SystemSetting 配置中心与安全基线
+
+- 后台系统设置已从纯前端占位页升级为真实的 KV 配置中心
+- `app/db/models.py` 中新增 `SystemSetting` 模型，包含 `key`、`value`、`category`、`description`
+- `app/services/system_settings.py` 负责配置项目录、默认值播种、类型校验、分组响应与更新逻辑
+- `GET /api/v1/admin/settings` 会按 `basic / token / security / notification` 分组返回真实配置
+- `PUT /api/v1/admin/settings` 会写入数据库，并生成 `update_system_settings` 审计日志
+- 审计日志中的系统设置变更会携带 `changed_keys` 与结构化 `changes`，便于前端渲染 Diff
+- `new_user_bonus`、`session_timeout_minutes`、`ip_whitelist_enabled`、`ip_whitelist_ips` 等可运维基线都统一归口到该配置中心
+- 安全相关配置会通过 `app/core/security.py` 做进程内缓存，避免每次后台请求都直查数据库
+
+### 7.19 审计日志详情抽屉
+
+- 审计日志列表的每一行都提供“查看详情”入口
+- 右侧详情抽屉会展示完整审计载荷
+- 对于 `update_system_settings` 事件，抽屉会按 `details.changes` 渲染红删绿增的差异视图
+- 对于其他事件，抽屉会用格式化 JSON 展示原始审计详情，方便排查后台治理动作
+
+### 7.20 系统通知中心与待办预警
+
+- `app/db/models.py` 中新增 `SystemNotification` 模型，负责承接后台消息流
+- `GET /api/v1/admin/notifications` 返回最新通知与未读数量，`PUT /api/v1/admin/notifications/read_all` 支持一键已读
+- 系统设置保存、系统设置回滚等高风险后台动作会同步写入通知中心
+- `GET /api/v1/admin/dashboard/pending-tasks` 会聚合真实业务状态，目前至少包含：
+  - `abnormal_users`
+  - `storage_warnings`
+- `AdminLayout` 已接入右上角铃铛与左下角待办卡片：
+  - 铃铛展示最新 `5` 条通知与未读徽标
+  - 待办卡片按角色权限跳转到 `/users?status=frozen` 或 `/storage`
+
+### 7.21 存储治理真实化
+
+- 存储治理页已不再使用假数据，改为读取 `UploadRecord` 聚合结果
+- `GET /api/v1/admin/storage/stats` 会返回：
+  - `total_bytes`
+  - `capacity_bytes`
+  - `distribution.image / video / audio / document / other`
+- `GET /api/v1/admin/storage/users` 会按用户聚合：
+  - 文件总大小
+  - 文件数量
+  - 最近上传时间
+- 前端会统一用字节格式化函数显示 `KB / MB / GB / TB`
+- 当前排行榜接口默认 `limit=10`
+
+### 7.22 系统设置回滚链路
+
+- `POST /api/v1/admin/settings/rollback/{audit_log_id}` 已支持从系统设置审计快照执行一键回滚
+- 回滚逻辑会：
+  - 校验审计记录类型
+  - 提取旧值
+  - 更新 `SystemSetting`
+  - 写入新的 `rollback_system_settings` 审计日志
+  - 同步写入系统通知
+- 前端审计详情抽屉已接入“危险区”回滚按钮，并带二次确认弹窗
+- 回滚与审计写入在同一事务内完成，避免只回滚配置、不写审计的状态撕裂
+
+### 7.23 后台搜索入口收敛
+
+- 后台顶部 Header 全局搜索框已移除，避免跨模块状态同步继续膨胀
+- 审计日志页已恢复为“仅使用高级筛选抽屉”的单入口模型，不再叠加第二个文本搜索框
+- `omnimedia-admin-web/src/components/common/StandardSearchInput.tsx` 作为后台标准局部搜索组件，当前用于：
+  - 用户中心
+  - Token 流水
+  - 模板库
+- 该组件负责：
+  - 本地输入缓冲
+  - 防抖写回 URL
+  - 外部 URL 反向同步
+  - 一键清空并回表
+- 模板库搜索框已收敛为固定宽度工具栏控件，不再挤压 Tab 区
+
+### 7.24 C 端模板中心分页与卡片稳定性
+
+- C 端模板中心当前按 `page_size=9` 进行 3x3 分页展示
+- 翻页时不再清空旧卡片，而是保留原有 DOM，并叠加局部毛玻璃加载态
+- 模板网格使用 `content-start`，最后一页不足 `9` 条时不会再把卡片纵向拉伸
+- 卡片外层已统一为 `h-full + flex-col`，同一行保持整齐对齐
+- `getTemplateSourceLabel` 当前只负责把模板来源映射为可读中文：
+  - `本地预置`
+  - `团队共享`
+  - `我的模板`
+
 ## 8. 后端边界与分层规则
 
 ### 8.1 路由分组
@@ -485,6 +570,10 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - `oss.py`
 - `admin_users.py`
 - `admin_dashboard.py`
+- `admin_storage.py`
+- `admin_settings.py`
+- `admin_notifications.py`
+- `admin_search.py`
 - `admin_tokens.py`
 - `admin_templates.py`
 - `admin_audit_logs.py`
@@ -497,6 +586,13 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - `app/models/` 负责 Pydantic Schema 与 API 契约
 
 避免把复杂数据库逻辑和跨模块业务逻辑长期堆积在路由层。
+
+### 8.3 配置中心分层约束
+
+- 需要运营可调的商业化、安全或通知类基线，不应继续写死在路由处理函数中
+- 这类动态基线应优先落到 `SystemSetting`
+- 普通业务流程通过 `app/services/system_settings.py` 读取强类型配置
+- 中间件、Token 过期时间、IP 白名单等高频安全链路通过 `app/core/security.py` 读取缓存快照
 
 ## 9. 核心接口概览
 
@@ -559,8 +655,17 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - `DELETE /api/v1/admin/templates`
 - `GET /api/v1/admin/roles/summary`
 - `GET /api/v1/admin/dashboard`
+- `GET /api/v1/admin/storage/stats`
+- `GET /api/v1/admin/storage/users`
 - `GET /api/v1/admin/transactions`
 - `GET /api/v1/admin/transactions/stats`
+- `GET /api/v1/admin/notifications`
+- `PUT /api/v1/admin/notifications/read_all`
+- `GET /api/v1/admin/dashboard/pending-tasks`
+- `GET /api/v1/admin/global-search`
+- `GET /api/v1/admin/settings`
+- `PUT /api/v1/admin/settings`
+- `POST /api/v1/admin/settings/rollback/{audit_log_id}`
 - `GET /api/v1/admin/audit-logs`
 - `GET /api/v1/admin/audit-logs/export`
 
@@ -575,6 +680,21 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 若改动 `omnimedia-admin-web/`：执行 `npm run build`
 - 若改动 Schema：检查前后端契约兼容性
 - 若改动数据库写路径：重点检查 `SQLite` 事务释放与只读接口响应
+- 若改动 ORM 或 Alembic 迁移：发布前必须执行 `alembic upgrade head`
+- 历史迁移修补必须保持幂等，不要假设旧表、旧列或旧索引一定存在
+- 推荐迁移冒烟命令：
+
+```powershell
+$env:DATABASE_URL = "sqlite:///./tmp_migration_smoke.db"
+alembic upgrade head
+Remove-Item .\tmp_migration_smoke.db
+```
+
+- 若改动认证、系统设置或后台安全中间件，推荐优先执行：
+
+```powershell
+python -m pytest tests/test_chat.py -k "auth_register_and_login or admin_settings_update_bonus_affects_register_and_admin_provisioning or admin_settings_security_controls_apply_dynamic_expiry_and_ip_whitelist"
+```
 
 ### 10.2 后台治理与 RBAC 验证
 
@@ -617,6 +737,22 @@ C 端本地模板中心也同步补齐了生命周期能力：
 14. 打开审计日志页，确认：
    - 默认分页固定为每页 `5` 条
    - 翻页、筛选和详情查看不会导致总数或分页状态错乱
+   - `update_system_settings` 日志能在右侧抽屉里看到红删绿增的 Diff
+   - 其他日志类型会在同一抽屉中展示格式化 JSON
+15. 打开系统设置并修改任意一项配置，确认：
+   - 保存后铃铛消息中心会新增一条通知
+   - 审计日志会出现 `update_system_settings`
+   - 在详情抽屉里可以看到 Diff
+16. 对同一条系统设置审计执行“一键回滚”，确认：
+   - 配置值恢复
+   - 生成 `rollback_system_settings` 审计记录
+   - 铃铛消息中心出现回滚通知
+17. 打开存储治理页，确认：
+   - 总量、分布、排行榜来自真实聚合接口
+   - 文件大小以 `KB / MB / GB / TB` 形式展示，而不是原始字节数
+18. 分别打开用户中心、Token 流水和模板库，确认：
+   - 本地搜索框支持清空与 URL 同步
+   - 模板库搜索框保持固定宽度，不会挤压左侧 Tab 栏
 
 ### 10.3 计费与多模态验证
 
@@ -640,7 +776,7 @@ C 端本地模板中心也同步补齐了生命周期能力：
 示例：
 
 ```text
-feat: enforce role-aware admin workspaces and aggregate live role membership
+feat: 打通系统设置回滚链路与后台治理工作台
 ```
 
 如果一次提交同时包含功能代码和文档更新，请优先根据“主要变更内容”选择类型；像本次这类代码与文档同步演进的更新，使用 `feat:` 最合适。

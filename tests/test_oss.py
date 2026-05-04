@@ -35,6 +35,24 @@ def register_user(
     return {"Authorization": f"Bearer {token}"}, payload["user"]
 
 
+def register_admin_user(
+    client: TestClient,
+    session_factory,
+    *,
+    username: str,
+    password: str = "super-secret-123",
+) -> tuple[dict[str, str], dict[str, object]]:
+    headers, user = register_user(client, username=username, password=password)
+
+    with session_factory() as db:
+        user_record = db.scalar(select(User).where(User.id == user["id"]))
+        assert user_record is not None
+        user_record.role = "admin"
+        db.commit()
+
+    return headers, user
+
+
 @pytest.fixture()
 def uploads_dir(
     tmp_path: Path,
@@ -102,6 +120,129 @@ def test_upload_retention_summary_requires_authentication(client: TestClient):
     response = client.get("/api/v1/media/retention")
 
     assert response.status_code == 401
+
+
+def test_admin_storage_endpoints_require_admin_role(
+    client: TestClient,
+):
+    headers, _ = register_user(client, username="alice-storage-forbidden")
+
+    stats_response = client.get("/api/v1/admin/storage/stats", headers=headers)
+    users_response = client.get("/api/v1/admin/storage/users", headers=headers)
+
+    assert stats_response.status_code == 403
+    assert users_response.status_code == 403
+
+
+def test_admin_storage_stats_and_user_leaderboard_use_real_upload_records(
+    client: TestClient,
+    session_factory,
+):
+    headers, _ = register_admin_user(client, session_factory, username="admin-storage")
+    _, alice = register_user(client, username="alice-storage")
+    _, bob = register_user(client, username="bob-storage")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    with session_factory() as db:
+        db.add_all(
+            [
+                UploadRecord(
+                    user_id=str(alice["id"]),
+                    filename="cover.png",
+                    file_path=f"oss://uploads/{alice['id']}/cover.png",
+                    mime_type="image/png",
+                    file_size=1024,
+                    purpose="material",
+                    thread_id="thread-storage-alice",
+                    created_at=now - timedelta(hours=4),
+                ),
+                UploadRecord(
+                    user_id=str(alice["id"]),
+                    filename="clip.mp4",
+                    file_path=f"oss://uploads/{alice['id']}/clip.mp4",
+                    mime_type="video/mp4",
+                    file_size=5 * 1024,
+                    purpose="material",
+                    thread_id="thread-storage-alice",
+                    created_at=now - timedelta(hours=3),
+                ),
+                UploadRecord(
+                    user_id=str(alice["id"]),
+                    filename="brief.pdf",
+                    file_path=f"oss://uploads/{alice['id']}/brief.pdf",
+                    mime_type="application/pdf",
+                    file_size=2 * 1024,
+                    purpose="material",
+                    thread_id="thread-storage-alice",
+                    created_at=now - timedelta(hours=2),
+                ),
+                UploadRecord(
+                    user_id=str(bob["id"]),
+                    filename="photo.jpg",
+                    file_path=f"oss://uploads/{bob['id']}/photo.jpg",
+                    mime_type="image/jpeg",
+                    file_size=512,
+                    purpose="material",
+                    thread_id="thread-storage-bob",
+                    created_at=now - timedelta(minutes=70),
+                ),
+                UploadRecord(
+                    user_id=str(bob["id"]),
+                    filename="podcast.mp3",
+                    file_path=f"oss://uploads/{bob['id']}/podcast.mp3",
+                    mime_type="audio/mpeg",
+                    file_size=256,
+                    purpose="material",
+                    thread_id="thread-storage-bob",
+                    created_at=now - timedelta(minutes=50),
+                ),
+                UploadRecord(
+                    user_id=str(bob["id"]),
+                    filename="archive.zip",
+                    file_path=f"oss://uploads/{bob['id']}/archive.zip",
+                    mime_type="application/zip",
+                    file_size=128,
+                    purpose="material",
+                    thread_id="thread-storage-bob",
+                    created_at=now - timedelta(minutes=40),
+                ),
+            ]
+        )
+        db.commit()
+
+    stats_response = client.get("/api/v1/admin/storage/stats", headers=headers)
+
+    assert stats_response.status_code == 200
+    stats_payload = stats_response.json()
+    assert stats_payload["total_bytes"] == 9088
+    assert stats_payload["capacity_bytes"] == 1024 ** 4
+    assert stats_payload["distribution"] == {
+        "image": 1536,
+        "video": 5120,
+        "audio": 256,
+        "document": 2048,
+        "other": 128,
+    }
+
+    users_response = client.get("/api/v1/admin/storage/users?limit=2", headers=headers)
+
+    assert users_response.status_code == 200
+    users_payload = users_response.json()
+    assert users_payload["limit"] == 2
+    assert [item["username"] for item in users_payload["items"]] == [
+        "alice-storage",
+        "bob-storage",
+    ]
+    assert users_payload["items"][0]["total_size_bytes"] == 8192
+    assert users_payload["items"][0]["file_count"] == 3
+    assert datetime.fromisoformat(users_payload["items"][0]["last_upload_time"]) == (
+        now - timedelta(hours=2)
+    )
+    assert users_payload["items"][1]["total_size_bytes"] == 896
+    assert users_payload["items"][1]["file_count"] == 3
+    assert datetime.fromisoformat(users_payload["items"][1]["last_upload_time"]) == (
+        now - timedelta(minutes=40)
+    )
 
 
 def test_upload_media_tracks_avatar_record_metadata(

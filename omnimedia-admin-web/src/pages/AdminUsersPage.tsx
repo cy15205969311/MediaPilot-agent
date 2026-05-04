@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Coins,
@@ -11,13 +11,13 @@ import {
   MoreVertical,
   Plus,
   RefreshCw,
-  Search,
   ShieldAlert,
   ShieldCheck,
   Trash2,
   UserCog,
   X,
 } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 
 import {
   APIError,
@@ -30,6 +30,10 @@ import {
   updateAdminUserStatus,
   updateAdminUserTokens,
 } from "../api";
+import {
+  StandardSearchInput,
+  type StandardSearchInputHandle,
+} from "../components/common/StandardSearchInput";
 import { UserAvatar } from "../components/UserAvatar";
 import type {
   AdminTokenAdjustAction,
@@ -39,6 +43,7 @@ import type {
   AdminUsersApiResponse,
   AuthenticatedUser,
   UserRole,
+  UserStatus,
 } from "../types";
 import {
   formatDate,
@@ -118,6 +123,10 @@ const ROLE_ASSIGNMENT_OPTIONS: Array<{
     permissionHint: "保留高级用户身份与业务侧权益展示。",
   },
 ];
+
+function getStatusFilterForTab(tab: UserFilterTab): UserStatus | undefined {
+  return tab === "frozen" ? "frozen" : undefined;
+}
 
 function getUserDisplayName(user: Pick<AdminUserItem, "nickname" | "username">): string {
   return user.nickname?.trim() || user.username;
@@ -372,17 +381,20 @@ function getLatestActivityHint(user: Pick<AdminUserItem, "latest_session">): str
 
 export function AdminUsersPage(props: AdminUsersPageProps) {
   const { currentUser, onToast } = props;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialSearchTerm = searchParams.get("search")?.trim() ?? "";
   const [usersPayload, setUsersPayload] = useState<AdminUsersApiResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<UserFilterTab>("all");
+  const [activeTab, setActiveTab] = useState<UserFilterTab>(
+    searchParams.get("status") === "frozen" ? "frozen" : "all",
+  );
   const [actionMenu, setActionMenu] = useState<UserActionMenuState>(null);
-  const [searchInput, setSearchInput] = useState("");
-  const [debouncedSearchInput, setDebouncedSearchInput] = useState("");
-  const [searchKeyword, setSearchKeyword] = useState("");
+  const [searchKeyword, setSearchKeyword] = useState(initialSearchTerm);
+  const searchInputRef = useRef<StandardSearchInputHandle | null>(null);
   const [skip, setSkip] = useState(0);
   const [tokenModalUser, setTokenModalUser] = useState<AdminUserItem | null>(null);
   const [tokenAction, setTokenAction] = useState<AdminTokenAdjustAction>("add");
@@ -404,6 +416,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const items = usersPayload?.items ?? [];
   const canGovernUserAccounts = canManageUserAccounts(currentUser);
   const canCreateUsers = canProvisionUsers(currentUser);
+  const activeStatusFilter = getStatusFilterForTab(activeTab);
   const currentPage = Math.floor(skip / DEFAULT_PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil(total / DEFAULT_PAGE_SIZE));
   const selectedUser = items.find((item) => item.id === selectedUserId) ?? null;
@@ -477,6 +490,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const loadUsers = async (options?: {
     skip?: number;
     search?: string;
+    status?: UserStatus;
   }) => {
     setIsLoading(true);
 
@@ -485,6 +499,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
         skip: options?.skip ?? skip,
         limit: DEFAULT_PAGE_SIZE,
         search: options?.search ?? searchKeyword,
+        status: options?.status ?? activeStatusFilter,
       });
       setUsersPayload(payload);
       return payload;
@@ -507,25 +522,18 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
 
   useEffect(() => {
     void loadUsers();
-  }, [skip, searchKeyword]);
+  }, [skip, searchKeyword, activeStatusFilter]);
 
   useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      setDebouncedSearchInput(searchInput);
-    }, 280);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [searchInput]);
-
-  useEffect(() => {
-    const normalizedKeyword = debouncedSearchInput.trim();
-    if (normalizedKeyword === searchKeyword) {
+    const nextStatus = searchParams.get("status");
+    if (nextStatus === "frozen" && activeTab !== "frozen") {
+      setActiveTab("frozen");
       return;
     }
-
-    setSkip(0);
-    setSearchKeyword(normalizedKeyword);
-  }, [debouncedSearchInput, searchKeyword]);
+    if (nextStatus !== "frozen" && activeTab === "frozen") {
+      setActiveTab("all");
+    }
+  }, [activeTab, searchParams]);
 
   useEffect(() => {
     if (provisionRoleOptions.some((option) => option.value === createForm.role)) {
@@ -765,10 +773,13 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
       if (skip === 0 && !searchKeyword.trim()) {
         await loadUsers({ skip: 0, search: "" });
       } else {
-        setSearchInput("");
-        setDebouncedSearchInput("");
         setSearchKeyword("");
         setSkip(0);
+        setSearchParams((current) => {
+          const next = new URLSearchParams(current);
+          next.delete("search");
+          return next;
+        });
       }
 
       onToast({
@@ -827,10 +838,23 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     setDeleteUserTarget(null);
   };
 
-  const handleSearchSubmit = () => {
-    setDebouncedSearchInput(searchInput);
+  const handleSearchChange = (nextValue: string) => {
     setSkip(0);
-    setSearchKeyword(searchInput.trim());
+    setSearchKeyword((current) => (current === nextValue ? current : nextValue));
+  };
+
+  const handleTabChange = (nextTab: UserFilterTab) => {
+    setActiveTab(nextTab);
+    setSkip(0);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextTab === "frozen") {
+        next.set("status", "frozen");
+      } else {
+        next.delete("status");
+      }
+      return next;
+    });
   };
 
   const handleToggleStatus = async (user: AdminUserItem) => {
@@ -1218,24 +1242,16 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
         </div>
 
         <div className="mb-6 flex flex-wrap gap-3">
-          <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-            <Search className="h-4 w-4 text-slate-400" />
-            <input
-              className="w-52 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"
-              onChange={(event) => setSearchInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  handleSearchSubmit();
-                }
-              }}
-              placeholder="搜索用户名或昵称"
-              value={searchInput}
-            />
-          </label>
+          <StandardSearchInput
+            ref={searchInputRef}
+            className="w-full sm:w-auto sm:min-w-[280px]"
+            onSearchChange={handleSearchChange}
+            placeholder="搜索用户名或昵称"
+          />
 
           <button
             className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-600 shadow-sm transition hover:border-red-200 hover:bg-red-50"
-            onClick={handleSearchSubmit}
+            onClick={() => searchInputRef.current?.submit()}
             type="button"
           >
             <Filter className="h-4 w-4" />
@@ -1261,7 +1277,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
                   ? "whitespace-nowrap rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-500"
                   : "whitespace-nowrap rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600"
               }
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => handleTabChange(tab.key)}
               type="button"
             >
               {tab.label} ({formatNumber(tab.count)})
@@ -1828,7 +1844,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
               </section>
 
               <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3.5 text-sm leading-6 text-amber-900">
-                💡 提示：系统将根据分配的角色，自动为其发放 10,000,000 Token 的初始资产或赋予无限额度，并同步写入审计流水。
+                💡 提示：系统将根据分配的角色，自动读取当前系统设置中的新用户初始资产或赋予无限额度，并同步写入审计流水。
               </section>
               </div>
             </div>

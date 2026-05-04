@@ -23,6 +23,27 @@ export function formatNumber(value: number): string {
   return numberFormatter.format(value);
 }
 
+export function formatBytes(bytes: number, fractionDigits = 2): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  if (unitIndex === 0) {
+    return `${Math.round(value)} ${units[unitIndex]}`;
+  }
+
+  return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`;
+}
+
 export function formatDate(value?: string | null): string {
   if (!value) {
     return "暂无";

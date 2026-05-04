@@ -3,7 +3,7 @@ import { Activity, AlertTriangle, FileText, HardDrive, Users } from "lucide-reac
 
 import { APIError, fetchAdminDashboardSummary } from "../api";
 import type { AdminDashboardData, AdminToast } from "../types";
-import { formatNumber } from "../utils/format";
+import { formatBytes, formatNumber } from "../utils/format";
 
 type AdminDashboardPageProps = {
   onToast: (toast: AdminToast) => void;
@@ -36,23 +36,6 @@ function formatCompactValue(value: number): string {
     return `${(value / 1_000).toFixed(1)}K`;
   }
   return formatNumber(value);
-}
-
-function formatStorageSize(bytes: number): string {
-  if (bytes <= 0) {
-    return "0 B";
-  }
-
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unitIndex = 0;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${value.toFixed(value >= 100 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function MetricCardSkeleton() {
@@ -181,7 +164,7 @@ export function AdminDashboardPage(props: AdminDashboardPageProps) {
       },
       {
         label: "OSS 存储",
-        value: dashboard ? formatStorageSize(dashboard.oss_storage_bytes) : "--",
+        value: dashboard ? formatBytes(dashboard.oss_storage_bytes) : "--",
         hint: "当前上传文件总量",
         icon: HardDrive,
         color: theme.warning,
@@ -195,11 +178,11 @@ export function AdminDashboardPage(props: AdminDashboardPageProps) {
       return [];
     }
 
-    const items = [
-      `近 30 天累计记录 ${formatNumber(
-        dashboard.trend_30_days.reduce((sum, item) => sum + item.token_count, 0),
-      )} Tokens，可用于观察系统整体消耗波动。`,
-      `当前上传存储总量为 ${formatStorageSize(
+      const items = [
+        `近 30 天累计记录 ${formatNumber(
+          dashboard.trend_30_days.reduce((sum, item) => sum + item.token_count, 0),
+        )} Tokens，可用于观察系统整体消耗波动。`,
+      `当前上传存储总量为 ${formatBytes(
         dashboard.oss_storage_bytes,
       )}，可结合生命周期清理策略持续优化成本。`,
     ];

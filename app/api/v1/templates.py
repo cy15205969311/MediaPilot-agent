@@ -34,6 +34,7 @@ BATCH_DELETE_NOT_FOUND_DETAIL = "Some templates do not exist or have already bee
 EMPTY_TEMPLATE_TITLE_DETAIL = "Template title cannot be empty."
 EMPTY_TEMPLATE_PROMPT_DETAIL = "Prompt content cannot be empty."
 EMPTY_TEMPLATE_UPDATE_DETAIL = "At least one update field is required."
+DEFAULT_TEMPLATE_PAGE_SIZE = 9
 
 
 def _serialize_template(template: Template) -> TemplateListItem:
@@ -78,6 +79,76 @@ def _list_visible_templates(db: Session, user_id: str) -> list[Template]:
         reverse=True,
     )
     return [*preset_templates, *shared_custom_templates, *personal_custom_templates]
+
+
+def _normalize_template_search(value: str | None) -> str:
+    if value is None:
+        return ""
+    return value.strip().lower()
+
+
+def _matches_template_search(template: Template, normalized_search: str) -> bool:
+    if not normalized_search:
+        return True
+
+    searchable_parts = [
+        template.title,
+        template.description,
+        template.platform,
+        template.category,
+        template.system_prompt,
+        template.knowledge_base_scope or "",
+    ]
+    return normalized_search in " ".join(searchable_parts).lower()
+
+
+def _filter_templates(
+    templates: list[Template],
+    *,
+    search: str | None,
+    category: TemplateCategory | None,
+) -> list[Template]:
+    normalized_search = _normalize_template_search(search)
+    filtered_templates: list[Template] = []
+
+    for template in templates:
+        if category is not None and template.category != category.value:
+            continue
+        if not _matches_template_search(template, normalized_search):
+            continue
+        filtered_templates.append(template)
+
+    return filtered_templates
+
+
+def _apply_view_mode(
+    templates: list[Template],
+    view_mode: str,
+) -> list[Template]:
+    if view_mode == "preset":
+        return [template for template in templates if template.is_preset]
+    if view_mode == "custom":
+        return [template for template in templates if not template.is_preset]
+    return templates
+
+
+def _paginate_templates(
+    templates: list[Template],
+    *,
+    page: int | None,
+    page_size: int | None,
+) -> tuple[list[Template], int, int, int]:
+    if page is None and page_size is None:
+        resolved_page = 1
+        resolved_page_size = len(templates)
+        return templates, resolved_page, resolved_page_size, 1
+
+    resolved_page_size = page_size or DEFAULT_TEMPLATE_PAGE_SIZE
+    total_pages = max(1, (len(templates) + resolved_page_size - 1) // resolved_page_size)
+    resolved_page = min(page or 1, total_pages)
+    start_index = (resolved_page - 1) * resolved_page_size
+    end_index = start_index + resolved_page_size
+    return templates[start_index:end_index], resolved_page, resolved_page_size, total_pages
 
 
 def _get_mutable_template(
@@ -129,13 +200,39 @@ def _apply_template_updates(template: Template, payload: TemplateUpdateRequest) 
 
 @router.get("/templates", response_model=TemplateListResponse)
 async def list_templates(
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=50),
+    search: str | None = Query(default=None, max_length=120),
+    category: TemplateCategory | None = Query(default=None),
+    view_mode: str = Query(default="all", pattern="^(all|preset|custom)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> TemplateListResponse:
     ensure_preset_templates(db)
-    templates = _list_visible_templates(db, current_user.id)
-    items = [_serialize_template(item) for item in templates]
-    return TemplateListResponse(items=items, total=len(items))
+    visible_templates = _list_visible_templates(db, current_user.id)
+    filtered_templates = _filter_templates(
+        visible_templates,
+        search=search,
+        category=category,
+    )
+    preset_total = sum(1 for item in filtered_templates if item.is_preset)
+    custom_total = len(filtered_templates) - preset_total
+    view_filtered_templates = _apply_view_mode(filtered_templates, view_mode)
+    paginated_templates, resolved_page, resolved_page_size, total_pages = _paginate_templates(
+        view_filtered_templates,
+        page=page,
+        page_size=page_size,
+    )
+    items = [_serialize_template(item) for item in paginated_templates]
+    return TemplateListResponse(
+        items=items,
+        total=len(view_filtered_templates),
+        page=resolved_page,
+        page_size=resolved_page_size,
+        total_pages=total_pages,
+        preset_total=preset_total,
+        custom_total=custom_total,
+    )
 
 
 @router.post("/templates", response_model=TemplateListItem, status_code=status.HTTP_201_CREATED)

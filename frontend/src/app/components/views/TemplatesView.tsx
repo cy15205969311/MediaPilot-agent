@@ -20,12 +20,13 @@ import type {
   KnowledgeScopeItem,
   TemplateCategory,
   TemplateCreatePayload,
+  TemplateListQuery,
   TemplatePlatform,
   TemplateSummaryItem,
+  TemplateViewMode,
 } from "../../types";
 
-type TemplateCategoryFilter = "全部" | TemplateCategory;
-type TemplateViewMode = "all" | "preset" | "custom";
+type TemplateCategoryFilter = "all" | TemplateCategory;
 
 type TemplateCreationRequest = {
   key: number;
@@ -35,15 +36,25 @@ type TemplateCreationRequest = {
 type TemplatesViewProps = {
   templates: TemplateSummaryItem[];
   isLoading: boolean;
+  isPageFetching: boolean;
   isMutating: boolean;
   mutatingTemplateId: string | null;
   selectedTemplateId: string | null;
+  currentPage: number;
+  totalPages: number;
+  totalTemplates: number;
+  presetTotal: number;
+  customTotal: number;
+  querySearch: string;
+  queryCategory: TemplateCategory | null;
+  queryViewMode: TemplateViewMode;
   creationRequest: TemplateCreationRequest | null;
   onCreationRequestHandled: () => void;
   onUseTemplate: (template: TemplateSummaryItem) => void;
   onCreateTemplate: (payload: TemplateCreatePayload) => Promise<TemplateSummaryItem | null>;
   onDeleteTemplate: (template: TemplateSummaryItem) => Promise<boolean>;
   onDeleteTemplates: (templateIds: string[]) => Promise<boolean>;
+  onQueryChange: (patch: Partial<TemplateListQuery>) => void;
 };
 
 type TemplateFormState = {
@@ -56,7 +67,7 @@ type TemplateFormState = {
 };
 
 const categoryTabs: Array<{ id: TemplateCategoryFilter; label: string }> = [
-  { id: "全部", label: "全部" },
+  { id: "all", label: "全部" },
   { id: "美妆护肤", label: "美妆护肤" },
   { id: "美食文旅", label: "美食文旅" },
   { id: "职场金融", label: "职场金融" },
@@ -199,24 +210,6 @@ function normalizeSearchValue(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function matchesSearch(template: TemplateSummaryItem, normalizedSearch: string): boolean {
-  if (!normalizedSearch) {
-    return true;
-  }
-
-  return [
-    template.title,
-    template.description,
-    template.platform,
-    template.category,
-    template.system_prompt,
-    template.knowledge_base_scope ?? "",
-  ]
-    .join(" ")
-    .toLowerCase()
-    .includes(normalizedSearch);
-}
-
 function isSharedTemplate(template: TemplateSummaryItem): boolean {
   return template.is_shared === true;
 }
@@ -227,32 +220,67 @@ function isDeletableTemplate(template: TemplateSummaryItem): boolean {
 
 function getTemplateSourceLabel(template: TemplateSummaryItem): string {
   if (template.is_preset) {
-    return "鏈湴棰勭疆";
+    return "本地预置";
   }
   if (isSharedTemplate(template)) {
-    return "鍥㈤槦鍏变韩";
+    return "团队共享";
   }
-  return "鎴戠殑妯℃澘";
+  return "我的模板";
+}
+
+function buildPaginationItems(currentPage: number, totalPages: number): Array<number | string> {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+
+  const items: Array<number | string> = [1];
+  const windowStart = Math.max(2, currentPage - 1);
+  const windowEnd = Math.min(totalPages - 1, currentPage + 1);
+
+  if (windowStart > 2) {
+    items.push("ellipsis-left");
+  }
+
+  for (let page = windowStart; page <= windowEnd; page += 1) {
+    items.push(page);
+  }
+
+  if (windowEnd < totalPages - 1) {
+    items.push("ellipsis-right");
+  }
+
+  items.push(totalPages);
+  return items;
 }
 
 export function TemplatesView(props: TemplatesViewProps) {
   const {
     templates,
     isLoading,
+    isPageFetching,
     isMutating,
     mutatingTemplateId,
     selectedTemplateId,
+    currentPage,
+    totalPages,
+    totalTemplates,
+    presetTotal,
+    customTotal,
+    querySearch,
+    queryCategory,
+    queryViewMode,
     creationRequest,
     onCreationRequestHandled,
     onUseTemplate,
     onCreateTemplate,
     onDeleteTemplate,
     onDeleteTemplates,
+    onQueryChange,
   } = props;
 
-  const [activeCategory, setActiveCategory] = useState<TemplateCategoryFilter>("全部");
-  const [viewMode, setViewMode] = useState<TemplateViewMode>("all");
-  const [searchValue, setSearchValue] = useState("");
+  const activeCategory: TemplateCategoryFilter = queryCategory ?? "all";
+  const viewMode = queryViewMode;
+  const [searchValue, setSearchValue] = useState(querySearch);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [formState, setFormState] = useState<TemplateFormState>(initialFormState);
@@ -261,6 +289,7 @@ export function TemplatesView(props: TemplatesViewProps) {
   const [scopeFetchError, setScopeFetchError] = useState("");
   const [scopeSearchQuery, setScopeSearchQuery] = useState("");
   const [isScopeDropdownOpen, setIsScopeDropdownOpen] = useState(false);
+  const [animationVersion, setAnimationVersion] = useState(0);
   const scopeComboboxRef = useRef<HTMLDivElement | null>(null);
 
   const isCreating = isMutating && mutatingTemplateId === "template-create";
@@ -272,6 +301,14 @@ export function TemplatesView(props: TemplatesViewProps) {
         .map((template) => template.id),
     );
     setSelectedIds((current) => current.filter((id) => availableIds.has(id)));
+  }, [templates]);
+
+  useEffect(() => {
+    setSearchValue((current) => (current === querySearch ? current : querySearch));
+  }, [querySearch]);
+
+  useEffect(() => {
+    setAnimationVersion((current) => current + 1);
   }, [templates]);
 
   useEffect(() => {
@@ -338,26 +375,23 @@ export function TemplatesView(props: TemplatesViewProps) {
     };
   }, [isScopeDropdownOpen]);
 
-  const filteredTemplates = useMemo(() => {
-    const normalizedSearch = normalizeSearchValue(searchValue);
-    return templates.filter((template) => {
-      const matchesCategory =
-        activeCategory === "全部" ? true : template.category === activeCategory;
-      const matchesViewMode =
-        viewMode === "all"
-          ? true
-          : viewMode === "preset"
-            ? template.is_preset === true
-            : template.is_preset === false;
-      return matchesCategory && matchesSearch(template, normalizedSearch) && matchesViewMode;
-    });
-  }, [activeCategory, searchValue, templates, viewMode]);
+  useEffect(() => {
+    if (searchValue.trim() === querySearch) {
+      return;
+    }
 
-  const presetCount = useMemo(
-    () => templates.filter((template) => template.is_preset).length,
-    [templates],
-  );
-  const customCount = templates.length - presetCount;
+    const timeoutId = window.setTimeout(() => {
+      onQueryChange({
+        search: searchValue.trim(),
+        page: 1,
+      });
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [onQueryChange, searchValue]);
+
   const isBulkDeleting = isMutating && mutatingTemplateId === "template-bulk";
   const filteredScopes = useMemo(() => {
     const normalizedQuery = normalizeSearchValue(scopeSearchQuery);
@@ -386,6 +420,11 @@ export function TemplatesView(props: TemplatesViewProps) {
         ? "您还没有创建专属模板，去尝试存一个吧！也可以切换分类或搜索条件后再看看。"
         : "试着切换行业标签，或者放宽搜索词。你也可以直接新建模板，把自己的最佳 Prompt 沉淀到本地模板库。";
 
+  const paginationItems = useMemo(
+    () => buildPaginationItems(currentPage, totalPages),
+    [currentPage, totalPages],
+  );
+
   const openCreateModal = (payload?: Partial<TemplateCreatePayload>) => {
     setFormState(toFormState(payload));
     setScopeSearchQuery(payload?.knowledge_base_scope ?? "");
@@ -403,6 +442,27 @@ export function TemplatesView(props: TemplatesViewProps) {
     setScopeSearchQuery("");
     setScopeFetchError("");
     setIsScopeDropdownOpen(false);
+  };
+
+  const handleViewModeChange = (nextViewMode: TemplateViewMode) => {
+    onQueryChange({
+      view_mode: nextViewMode,
+      page: 1,
+    });
+  };
+
+  const handleCategoryChange = (nextCategory: TemplateCategoryFilter) => {
+    onQueryChange({
+      category: nextCategory === "all" ? null : nextCategory,
+      page: 1,
+    });
+  };
+
+  const handlePageChange = (nextPage: number) => {
+    if (nextPage < 1 || nextPage > totalPages || nextPage === currentPage) {
+      return;
+    }
+    onQueryChange({ page: nextPage });
   };
 
   const toggleSelected = (templateId: string) => {
@@ -436,8 +496,12 @@ export function TemplatesView(props: TemplatesViewProps) {
     }
 
     setSearchValue("");
-    setViewMode("custom");
-    setActiveCategory(payload.category);
+    onQueryChange({
+      search: "",
+      view_mode: "all",
+      category: payload.category,
+      page: 1,
+    });
     closeCreateModal();
   };
 
@@ -611,7 +675,7 @@ export function TemplatesView(props: TemplatesViewProps) {
                           : "bg-muted text-muted-foreground hover:bg-background hover:text-foreground"
                       }`}
                       data-testid={`template-view-mode-${tab.id}`}
-                      onClick={() => setViewMode(tab.id)}
+                      onClick={() => handleViewModeChange(tab.id)}
                       type="button"
                     >
                       {tab.label}
@@ -621,15 +685,16 @@ export function TemplatesView(props: TemplatesViewProps) {
               </div>
 
               <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                <span>本地模板 {templates.length} 张</span>
-                <span>官方预置 {presetCount} 张</span>
-                <span>我的模板 {customCount} 张</span>
+                <span>本地模板 {totalTemplates} 张</span>
+                <span>官方预置 {presetTotal} 张</span>
+                <span>我的模板 {customTotal} 张</span>
               </div>
             </div>
 
             <div className="flex flex-wrap gap-2">
               {categoryTabs.map((tab) => {
                 const isActive = tab.id === activeCategory;
+                const categoryTabTestId = tab.id === "all" ? tab.label : tab.id;
                 return (
                   <button
                     key={tab.id}
@@ -638,8 +703,8 @@ export function TemplatesView(props: TemplatesViewProps) {
                         ? "bg-primary text-primary-foreground shadow-sm"
                         : "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground"
                     }`}
-                    data-testid={`template-tab-${tab.id}`}
-                    onClick={() => setActiveCategory(tab.id)}
+                    data-testid={`template-tab-${categoryTabTestId}`}
+                    onClick={() => handleCategoryChange(tab.id)}
                     type="button"
                   >
                     {tab.label}
@@ -651,18 +716,18 @@ export function TemplatesView(props: TemplatesViewProps) {
         </div>
 
         {isLoading ? (
-          <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {Array.from({ length: 6 }).map((_, index) => (
+          <div className="mt-5 grid min-h-[800px] grid-cols-1 content-start gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 9 }).map((_, index) => (
               <div
                 key={`template-skeleton-${index}`}
-                className="min-h-72 animate-pulse rounded-[28px] border border-border bg-card p-5"
+                className="min-h-[240px] animate-pulse rounded-[28px] border border-border bg-card p-5"
               />
             ))}
           </div>
         ) : null}
 
-        {!isLoading && filteredTemplates.length === 0 ? (
-          <div className="mt-5 flex min-h-[320px] flex-col items-center justify-center rounded-[32px] border border-dashed border-border bg-card px-6 py-12 text-center">
+        {!isLoading && templates.length === 0 ? (
+          <div className="mt-5 flex min-h-[800px] flex-col items-center justify-center rounded-[32px] border border-dashed border-border bg-card px-6 py-12 text-center">
             <div className="flex h-20 w-20 items-center justify-center rounded-full bg-brand-soft text-brand">
               <BookOpen className="h-10 w-10" />
             </div>
@@ -675,9 +740,14 @@ export function TemplatesView(props: TemplatesViewProps) {
           </div>
         ) : null}
 
-        {!isLoading && filteredTemplates.length > 0 ? (
-          <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {filteredTemplates.map((template) => {
+        {!isLoading && templates.length > 0 ? (
+          <div className="relative mt-5">
+            <div
+              className={`grid min-h-[800px] grid-cols-1 content-start gap-6 transition-opacity duration-300 md:grid-cols-2 lg:grid-cols-3 ${
+                isPageFetching ? "opacity-60" : "opacity-100"
+              }`}
+            >
+              {templates.map((template, index) => {
               const isSelected = selectedIds.includes(template.id);
               const isRecentlyUsed = selectedTemplateId === template.id;
               const isDeleting = isMutating && mutatingTemplateId === template.id;
@@ -689,9 +759,10 @@ export function TemplatesView(props: TemplatesViewProps) {
 
               return (
                 <article
-                  key={template.id}
-                  className={`rounded-[28px] border bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand/30 hover:shadow-md ${cardClass}`}
+                  key={`${template.id}-${animationVersion}`}
+                  className={`template-gallery-card-enter flex h-full flex-col rounded-[28px] border bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand/30 hover:shadow-md ${cardClass}`}
                   data-testid={`template-card-${template.id}`}
+                  style={{ animationDelay: `${Math.min(index, 8) * 60}ms` }}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-3">
@@ -721,7 +792,7 @@ export function TemplatesView(props: TemplatesViewProps) {
                           ) : isSharedTemplate(template) ? (
                             <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2.5 py-1 text-[11px] font-medium text-secondary-foreground">
                               <BookOpen className="h-3.5 w-3.5" />
-                              Team Shared
+                              团队共享
                             </span>
                           ) : null}
                         </div>
@@ -742,30 +813,32 @@ export function TemplatesView(props: TemplatesViewProps) {
                     ) : null}
                   </div>
 
-                  <p className="mt-4 min-h-16 text-sm leading-6 text-muted-foreground">
-                    {template.description}
-                  </p>
-
-                  {template.knowledge_base_scope ? (
-                    <div className="mt-4 rounded-2xl border border-border bg-muted/60 px-4 py-3 text-xs text-muted-foreground">
-                      知识库：{template.knowledge_base_scope}
-                    </div>
-                  ) : null}
-
-                  <div className="mt-4 rounded-2xl border border-border bg-muted/60 p-4">
-                    <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                      Prompt 预览
-                    </div>
-                    <p className="line-clamp-6 text-sm leading-6 text-card-foreground">
-                      {template.system_prompt}
+                  <div className="flex flex-1 flex-col">
+                    <p className="mt-4 min-h-16 text-sm leading-6 text-muted-foreground">
+                      {template.description}
                     </p>
+
+                    {template.knowledge_base_scope ? (
+                      <div className="mt-4 rounded-2xl border border-border bg-muted/60 px-4 py-3 text-xs text-muted-foreground">
+                        知识库：{template.knowledge_base_scope}
+                      </div>
+                    ) : null}
+
+                    <div className="mt-4 rounded-2xl border border-border bg-muted/60 p-4">
+                      <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                        Prompt 预览
+                      </div>
+                      <p className="line-clamp-6 text-sm leading-6 text-card-foreground">
+                        {template.system_prompt}
+                      </p>
+                    </div>
                   </div>
 
                   <div className="mt-6 flex items-center justify-between gap-3">
                     <div className="text-xs text-muted-foreground">
                       {isRecentlyUsed
                         ? "最近已应用到新建会话"
-                        : `${template.is_preset ? "本地预置" : "我的模板"} · ${formatCreatedAtLabel(template.created_at)}`}
+                        : `${getTemplateSourceLabel(template)} · ${formatCreatedAtLabel(template.created_at)}`}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -798,7 +871,73 @@ export function TemplatesView(props: TemplatesViewProps) {
                   </div>
                 </article>
               );
-            })}
+              })}
+            </div>
+
+            {isPageFetching ? (
+              <div className="absolute inset-0 z-10 flex items-center justify-center rounded-[32px] bg-background/60 backdrop-blur-sm">
+                <div className="inline-flex items-center gap-2 rounded-full border border-brand/20 bg-card/90 px-4 py-2 text-sm font-medium text-brand shadow-sm">
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  正在更新模板
+                </div>
+              </div>
+            ) : null}
+
+            {totalPages > 1 ? (
+              <div className="mt-8 flex flex-col gap-4 rounded-[28px] border border-border/60 bg-card/70 px-5 py-4 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm text-muted-foreground">
+                  第 {currentPage} 页 / 共 {totalPages} 页
+                </div>
+
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-border px-4 text-sm font-medium text-muted-foreground transition hover:border-brand/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                    data-testid="template-pagination-prev"
+                    disabled={currentPage <= 1 || isPageFetching}
+                    onClick={() => handlePageChange(currentPage - 1)}
+                    type="button"
+                  >
+                    上一页
+                  </button>
+
+                  {paginationItems.map((item) =>
+                    typeof item === "number" ? (
+                      <button
+                        key={item}
+                        className={`inline-flex h-10 w-10 items-center justify-center rounded-full text-sm font-medium transition ${
+                          item === currentPage
+                            ? "bg-primary text-primary-foreground shadow-sm"
+                            : "text-muted-foreground hover:bg-brand-soft hover:text-foreground"
+                        }`}
+                        data-testid={`template-pagination-page-${item}`}
+                        disabled={isPageFetching}
+                        onClick={() => handlePageChange(item)}
+                        type="button"
+                      >
+                        {item}
+                      </button>
+                    ) : (
+                      <span
+                        key={item}
+                        className="inline-flex h-10 w-10 items-center justify-center text-sm text-muted-foreground"
+                      >
+                        ...
+                      </span>
+                    ),
+                  )}
+
+                  <button
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-border px-4 text-sm font-medium text-muted-foreground transition hover:border-brand/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                    data-testid="template-pagination-next"
+                    disabled={currentPage >= totalPages || isPageFetching}
+                    onClick={() => handlePageChange(currentPage + 1)}
+                    type="button"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

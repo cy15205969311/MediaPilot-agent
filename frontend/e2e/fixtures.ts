@@ -746,9 +746,68 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}) 
     }
 
     if (path === "/api/v1/media/templates" && request.method() === "GET") {
+      const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+      const category = url.searchParams.get("category");
+      const viewMode = url.searchParams.get("view_mode") ?? "all";
+      const requestedPage = Number(url.searchParams.get("page") ?? "1");
+      const requestedPageSize = Number(url.searchParams.get("page_size") ?? "0");
+
+      const filteredBySearchAndCategory = state.templates.filter((template) => {
+        if (category && template.category !== category) {
+          return false;
+        }
+
+        if (!search) {
+          return true;
+        }
+
+        return [
+          template.title,
+          template.description,
+          template.platform,
+          template.category,
+          template.system_prompt,
+          template.knowledge_base_scope ?? "",
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(search);
+      });
+
+      const presetTotal = filteredBySearchAndCategory.filter(
+        (template) => template.is_preset,
+      ).length;
+      const customTotal = filteredBySearchAndCategory.length - presetTotal;
+      const filteredTemplates =
+        viewMode === "preset"
+          ? filteredBySearchAndCategory.filter((template) => template.is_preset)
+          : viewMode === "custom"
+            ? filteredBySearchAndCategory.filter((template) => !template.is_preset)
+            : filteredBySearchAndCategory;
+
+      const pageSize =
+        Number.isFinite(requestedPageSize) && requestedPageSize > 0
+          ? requestedPageSize
+          : filteredTemplates.length || state.templates.length || 1;
+      const totalPages = Math.max(1, Math.ceil(filteredTemplates.length / pageSize));
+      const page =
+        Number.isFinite(requestedPage) && requestedPage > 0
+          ? Math.min(requestedPage, totalPages)
+          : 1;
+      const startIndex = (page - 1) * pageSize;
+      const items =
+        url.searchParams.has("page") || url.searchParams.has("page_size")
+          ? filteredTemplates.slice(startIndex, startIndex + pageSize)
+          : filteredTemplates;
+
       await fulfillJson(route, {
-        items: state.templates,
-        total: state.templates.length,
+        items,
+        total: filteredTemplates.length,
+        page,
+        page_size: pageSize,
+        total_pages: totalPages,
+        preset_total: presetTotal,
+        custom_total: customTotal,
       });
       return;
     }

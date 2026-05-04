@@ -6,6 +6,7 @@ import type {
   ChatStreamEvent,
   DashboardSummary,
   TemplateCreatePayload,
+  TemplateListQuery,
   TemplateDeleteApiResponse,
   TemplateDeletePayload,
   TemplateCategory,
@@ -1038,9 +1039,29 @@ export async function previewKnowledgeSource(
   return (await response.json()) as KnowledgeSourcePreviewApiResponse;
 }
 
-export async function fetchTemplates(): Promise<TemplatesApiResponse> {
+export async function fetchTemplates(
+  params?: Partial<TemplateListQuery>,
+): Promise<TemplatesApiResponse> {
+  const searchParams = new URLSearchParams();
+
+  if (params?.page !== undefined) {
+    searchParams.set("page", String(params.page));
+  }
+  if (params?.page_size !== undefined) {
+    searchParams.set("page_size", String(params.page_size));
+  }
+  if (params?.search?.trim()) {
+    searchParams.set("search", params.search.trim());
+  }
+  if (params?.category) {
+    searchParams.set("category", params.category);
+  }
+  if (params?.view_mode) {
+    searchParams.set("view_mode", params.view_mode);
+  }
+
   const response = await fetchWithInterceptor(
-    "/api/v1/media/templates",
+    `/api/v1/media/templates${searchParams.size > 0 ? `?${searchParams.toString()}` : ""}`,
     {
       method: "GET",
     },

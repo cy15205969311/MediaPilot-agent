@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 from app.db.models import ArtifactRecord, TokenTransaction, UploadRecord, User
 from app.models.schemas import (
     AdminDashboardModelUsageItem,
+    AdminPendingTasksResponse,
     AdminDashboardResponse,
     AdminDashboardTrendItem,
 )
+from app.services.admin_storage import read_storage_capacity_bytes
 from app.services.token_usage import (
     LEGACY_MODEL_NAME,
     UNTRACKED_HISTORICAL_MODEL_LABEL,
@@ -57,6 +59,27 @@ def build_admin_dashboard_summary(db: Session) -> AdminDashboardResponse:
         oss_storage_bytes=oss_storage_bytes,
         trend_30_days=trend_30_days,
         model_usage_ratio=model_usage_ratio,
+    )
+
+
+def build_admin_pending_tasks(db: Session) -> AdminPendingTasksResponse:
+    abnormal_users = int(
+        db.scalar(
+            select(func.count(User.id)).where(User.status != "active"),
+        )
+        or 0
+    )
+    total_storage_bytes = int(
+        db.scalar(select(func.coalesce(func.sum(UploadRecord.file_size), 0))) or 0
+    )
+    capacity_bytes = read_storage_capacity_bytes()
+    storage_warnings = int(
+        capacity_bytes > 0 and total_storage_bytes >= int(capacity_bytes * 0.9)
+    )
+
+    return AdminPendingTasksResponse(
+        abnormal_users=abnormal_users,
+        storage_warnings=storage_warnings,
     )
 
 

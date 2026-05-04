@@ -24,3 +24,25 @@ body {
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
+
+@keyframes template-card-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.template-gallery-card-enter {
+  animation: template-card-fade-in-up 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .template-gallery-card-enter {
+    animation: none;
+  }
+}

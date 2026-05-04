@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.security import get_access_token_expiry_minutes
 from app.db.database import get_db
 from app.db.models import TokenTransaction, User
 from app.models.schemas import (
@@ -56,10 +57,10 @@ from app.services.auth import (
 )
 from app.services.persistence import cleanup_orphaned_avatars
 from app.services.persistence import normalize_media_reference, resolve_media_reference
+from app.services.system_settings import get_int_system_setting, seed_default_system_settings
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
-REGISTER_GRANT_TOKENS = 10_000_000
 REGISTER_GRANT_REMARK = "新用户注册千万算力福利"
 
 
@@ -127,23 +128,26 @@ async def register(
     if get_user_by_username(db, username) is not None:
         raise HTTPException(status_code=409, detail="该用户名已存在，请更换后重试。")
 
+    seed_default_system_settings(db, commit=False)
+    register_grant_tokens = get_int_system_setting(db, "new_user_bonus", fallback=0)
     user = User(
         username=username,
         hashed_password=hash_password(password),
-        token_balance=REGISTER_GRANT_TOKENS,
+        token_balance=register_grant_tokens,
     )
     db.add(user)
 
     try:
         db.flush()
-        db.add(
-            TokenTransaction(
-                user_id=user.id,
-                amount=REGISTER_GRANT_TOKENS,
-                transaction_type="grant",
-                remark=REGISTER_GRANT_REMARK,
+        if register_grant_tokens > 0:
+            db.add(
+                TokenTransaction(
+                    user_id=user.id,
+                    amount=register_grant_tokens,
+                    transaction_type="grant",
+                    remark=REGISTER_GRANT_REMARK,
+                )
             )
-        )
         access_token, refresh_token = issue_token_pair(
             db,
             user_id=user.id,
@@ -415,11 +419,15 @@ async def revoke_session(
             user_id=current_user.id,
             session_id=session_id,
         )
+        access_token_expiry_minutes = get_access_token_expiry_minutes(
+            db,
+            default_minutes=JWT_ACCESS_EXPIRE_MINUTES,
+        )
         blacklist_access_token_jti(
             db,
             jti=session.latest_access_jti,
             expires_at=datetime.now(timezone.utc)
-            + timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
+            + timedelta(minutes=access_token_expiry_minutes),
         )
         db.commit()
     except SQLAlchemyError as exc:
