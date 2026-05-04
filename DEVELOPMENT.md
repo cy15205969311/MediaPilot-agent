@@ -1,6 +1,6 @@
 # MediaPilot Agent Development Guide
 
-Last updated: `2026-05-03`
+Last updated: `2026-05-04`
 
 `MediaPilot-agent` is the repository name. Runtime labels, API descriptions, and some legacy code paths may still reference `OmniMedia Agent`. Both names refer to the same product: a shared AI content platform that combines a creator workspace and an admin console.
 
@@ -287,11 +287,16 @@ The admin user center follows a stricter governance baseline:
 - the admin user list API returns `avatar_url` so the console can render real profile images
 - the admin search box uses debounced synchronization and restores the full list when the keyword is cleared
 - a shared `UserAvatar` component prefers the backend image URL and falls back to an initial badge when the image is missing or fails to load
+- the table is intentionally capped at `5` rows per page to stay aligned with the current admin design baseline
+- the list uses lighter role text badges, ID-first secondary metadata, and a compact `MoreVertical` action trigger instead of long inline button groups
 - `super_admin` targets are protected on both backend and frontend:
   - backend rejects status changes, password resets, and token adjustments
   - frontend keeps those rows view-only and surfaces a protection notice in the detail drawer
 - `super_admin` and `admin` accounts are displayed as unlimited-balance accounts in the console
-- row-level floating action menus were removed in favor of the right-side detail drawer to avoid clipping caused by table `overflow`
+- the row action dropdown now groups detail, role, password, token, freeze, and delete operations behind one uncluttered trigger while still keeping the right-side detail drawer available
+- the password-reset workflow is now deterministic for admin operations: `POST /api/v1/admin/users/{user_id}/reset-password` resets mutable accounts to the fixed bootstrap password `12345678`
+- `DELETE /api/v1/admin/users/{user_id}` is now available for mutable accounts and blocks both self-delete and `super_admin` delete attempts
+- successful user deletion revokes refresh sessions, blacklists related latest access JTIs, and writes a `delete_user` audit event that is visible in the admin audit workspace
 
 ### 7.9 Admin recent-session activity telemetry
 
@@ -439,9 +444,11 @@ The admin template workspace now supports the full shared-template lifecycle ins
 
 - `omnimedia-admin-web/src/pages/AdminTemplatesPage.tsx` supports create, edit, single delete, multi-select, and batch delete
 - shared-template mutations are backed by `app/api/v1/admin_templates.py`
-- the admin page uses one shared drawer for both create and edit states
+- the admin page now uses a centered shared modal for both create and edit states instead of the older side drawer
+- template cards use a longer detail-rich layout with platform and ownership tags, a `PROMPT SNAPSHOT` preview block, and a three-column stats grid
 - deleting shared templates requires an explicit confirmation dialog
 - bulk selection uses an animated action bar with a foreground `z-index` so it stays readable above the card grid
+- the modal includes extra UI-only fields such as industry classification and knowledge-base placeholders, but the actual backend payload is still filtered down to supported template fields only
 
 The creator-side local template center was also extended:
 
@@ -458,6 +465,16 @@ The create-user entry in `omnimedia-admin-web/src/pages/AdminUsersPage.tsx` has 
 - role assignment uses card-based single selection instead of a dropdown
 - the modal uses a bounded height with internal scrolling so it does not feel full-screen on shorter viewports
 - the bottom banner explains that the backend will automatically grant the initial token asset or unlimited quota according to role and record the action in audit history
+
+### 7.18 Admin user deletion and audit linkage
+
+The admin user center now includes a complete delete and recovery-oriented governance path:
+
+- the row action dropdown exposes delete without reintroducing table clutter
+- the delete flow uses a blocking confirmation modal that clearly warns about login loss, session cleanup, and asset cleanup
+- deleting a user removes the row from the current page, recalculates pagination when the last row on a page disappears, and clears any active detail state for that target
+- the audit workspace recognizes `delete_user` as a first-class admin event with dedicated label, icon, and summary rendering
+- the reset-password action remains visible in the same dropdown and now consistently communicates the fixed reset password baseline to operators
 
 ## 8. Backend Boundaries
 
@@ -539,6 +556,7 @@ Avoid pushing long-lived business orchestration and complex data-access code int
 
 - `GET /api/v1/admin/users`
 - `POST /api/v1/admin/users`
+- `DELETE /api/v1/admin/users/{user_id}`
 - `POST /api/v1/admin/users/{user_id}/status`
 - `POST /api/v1/admin/users/{user_id}/reset-password`
 - `POST /api/v1/admin/users/{user_id}/tokens`
@@ -580,13 +598,27 @@ Validate the parts you actually changed before you push.
    - `super_admin` cannot change another `super_admin`
 6. Open the RBAC page and confirm that member counts come from the real summary endpoint instead of mock constants.
 7. Confirm that `super_admin` rows remain protected from freeze, password reset, and token adjustment actions.
-8. Open `/tokens` as `finance` or `super_admin` and confirm that KPI cards come from the live stats endpoint, keyword filtering is debounced, and pagination keeps row counts aligned with the backend total.
-9. Open the create-user modal and confirm that:
+8. Open the user-row dropdown and confirm that:
+   - the table shows `5` rows per page
+   - the dropdown contains detail, password, role, token, freeze, and delete actions
+   - there is no exposed placeholder edit action in the visible menu
+9. Trigger password reset for a mutable account and confirm that:
+   - `POST /api/v1/admin/users/{user_id}/reset-password` succeeds
+   - the returned password is exactly `12345678`
+   - existing sessions are revoked as part of the reset response
+10. Delete a mutable non-`super_admin` account and confirm that:
+   - `DELETE /api/v1/admin/users/{user_id}` succeeds
+   - the row disappears from the current page and pagination stays stable
+   - the audit page renders a `delete_user` event with a readable summary
+11. Open `/tokens` as `finance` or `super_admin` and confirm that KPI cards come from the live stats endpoint, keyword filtering is debounced, and pagination keeps row counts aligned with the backend total.
+12. Open the create-user modal and confirm that:
    - it is centered instead of using a side drawer
    - the visible form only includes `username`, `password`, and `role`
    - the request payload sent to `POST /api/v1/admin/users` contains only those three fields
-10. Open `/templates` in the admin workspace and confirm that:
+13. Open `/templates` in the admin workspace and confirm that:
    - editing a shared template calls `PATCH /api/v1/admin/templates/{template_id}`
+   - create and edit both use the centered template modal rather than a side drawer
+   - UI-only industry and knowledge fields do not leak into the backend payload
    - single delete requires confirmation and removes the shared template
    - batch delete clears selected cards and refreshes the list
 

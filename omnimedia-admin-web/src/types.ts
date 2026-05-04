@@ -145,6 +145,7 @@ export type AdminTokenStats = {
 
 export type AdminAuditActionType =
   | "create_user"
+  | "delete_user"
   | "role_change"
   | "topup"
   | "token_deduct"
@@ -193,6 +194,11 @@ export type AdminUserPasswordResetApiResponse = {
   user_id: string;
   new_password: string;
   revoked_sessions: number;
+};
+
+export type AdminUserDeleteApiResponse = {
+  id: string;
+  deleted: true;
 };
 
 export type AdminTokenAdjustAction = "add" | "deduct" | "set";

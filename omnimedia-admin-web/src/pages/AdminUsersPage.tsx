@@ -6,17 +6,23 @@ import {
   Eye,
   Filter,
   KeyRound,
+  Lock,
+  Minus,
+  MoreVertical,
   Plus,
   RefreshCw,
   Search,
   ShieldAlert,
   ShieldCheck,
+  Trash2,
+  UserCog,
   X,
 } from "lucide-react";
 
 import {
   APIError,
   createAdminUser,
+  deleteAdminUser,
   fetchAdminUsers,
   isAdminRole,
   resetAdminUserPassword,
@@ -52,13 +58,23 @@ type CreateUserFormErrors = Partial<Record<"username" | "password" | "role", str
 
 type UserFilterTab = "all" | "standard" | "premium" | "frozen";
 
+type UserActionMenuState = {
+  user: AdminUserItem;
+  top: number;
+  left: number;
+} | null;
+
 type AdminUsersPageProps = {
   currentUser: AuthenticatedUser;
   onToast: (toast: AdminToast) => void;
 };
 
-const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 5;
 const TOKEN_QUICK_PACKS = [10000, 50000, 100000] as const;
+const USER_ACTION_MENU_WIDTH = 224;
+const USER_ACTION_MENU_HEIGHT = 328;
+const USER_ACTION_MENU_GAP = 10;
+const USER_ACTION_MENU_EDGE_PADDING = 16;
 const ROLE_ASSIGNMENT_OPTIONS: Array<{
   value: UserRole;
   label: string;
@@ -190,21 +206,21 @@ function getRoleOption(role: UserRole) {
 
 function getRoleBadgeClass(role: AdminUserItem["role"]): string {
   if (role === "super_admin") {
-    return "bg-slate-900 text-white";
+    return "bg-transparent font-bold text-slate-800";
   }
   if (role === "admin") {
-    return "bg-amber-50 text-amber-600";
+    return "bg-transparent text-rose-500";
   }
   if (role === "finance") {
-    return "bg-sky-50 text-sky-600";
+    return "bg-transparent text-violet-500";
   }
   if (role === "operator") {
-    return "bg-orange-50 text-orange-600";
+    return "bg-transparent text-orange-500";
   }
   if (role === "premium") {
-    return "bg-blue-50 text-blue-600";
+    return "bg-transparent text-yellow-600";
   }
-  return "bg-slate-100 text-slate-600";
+  return "bg-transparent text-sky-500";
 }
 
 function getActionTitle(action: AdminTokenAdjustAction): string {
@@ -255,43 +271,10 @@ function validateCreateUserForm(
 
 export function formatSessionDeviceInfo(value?: string | null): string {
   return normalizeLatestSessionDeviceInfo(value);
-
-  const normalized = (value || "").trim();
-  if (!normalized) {
-    return "鏈煡璁惧";
-  }
-
-  return normalized
-    .replace(/\s+路\s+/g, " · ")
-    .replace(/\s+on\s+/gi, " · ")
-    .replace(/\s+[\\/|]+\s+/g, " · ");
 }
 
 export function formatLatestSessionMeta(user: Pick<AdminUserItem, "latest_session">): string {
   return buildLatestSessionMeta(user);
-
-  const latestSession = user.latest_session ?? {
-    ip_address: "",
-    last_seen_at: null,
-    created_at: null,
-  };
-  if (!user.latest_session) {
-    return "鏆傛棤娲诲姩璁板綍";
-  }
-
-  const parts: string[] = [];
-  if (latestSession.ip_address?.trim()) {
-    parts.push(`IP ${latestSession.ip_address?.trim() || ""}`);
-  }
-
-  const relativeTime = formatRelativeTime(
-    latestSession.last_seen_at ?? latestSession.created_at,
-  );
-  if (relativeTime !== "鏆傛棤") {
-    parts.push(relativeTime);
-  }
-
-  return parts.join(" · ") || "鏆傛棤娲诲姩璁板綍";
 }
 
 const DEVICE_INFO_SEPARATOR_SAFE = ` ${String.fromCharCode(183)} `;
@@ -356,6 +339,37 @@ function buildLatestSessionMeta(user: Pick<AdminUserItem, "latest_session">): st
   return parts.join(DEVICE_INFO_SEPARATOR_SAFE) || "--";
 }
 
+function formatUserRowId(userId: string): string {
+  const normalized = userId.trim();
+  if (!normalized) {
+    return "--";
+  }
+
+  const compact = normalized.includes("-") ? normalized.split("-")[0] : normalized;
+  return compact.slice(0, 6).toUpperCase();
+}
+
+function getLatestActivityLabel(user: Pick<AdminUserItem, "latest_session">): string {
+  const latestSession = user.latest_session;
+  if (!latestSession) {
+    return "暂无记录";
+  }
+
+  const relativeTime = formatRelativeTime(
+    latestSession.last_seen_at ?? latestSession.created_at,
+  );
+  return relativeTime === "--" ? "暂无记录" : relativeTime;
+}
+
+function getLatestActivityHint(user: Pick<AdminUserItem, "latest_session">): string {
+  const latestSession = user.latest_session;
+  if (!latestSession) {
+    return "未捕获设备信息";
+  }
+
+  return normalizeLatestSessionDeviceInfo(latestSession.device_info);
+}
+
 export function AdminUsersPage(props: AdminUsersPageProps) {
   const { currentUser, onToast } = props;
   const [usersPayload, setUsersPayload] = useState<AdminUsersApiResponse | null>(null);
@@ -365,6 +379,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<UserFilterTab>("all");
+  const [actionMenu, setActionMenu] = useState<UserActionMenuState>(null);
   const [searchInput, setSearchInput] = useState("");
   const [debouncedSearchInput, setDebouncedSearchInput] = useState("");
   const [searchKeyword, setSearchKeyword] = useState("");
@@ -376,6 +391,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   const [roleModalUser, setRoleModalUser] = useState<AdminUserItem | null>(null);
   const [nextRole, setNextRole] = useState<UserRole>("user");
   const [revealedPassword, setRevealedPassword] = useState<PasswordRevealState>(null);
+  const [deleteUserTarget, setDeleteUserTarget] = useState<AdminUserItem | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [createForm, setCreateForm] = useState<AdminUserCreatePayload>(() => ({
     username: "",
@@ -398,6 +414,13 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     [currentUser],
   );
   const isCreateUserSubmitting = isSubmitting && activeUserId === "__create_user__";
+  const actionMenuUser = actionMenu?.user ?? null;
+  const isActionMenuBusy = actionMenuUser
+    ? isSubmitting && activeUserId === actionMenuUser.id
+    : false;
+  const isDeleteUserSubmitting = deleteUserTarget
+    ? isSubmitting && activeUserId === deleteUserTarget.id
+    : false;
   const tokenPreviewBalance =
     tokenModalUser && Number.isInteger(parsedTokenAmount) && parsedTokenAmount >= 0
       ? tokenAction === "add"
@@ -527,6 +550,45 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     );
   }, [items]);
 
+  useEffect(() => {
+    if (!actionMenu) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest("[data-user-action-menu]") ||
+        target?.closest("[data-user-action-trigger]")
+      ) {
+        return;
+      }
+      setActionMenu(null);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setActionMenu(null);
+      }
+    };
+
+    const handleDismiss = () => {
+      setActionMenu(null);
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+    window.addEventListener("resize", handleDismiss);
+    window.addEventListener("scroll", handleDismiss, true);
+
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("resize", handleDismiss);
+      window.removeEventListener("scroll", handleDismiss, true);
+    };
+  }, [actionMenu]);
+
   const replaceUserInState = (updatedUser: AdminUserItem) => {
     setUsersPayload((current) => {
       if (!current) {
@@ -577,6 +639,32 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
       title: "角色变更已被拦截",
       message: getRoleChangeDisabledReason(currentUser, user) || "当前不允许执行角色变更。",
     });
+  };
+
+  const closeActionMenu = () => {
+    setActionMenu(null);
+  };
+
+  const openActionMenu = (
+    user: AdminUserItem,
+    triggerElement: HTMLButtonElement,
+  ) => {
+    const rect = triggerElement.getBoundingClientRect();
+    const fitsBelow =
+      rect.bottom + USER_ACTION_MENU_GAP + USER_ACTION_MENU_HEIGHT <=
+      window.innerHeight - USER_ACTION_MENU_EDGE_PADDING;
+    const left = Math.min(
+      Math.max(USER_ACTION_MENU_EDGE_PADDING, rect.right - USER_ACTION_MENU_WIDTH),
+      window.innerWidth - USER_ACTION_MENU_WIDTH - USER_ACTION_MENU_EDGE_PADDING,
+    );
+    const top = fitsBelow
+      ? rect.bottom + USER_ACTION_MENU_GAP
+      : Math.max(
+          USER_ACTION_MENU_EDGE_PADDING,
+          rect.top - USER_ACTION_MENU_HEIGHT - USER_ACTION_MENU_GAP,
+        );
+
+    setActionMenu((current) => (current?.user.id === user.id ? null : { user, top, left }));
   };
 
   const resetCreateForm = () => {
@@ -706,11 +794,13 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   };
 
   const openDetailDrawer = (userId: string) => {
+    closeActionMenu();
     setSelectedUserId(userId);
     setDetailOpen(true);
   };
 
   const openRoleModal = (user: AdminUserItem) => {
+    closeActionMenu();
     if (!canChangeUserRole(currentUser, user)) {
       showRoleChangeBlockedToast(user);
       return;
@@ -729,6 +819,14 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     setNextRole("user");
   };
 
+  const closeDeleteUserDialog = (force = false) => {
+    if (isSubmitting && !force) {
+      return;
+    }
+
+    setDeleteUserTarget(null);
+  };
+
   const handleSearchSubmit = () => {
     setDebouncedSearchInput(searchInput);
     setSkip(0);
@@ -736,6 +834,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   };
 
   const handleToggleStatus = async (user: AdminUserItem) => {
+    closeActionMenu();
     if (!canGovernUserAccounts) {
       showGovernancePermissionToast("冻结与解冻账号");
       return;
@@ -776,6 +875,7 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
   };
 
   const handleResetPassword = async (user: AdminUserItem) => {
+    closeActionMenu();
     if (!canGovernUserAccounts) {
       showGovernancePermissionToast("重置密码");
       return;
@@ -817,7 +917,11 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     }
   };
 
-  const openTokenModal = (user: AdminUserItem) => {
+  const openTokenModal = (
+    user: AdminUserItem,
+    initialAction: AdminTokenAdjustAction = "add",
+  ) => {
+    closeActionMenu();
     if (!canGovernUserAccounts) {
       showGovernancePermissionToast("调整 Token 额度");
       return;
@@ -833,9 +937,82 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
     }
 
     setTokenModalUser(user);
-    setTokenAction("add");
+    setTokenAction(initialAction);
     setTokenAmount("1000");
     setTokenRemark("");
+  };
+
+  const prepareDeleteUser = (user: AdminUserItem) => {
+    closeActionMenu();
+    if (!canGovernUserAccounts) {
+      showGovernancePermissionToast("删除用户");
+      return;
+    }
+
+    if (isProtectedSuperAdmin(user)) {
+      showProtectedAccountToast(user);
+      return;
+    }
+
+    if (currentUser.id === user.id) {
+      onToast({
+        tone: "warning",
+        title: "当前账号不可删除",
+        message: "为了避免误删当前登录账号，系统暂不允许执行此操作。",
+      });
+      return;
+    }
+
+    setDeleteUserTarget(user);
+  };
+
+  const handleDeleteUserConfirm = async () => {
+    if (!deleteUserTarget) {
+      return;
+    }
+
+    setActiveUserId(deleteUserTarget.id);
+    setIsSubmitting(true);
+
+    try {
+      await deleteAdminUser(deleteUserTarget.id);
+      const deletedDisplayName = getUserDisplayName(deleteUserTarget);
+      const nextSkip =
+        skip > 0 && items.length === 1 ? Math.max(0, skip - DEFAULT_PAGE_SIZE) : skip;
+
+      if (selectedUserId === deleteUserTarget.id) {
+        setSelectedUserId(null);
+        setDetailOpen(false);
+      }
+
+      closeDeleteUserDialog(true);
+
+      if (nextSkip !== skip) {
+        setSkip(nextSkip);
+      } else {
+        await loadUsers({ skip: nextSkip, search: searchKeyword });
+      }
+
+      onToast({
+        tone: "success",
+        title: "用户已删除",
+        message: `${deletedDisplayName} 已从用户中心删除。`,
+      });
+    } catch (error) {
+      onToast({
+        tone: "error",
+        title: "删除用户失败",
+        message:
+          error instanceof APIError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : "删除用户失败，请稍后重试。",
+      });
+    } finally {
+      setActiveUserId(null);
+      setIsSubmitting(false);
+    }
   };
 
   const closeTokenModal = (force = false) => {
@@ -1092,210 +1269,242 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
           ))}
         </div>
 
-        <section className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.06)]">
-          <div className="w-full overflow-x-auto">
-            <table className="w-full min-w-max whitespace-nowrap text-left">
-              <thead>
-                <tr className="text-sm font-semibold text-slate-800">
-                  <th className="bg-red-50 px-5 py-4">用户</th>
-                  <th className="bg-red-50 px-5 py-4">角色</th>
-                  <th className="bg-red-50 px-5 py-4">注册时间</th>
-                  <th className="bg-red-50 px-5 py-4">最近活跃</th>
-                  <th className="bg-red-50 px-5 py-4">Token 余额</th>
-                  <th className="bg-red-50 px-5 py-4">状态</th>
-                  <th className="bg-red-50 px-5 py-4 text-right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {isLoading ? (
-                  Array.from({ length: 5 }).map((_, index) => (
-                    <tr key={`admin-user-skeleton-${index}`} className="border-t border-slate-100">
-                      <td className="px-5 py-4" colSpan={7}>
-                        <div className="h-16 animate-pulse rounded-2xl bg-slate-100" />
-                      </td>
-                    </tr>
-                  ))
-                ) : visibleItems.length > 0 ? (
-                  visibleItems.map((user) => {
-                    const isBusy = isSubmitting && activeUserId === user.id;
-                    const isFrozen = user.status === "frozen";
-                    const protectedSuperAdmin = isProtectedSuperAdmin(user);
-                    const unlimitedTokenUser = isUnlimitedTokenUser(user);
-                    const displayName = getUserDisplayName(user);
-
-                    return (
-                      <tr
-                        key={user.id}
-                        className="border-t border-slate-100 transition-colors hover:bg-red-50/50"
-                      >
-                        <td className="px-5 py-4">
-                          <button
-                            className="flex min-w-0 items-center gap-4 text-left"
-                            onClick={() => openDetailDrawer(user.id)}
-                            type="button"
-                          >
-                            <UserAvatar
-                              className="h-11 w-11"
-                              name={displayName}
-                              src={user.avatar_url}
-                            />
-                            <div className="min-w-0">
-                              <div className="truncate font-semibold text-slate-900">
-                                {displayName}
-                              </div>
-                              <div className="mt-1 truncate text-sm text-slate-400">
-                                @{user.username}
-                              </div>
-                            </div>
-                          </button>
-                        </td>
-                        <td className="px-5 py-4">
-                          <span
-                            className={`inline-flex rounded-full px-3 py-1 text-sm font-semibold ${getRoleBadgeClass(
-                              user.role,
-                            )}`}
-                          >
-                            {formatRoleLabel(user.role)}
-                          </span>
-                        </td>
-                        <td className="px-5 py-4 text-sm text-slate-600">
-                          {formatDate(user.created_at)}
-                        </td>
-                        <td className="px-5 py-4">
-                          {user.latest_session ? (
-                            <div className="space-y-1">
-                              <div className="text-sm font-medium text-slate-700">
-                                {normalizeLatestSessionDeviceInfo(user.latest_session.device_info)}
-                              </div>
-                              <div className="text-xs text-slate-400">
-                                {buildLatestSessionMeta(user)}
-                              </div>
-                            </div>
-                          ) : (
-                            <span className="text-sm text-slate-400">暂无活动记录</span>
-                          )}
-                        </td>
-                        <td className="px-5 py-4">
-                          {unlimitedTokenUser ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1 text-sm font-semibold text-white">
-                              <span className="text-base leading-none">∞</span>
-                              无限制
-                            </span>
-                          ) : (
-                            <span className="text-sm font-semibold text-slate-800">
-                              {formatNumber(user.token_balance)}
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-5 py-4">
-                          <span
-                            className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold ${
-                              isFrozen
-                                ? "bg-red-50 text-red-600"
-                                : "bg-emerald-50 text-emerald-600"
-                            }`}
-                          >
-                            <span
-                              className={`h-2 w-2 rounded-full ${
-                                isFrozen ? "bg-red-500" : "bg-emerald-500"
-                              }`}
-                            />
-                            {formatStatusLabel(user.status)}
-                          </span>
-                        </td>
-                        <td className="px-5 py-4">
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-500"
-                              onClick={() => openDetailDrawer(user.id)}
-                              type="button"
-                            >
-                              <Eye className="h-4 w-4" />
-                              查看详情
-                            </button>
-                            {currentUser.role === "super_admin" ? (
-                              canChangeUserRole(currentUser, user) ? (
-                                <button
-                                  className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-500 transition hover:bg-red-100"
-                                  disabled={isBusy}
-                                  onClick={() => openRoleModal(user)}
-                                  type="button"
-                                >
-                                  切换角色
-                                </button>
-                              ) : (
-                                <button
-                                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm font-medium text-slate-400"
-                                  disabled
-                                  title={getRoleChangeDisabledReason(currentUser, user)}
-                                  type="button"
-                                >
-                                  切换角色
-                                </button>
-                              )
-                            ) : null}
-                            {canAdjustToken(user) ? (
-                              <button
-                                className="inline-flex items-center gap-2 rounded-xl bg-orange-50 px-3 py-2 text-sm font-medium text-orange-600 transition hover:bg-orange-100"
-                                disabled={isBusy || !canGovernUserAccounts}
-                                onClick={() => openTokenModal(user)}
-                                type="button"
-                              >
-                                <Coins className="h-4 w-4" />
-                                资产调度
-                              </button>
-                            ) : protectedSuperAdmin ? (
-                              <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-600">
-                                受保护账号
-                              </span>
-                            ) : (
-                              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">
-                                无限额度
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                ) : (
-                  <tr>
-                    <td className="px-5 py-20 text-center text-base text-slate-400" colSpan={7}>
-                      当前筛选条件下暂无用户记录。
+        <section className="overflow-visible rounded-[22px] border border-[#f2e8ea] bg-white/90">
+        <div className="w-full overflow-x-auto">
+          <table className="w-full min-w-[940px] border-separate border-spacing-0 text-left">
+            <thead>
+              <tr className="text-sm font-semibold text-slate-700">
+                <th className="border-b border-gray-100 bg-red-50/50 px-6 py-4">用户</th>
+                <th className="border-b border-gray-100 bg-red-50/50 px-5 py-4">角色</th>
+                <th className="border-b border-gray-100 bg-red-50/50 px-5 py-4">注册时间</th>
+                <th className="border-b border-gray-100 bg-red-50/50 px-5 py-4">最近活跃</th>
+                <th className="border-b border-gray-100 bg-red-50/50 px-5 py-4">Token 余额</th>
+                <th className="border-b border-gray-100 bg-red-50/50 px-5 py-4">状态</th>
+                <th className="border-b border-gray-100 bg-red-50/50 px-5 py-4 text-center">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {isLoading ? (
+                Array.from({ length: 5 }).map((_, index) => (
+                  <tr key={`admin-user-skeleton-${index}`} className="bg-transparent">
+                    <td className="border-b border-slate-100 px-6 py-4" colSpan={7}>
+                      <div className="h-14 animate-pulse rounded-2xl bg-slate-100/80" />
                     </td>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                ))
+              ) : visibleItems.length > 0 ? (
+                visibleItems.map((user) => {
+                  const isFrozen = user.status === "frozen";
+                  const unlimitedTokenUser = isUnlimitedTokenUser(user);
+                  const displayName = getUserDisplayName(user);
+                  const latestActivityLabel = getLatestActivityLabel(user);
+                  const latestActivityHint = getLatestActivityHint(user);
+                  const isActionMenuOpen = actionMenu?.user.id === user.id;
 
-          <div className="flex flex-col gap-3 px-6 pb-6 pt-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-sm text-slate-400">{paginationText}</div>
-            <div className="flex items-center gap-2">
-              <button
-                className="h-10 rounded-xl bg-red-50 px-4 text-sm font-medium text-slate-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={skip === 0 || isLoading}
-                onClick={() => setSkip((current) => Math.max(0, current - DEFAULT_PAGE_SIZE))}
-                type="button"
-              >
-                上一页
-              </button>
-              <span className="flex h-10 min-w-10 items-center justify-center rounded-xl bg-red-500 px-3 text-sm font-bold text-white">
-                {currentPage}
-              </span>
-              <button
-                className="h-10 rounded-xl bg-red-50 px-4 text-sm font-medium text-slate-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={skip + DEFAULT_PAGE_SIZE >= total || isLoading}
-                onClick={() => setSkip((current) => current + DEFAULT_PAGE_SIZE)}
-                type="button"
-              >
-                下一页
-              </button>
-              <span className="text-sm text-slate-400">/ {totalPages}</span>
-            </div>
+                  return (
+                    <tr
+                      key={user.id}
+                      className={`transition-colors ${
+                        isActionMenuOpen ? "bg-[#fff8f8]" : "hover:bg-[#fffafa]"
+                      }`}
+                    >
+                      <td className="border-b border-slate-100 px-6 py-4">
+                        <button
+                          className="flex min-w-0 items-center gap-3 text-left"
+                          onClick={() => openDetailDrawer(user.id)}
+                          type="button"
+                        >
+                          <UserAvatar
+                            className="h-10 w-10"
+                            name={displayName}
+                            src={user.avatar_url}
+                          />
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-semibold text-slate-900">
+                              {displayName}
+                            </div>
+                            <div className="mt-1 truncate text-[11px] text-slate-400">
+                              ID: {formatUserRowId(user.id)}
+                            </div>
+                          </div>
+                        </button>
+                      </td>
+                      <td className="border-b border-slate-100 px-5 py-4">
+                        <span
+                          className={`inline-flex text-[13px] font-semibold ${getRoleBadgeClass(
+                            user.role,
+                          )}`}
+                        >
+                          {formatRoleLabel(user.role)}
+                        </span>
+                      </td>
+                      <td className="border-b border-slate-100 px-5 py-4 text-sm text-slate-600">
+                        {formatDate(user.created_at)}
+                      </td>
+                      <td className="border-b border-slate-100 px-5 py-4">
+                        <div className="space-y-1">
+                          <div className="text-sm font-medium text-slate-700">
+                            {latestActivityLabel}
+                          </div>
+                          <div className="truncate text-[11px] text-slate-400">
+                            {latestActivityHint}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-100 px-5 py-4">
+                        {unlimitedTokenUser ? (
+                          <span className="text-sm font-semibold text-slate-400">无限额度</span>
+                        ) : (
+                          <span className="text-sm font-semibold text-slate-800">
+                            {formatNumber(user.token_balance)}
+                          </span>
+                        )}
+                      </td>
+                      <td className="border-b border-slate-100 px-5 py-4">
+                        <span className="inline-flex items-center gap-2 text-sm font-medium text-slate-600">
+                          <span
+                            className={`h-2 w-2 rounded-full ${
+                              isFrozen ? "bg-red-500" : "bg-emerald-500"
+                            }`}
+                          />
+                          {formatStatusLabel(user.status)}
+                        </span>
+                      </td>
+                      <td className="border-b border-slate-100 px-5 py-4">
+                        <div className="flex items-center justify-center">
+                          <button
+                            className={`inline-flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                              isActionMenuOpen
+                                ? "bg-red-100 text-red-500"
+                                : "bg-red-50/70 text-red-300 hover:bg-red-100 hover:text-red-500"
+                            }`}
+                            data-user-action-trigger=""
+                            onClick={(event) => openActionMenu(user, event.currentTarget)}
+                            type="button"
+                          >
+                            <MoreVertical className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td className="px-5 py-20 text-center text-base text-slate-400" colSpan={7}>
+                    当前筛选条件下暂无用户记录。
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex flex-col gap-3 px-6 pb-5 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm text-slate-400">{paginationText}</div>
+          <div className="flex items-center gap-2">
+            <button
+              className="h-9 rounded-lg bg-red-50 px-4 text-sm font-medium text-slate-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={skip === 0 || isLoading}
+              onClick={() => setSkip((current) => Math.max(0, current - DEFAULT_PAGE_SIZE))}
+              type="button"
+            >
+              上一页
+            </button>
+            <span className="flex h-9 min-w-9 items-center justify-center rounded-lg bg-rose-500 px-3 text-sm font-bold text-white">
+              {currentPage}
+            </span>
+            <button
+              className="h-9 rounded-lg bg-red-50 px-4 text-sm font-medium text-slate-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={skip + DEFAULT_PAGE_SIZE >= total || isLoading}
+              onClick={() => setSkip((current) => current + DEFAULT_PAGE_SIZE)}
+              type="button"
+            >
+              下一页
+            </button>
+            <span className="text-sm text-slate-400">/ {totalPages}</span>
           </div>
-        </section>
+        </div>
+      </section>
+    </div>
+
+    {actionMenu && actionMenuUser ? (
+      <div
+        className="fixed z-[70] w-56 overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-2 shadow-[0_20px_48px_rgba(15,23,42,0.16)]"
+        data-user-action-menu=""
+        style={{ top: actionMenu.top, left: actionMenu.left }}
+      >
+        <button
+          className="flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-left text-sm text-slate-600 transition hover:bg-slate-50"
+          onClick={() => openDetailDrawer(actionMenuUser.id)}
+          type="button"
+        >
+          <Eye className="h-4 w-4" />
+          查看详情
+        </button>
+        <button
+          className="flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-left text-sm text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isActionMenuBusy}
+          onClick={() => void handleResetPassword(actionMenuUser)}
+          type="button"
+        >
+          <KeyRound className="h-4 w-4" />
+          重置密码
+        </button>
+        <button
+          className="flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-left text-sm text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isActionMenuBusy}
+          onClick={() => openRoleModal(actionMenuUser)}
+          type="button"
+        >
+          <UserCog className="h-4 w-4" />
+          修改角色
+        </button>
+
+        <div className="my-2 border-t border-slate-100" />
+
+        <button
+          className="flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-left text-sm text-emerald-600 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isActionMenuBusy}
+          onClick={() => openTokenModal(actionMenuUser, "add")}
+          type="button"
+        >
+          <Plus className="h-4 w-4" />
+          充值 Token
+        </button>
+        <button
+          className="flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-left text-sm text-amber-500 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isActionMenuBusy}
+          onClick={() => openTokenModal(actionMenuUser, "deduct")}
+          type="button"
+        >
+          <Minus className="h-4 w-4" />
+          扣减 Token
+        </button>
+        <button
+          className={`flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-50 ${
+            actionMenuUser.status === "frozen"
+              ? "text-emerald-600 hover:bg-emerald-50"
+              : "text-orange-500 hover:bg-orange-50"
+          }`}
+          disabled={isActionMenuBusy}
+          onClick={() => void handleToggleStatus(actionMenuUser)}
+          type="button"
+        >
+          <Lock className="h-4 w-4" />
+          {actionMenuUser.status === "frozen" ? "解冻账户" : "冻结账户"}
+        </button>
+        <button
+          className="flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-left text-sm text-red-500 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isActionMenuBusy}
+          onClick={() => prepareDeleteUser(actionMenuUser)}
+          type="button"
+        >
+          <Trash2 className="h-4 w-4" />
+          删除用户
+        </button>
       </div>
+    ) : null}
 
       {detailOpen && selectedUser ? (
         <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/10 backdrop-blur-[2px]">
@@ -1883,6 +2092,53 @@ export function AdminUsersPage(props: AdminUsersPageProps) {
               >
                 {isSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
                 提交 Token 调整
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteUserTarget ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+          onClick={() => closeDeleteUserDialog()}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-red-100 bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start gap-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-red-50 text-red-500">
+                <Trash2 className="h-5 w-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-lg font-bold text-slate-900">删除用户</div>
+                <div className="mt-2 text-sm leading-6 text-slate-500">
+                  确定要删除 {getUserDisplayName(deleteUserTarget)} 吗？删除后该用户将无法继续登录，关联的会话和用户资产也会一并清理。
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-red-100 bg-red-50/70 px-4 py-3 text-sm leading-6 text-red-600">
+              此操作不可撤销，请在删除前确认该账号已无保留必要。
+            </div>
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                className="h-11 rounded-xl bg-slate-100 px-5 text-sm font-medium text-slate-600 transition hover:bg-slate-200"
+                onClick={() => closeDeleteUserDialog()}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="inline-flex h-11 items-center gap-2 rounded-xl bg-red-500 px-5 text-sm font-semibold text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-70"
+                disabled={isDeleteUserSubmitting}
+                onClick={() => void handleDeleteUserConfirm()}
+                type="button"
+              >
+                {isDeleteUserSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
+                确认删除
               </button>
             </div>
           </div>

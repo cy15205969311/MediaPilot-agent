@@ -1,5 +1,3 @@
-import random
-import string
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,6 +11,7 @@ from app.models.schemas import (
     AdminTokenAdjustAction,
     AuditActionType,
     AdminUserCreate,
+    AdminUserDeleteResponse,
     AdminUserLatestSessionItem,
     AdminUserListItem,
     AdminUserListResponse,
@@ -43,8 +42,8 @@ require_admin_manage_role = RequireRole(["super_admin", "admin", "operator"])
 require_admin_provision_role = RequireRole(["super_admin", "admin"])
 require_super_admin_role = RequireRole(["super_admin"])
 
-PASSWORD_SPECIAL_CHARS = "!@#$%^&*"
 ADMIN_INITIAL_GRANT_TOKENS = 10_000_000
+ADMIN_RESET_PASSWORD = "12345678"
 ADMIN_INITIAL_GRANT_REMARK = "管理员后台新建账号初始赠送"
 SYSTEM_LEVEL_ROLES = {"super_admin", "admin"}
 PROTECTED_SUPER_ADMIN_DETAIL = "禁止修改超级管理员账号。"
@@ -184,23 +183,6 @@ def _ensure_role_change_allowed(*, actor: User, target: User) -> None:
 
     if target.role == "super_admin":
         raise HTTPException(status_code=403, detail="不能修改其他超级管理员的角色。")
-
-
-def _generate_random_password(length: int = 8) -> str:
-    if length < 8:
-        raise ValueError("Password length must be at least 8.")
-
-    rng = random.SystemRandom()
-    password_chars = [
-        rng.choice(string.ascii_lowercase),
-        rng.choice(string.ascii_uppercase),
-        rng.choice(string.digits),
-        rng.choice(PASSWORD_SPECIAL_CHARS),
-    ]
-    alphabet = string.ascii_letters + string.digits + PASSWORD_SPECIAL_CHARS
-    password_chars.extend(rng.choice(alphabet) for _ in range(length - len(password_chars)))
-    rng.shuffle(password_chars)
-    return "".join(password_chars)
 
 
 @router.get("/users", response_model=AdminUserListResponse)
@@ -395,7 +377,7 @@ async def reset_admin_user_password(
     user = _get_target_user_or_404(db, user_id)
     _ensure_target_user_is_mutable(user)
 
-    new_password = _generate_random_password(8)
+    new_password = ADMIN_RESET_PASSWORD
     user.hashed_password = hash_password(new_password)
 
     try:
@@ -434,6 +416,62 @@ async def reset_admin_user_password(
         new_password=new_password,
         revoked_sessions=revoked_sessions,
     )
+
+
+@router.delete("/users/{user_id}", response_model=AdminUserDeleteResponse)
+async def delete_admin_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_manage_role),
+) -> AdminUserDeleteResponse:
+    user = _get_target_user_or_404(db, user_id)
+    _ensure_target_user_is_mutable(user)
+
+    if current_user.id == user.id:
+        raise HTTPException(status_code=403, detail="Cannot delete the current signed-in account.")
+
+    deleted_user_id = user.id
+    deleted_username = user.username
+    deleted_role = user.role
+    deleted_target_name = get_audit_target_name(user)
+
+    try:
+        active_sessions = list_active_refresh_sessions(db, user_id=user.id)
+        revoked_sessions = revoke_other_refresh_sessions(
+            db,
+            user_id=user.id,
+            keep_session_jti=None,
+        )
+        for session in active_sessions:
+            blacklist_access_token_jti(
+                db,
+                jti=session.latest_access_jti,
+                expires_at=datetime.now(timezone.utc)
+                + timedelta(minutes=JWT_ACCESS_EXPIRE_MINUTES),
+            )
+
+        append_audit_log(
+            db=db,
+            operator=current_user,
+            action_type=AuditActionType.DELETE_USER.value,
+            target_id=deleted_user_id,
+            target_name=deleted_target_name,
+            details={
+                "username": deleted_username,
+                "role": deleted_role,
+                "revoked_sessions": revoked_sessions,
+            },
+        )
+        db.delete(user)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete user. Please try again later.",
+        ) from exc
+
+    return AdminUserDeleteResponse(id=deleted_user_id)
 
 
 @router.post("/users/{user_id}/tokens", response_model=AdminUserTokenUpdateResponse)

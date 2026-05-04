@@ -12,6 +12,7 @@ import type {
   AdminTemplatesApiResponse,
   AdminTokenStats,
   AdminUserCreatePayload,
+  AdminUserDeleteApiResponse,
   AdminTokenTransactionsApiResponse,
   AdminUserItem,
   AdminUserPasswordResetApiResponse,
@@ -755,6 +756,18 @@ export async function resetAdminUserPassword(
   );
 
   return (await response.json()) as AdminUserPasswordResetApiResponse;
+}
+
+export async function deleteAdminUser(
+  userId: string,
+): Promise<AdminUserDeleteApiResponse> {
+  const response = await fetchWithInterceptor(
+    `/api/v1/admin/users/${userId}`,
+    { method: "DELETE" },
+    { timeoutMs: 15000 },
+  );
+
+  return (await response.json()) as AdminUserDeleteApiResponse;
 }
 
 export async function updateAdminUserTokens(

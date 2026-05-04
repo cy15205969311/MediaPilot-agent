@@ -65,6 +65,7 @@ const ACTION_OPTIONS: Array<{
   value: AdminAuditActionType;
   label: string;
 }> = [
+  { value: "delete_user", label: "删除用户" },
   { value: "create_user", label: "新建用户" },
   { value: "role_change", label: "修改角色" },
   { value: "topup", label: "资产增加" },
@@ -124,6 +125,13 @@ function getActionVisual(actionType: AdminAuditActionType): {
       backgroundColor: theme.infoSoft,
     };
   }
+  if (actionType === "delete_user") {
+    return {
+      icon: Trash2,
+      color: theme.primary,
+      backgroundColor: theme.dangerSoft,
+    };
+  }
   if (actionType === "freeze") {
     return {
       icon: ShieldAlert,
@@ -174,6 +182,14 @@ function formatAuditSummary(item: AdminAuditLogItem): string {
     return grantTokens > 0
       ? `创建 ${role || "user"} 账号并发放 ${formatNumber(grantTokens)} Tokens`
       : `创建 ${role || "user"} 系统账号`;
+  }
+
+  if (item.action_type === "delete_user") {
+    const username = toText(details.username);
+    const role = toText(details.role);
+    return username
+      ? `删除 ${role || "user"} 账号 ${username}`
+      : "删除用户账号";
   }
 
   if (item.action_type === "role_change") {

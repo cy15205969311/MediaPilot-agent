@@ -447,6 +447,11 @@ class AdminUserPasswordResetResponse(SchemaModel):
     )
 
 
+class AdminUserDeleteResponse(SchemaModel):
+    id: str = Field(..., description="Deleted user ID.")
+    deleted: bool = Field(default=True, description="Deletion result.")
+
+
 class AdminTokenAdjustAction(str, Enum):
     ADD = "add"
     DEDUCT = "deduct"
@@ -455,6 +460,7 @@ class AdminTokenAdjustAction(str, Enum):
 
 class AuditActionType(str, Enum):
     CREATE_USER = "create_user"
+    DELETE_USER = "delete_user"
     ROLE_CHANGE = "role_change"
     TOPUP = "topup"
     TOKEN_DEDUCT = "token_deduct"
