@@ -61,6 +61,9 @@ MAX_CONTEXT_MESSAGES = 12
 DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_QWEN_PRIMARY_MODEL = "qwen-max"
 DEFAULT_QWEN_FALLBACK_MODELS = ("qwen-plus", "qwen-turbo")
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_PROXY_GPT_MODEL = "gpt-5.4"
 DEFAULT_QWEN_RETRY_ATTEMPTS = 3
 DEFAULT_QWEN_RETRY_BASE_DELAY_SECONDS = 1.0
 TRANSIENT_PROVIDER_STREAM_ERROR_CODE = "PROVIDER_TRANSIENT_STREAM_ERROR"
@@ -843,6 +846,129 @@ class OpenAIProvider(BaseLLMProvider):
         return (
             content.strip(),
             token_usage,
+        )
+
+
+class DeepSeekLLMProvider(OpenAIProvider):
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        artifact_model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        resolved_model = (
+            (model or "").strip()
+            or os.getenv("DEEPSEEK_MODEL", "").strip()
+            or DEFAULT_DEEPSEEK_MODEL
+        )
+        resolved_artifact_model = (
+            (artifact_model or "").strip()
+            or os.getenv("DEEPSEEK_ARTIFACT_MODEL", "").strip()
+            or resolved_model
+        )
+        resolved_api_key = (
+            (api_key or "").strip()
+            or os.getenv("DEEPSEEK_API_KEY", "").strip()
+            or None
+        )
+        resolved_base_url = (
+            (base_url or "").strip()
+            or os.getenv("DEEPSEEK_BASE_URL", "").strip()
+            or DEFAULT_DEEPSEEK_BASE_URL
+        )
+        resolved_timeout_seconds = timeout_seconds or float(
+            os.getenv(
+                "DEEPSEEK_TIMEOUT_SECONDS",
+                os.getenv("OPENAI_TIMEOUT_SECONDS", os.getenv("LLM_TIMEOUT_SECONDS", "60")),
+            ),
+        )
+        super().__init__(
+            model=resolved_model,
+            artifact_model=resolved_artifact_model,
+            api_key=resolved_api_key,
+            base_url=resolved_base_url,
+            timeout_seconds=resolved_timeout_seconds,
+        )
+
+    def clone_with_model_override(self, model_override: str | None) -> BaseLLMProvider:
+        scoped_model = _normalize_provider_scoped_model_override(
+            model_override,
+            accepted_provider_keys=("deepseek",),
+        )
+        normalized_model = (scoped_model or (model_override or "")).strip()
+        if not normalized_model or normalized_model == self.model:
+            return self
+
+        return type(self)(
+            model=normalized_model,
+            artifact_model=normalized_model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
+class ProxyGPTLLMProvider(OpenAIProvider):
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        artifact_model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        resolved_model = (
+            (model or "").strip()
+            or os.getenv("PROXY_GPT_MODEL", "").strip()
+            or DEFAULT_PROXY_GPT_MODEL
+        )
+        resolved_artifact_model = (
+            (artifact_model or "").strip()
+            or os.getenv("PROXY_GPT_ARTIFACT_MODEL", "").strip()
+            or resolved_model
+        )
+        resolved_api_key = (
+            (api_key or "").strip()
+            or os.getenv("PROXY_GPT_API_KEY", "").strip()
+            or None
+        )
+        resolved_base_url = (
+            (base_url or "").strip()
+            or os.getenv("PROXY_GPT_BASE_URL", "").strip()
+        )
+        resolved_timeout_seconds = timeout_seconds or float(
+            os.getenv(
+                "PROXY_GPT_TIMEOUT_SECONDS",
+                os.getenv("OPENAI_TIMEOUT_SECONDS", os.getenv("LLM_TIMEOUT_SECONDS", "60")),
+            ),
+        )
+        super().__init__(
+            model=resolved_model,
+            artifact_model=resolved_artifact_model,
+            api_key=resolved_api_key,
+            base_url=resolved_base_url,
+            timeout_seconds=resolved_timeout_seconds,
+        )
+
+    def clone_with_model_override(self, model_override: str | None) -> BaseLLMProvider:
+        scoped_model = _normalize_provider_scoped_model_override(
+            model_override,
+            accepted_provider_keys=("proxy_gpt", "proxy-gpt"),
+        )
+        normalized_model = (scoped_model or (model_override or "")).strip()
+        if not normalized_model or normalized_model == self.model:
+            return self
+
+        return type(self)(
+            model=normalized_model,
+            artifact_model=normalized_model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
         )
 
 
@@ -2208,6 +2334,10 @@ def create_provider_from_env() -> BaseLLMProvider:
 
     if provider_name == "openai":
         return OpenAIProvider()
+    if provider_name == "deepseek":
+        return DeepSeekLLMProvider()
+    if provider_name in {"proxy_gpt", "proxy-gpt"}:
+        return ProxyGPTLLMProvider()
     if provider_name == "compatible":
         return CompatibleLLMProvider()
     if provider_name in {"qwen", "dashscope"}:

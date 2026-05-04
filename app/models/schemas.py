@@ -495,7 +495,7 @@ class AdminDashboardTrendItem(SchemaModel):
 
 class AdminDashboardModelUsageItem(SchemaModel):
     model_name: str = Field(..., description="Aggregated model label.")
-    count: int = Field(..., description="Observed invocation count for the model.")
+    count: int = Field(..., description="Aggregated token consumption total for the model.")
 
 
 class AdminDashboardResponse(SchemaModel):
@@ -509,7 +509,7 @@ class AdminDashboardResponse(SchemaModel):
     )
     model_usage_ratio: list[AdminDashboardModelUsageItem] = Field(
         default_factory=list,
-        description="Aggregated model invocation counts for chart rendering.",
+        description="Aggregated model token totals for chart rendering.",
     )
 
 
@@ -680,6 +680,10 @@ class ThreadSummaryItem(SchemaModel):
     title: str = Field(default="", description="Thread title.")
     latest_message_excerpt: str = Field(default="", description="Latest message excerpt.")
     is_archived: bool = Field(default=False, description="Archive flag.")
+    model_override: str | None = Field(
+        default=None,
+        description="Last persisted runtime model override for the thread.",
+    )
     knowledge_base_scope: str | None = Field(
         default=None,
         description="Optional thread-level knowledge-base scope.",
@@ -744,6 +748,10 @@ class ThreadMessagesResponse(SchemaModel):
     thread_id: str = Field(..., description="Thread ID.")
     title: str = Field(default="", description="Thread title.")
     system_prompt: str = Field(default="", description="Persisted system prompt.")
+    model_override: str | None = Field(
+        default=None,
+        description="Persisted runtime model override for the thread.",
+    )
     knowledge_base_scope: str | None = Field(
         default=None,
         description="Persisted thread-level knowledge-base scope.",
@@ -814,6 +822,10 @@ class AvailableModelItem(SchemaModel):
     name: str = Field(..., description="Display name shown in the selector.")
     group: str = Field(..., description="Capability group label used for subsection rendering.")
     tags: list[str] = Field(default_factory=list, description="Small display tags for the model.")
+    requires_premium: bool = Field(
+        default=False,
+        description="Whether this model is restricted to Premium and above roles.",
+    )
     is_default: bool = Field(
         default=False,
         description="Whether this model matches the current backend default.",

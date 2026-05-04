@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
+  ChevronDown,
   ExternalLink,
   ImageIcon,
   MessageSquareQuote,
+  Sparkles,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -27,11 +29,100 @@ function getPlatformHint(platform: UiPlatform) {
   return "当前结果更偏小红书图文结构，适合继续补充封面文案、标签和互动引导。";
 }
 
+function normalizePromptValue(value: string | undefined) {
+  return value?.trim() ?? "";
+}
+
+function PromptOptimizationNotice(props: {
+  originalPrompt: string;
+  revisedPrompt: string;
+}) {
+  const { originalPrompt, revisedPrompt } = props;
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  useEffect(() => {
+    setIsExpanded(false);
+  }, [originalPrompt, revisedPrompt]);
+
+  return (
+    <div
+      className="rounded-2xl border border-sky-100 bg-sky-50/80 p-3 shadow-sm"
+      data-testid="artifact-prompt-optimization"
+    >
+      <button
+        className="flex w-full items-start justify-between gap-3 text-left"
+        onClick={() => setIsExpanded((current) => !current)}
+        type="button"
+      >
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/90 text-sky-600 shadow-sm">
+            <Sparkles className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-sky-950">
+              已自动优化提示词以提升画质与合规性
+            </div>
+            <div className="mt-1 text-xs leading-5 text-sky-800/80">
+              系统保留了你的创作意图，并生成了最终执行版提示词。
+            </div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1 text-xs font-medium text-sky-700">
+          <span>{isExpanded ? "收起详情" : "查看详情"}</span>
+          <ChevronDown
+            className={`h-4 w-4 transition-transform duration-200 ${
+              isExpanded ? "rotate-180" : ""
+            }`}
+          />
+        </div>
+      </button>
+
+      <div
+        className={`grid transition-all duration-300 ease-out ${
+          isExpanded ? "mt-3 grid-rows-[1fr] opacity-100" : "mt-0 grid-rows-[0fr] opacity-0"
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div
+            className="relative rounded-xl border border-slate-200 bg-white/85 p-3 pr-14"
+            data-testid="artifact-prompt-optimization-details"
+          >
+            <div className="absolute right-2 top-2">
+              <CopyButton
+                ariaLabel="复制优化后的提示词"
+                text={revisedPrompt}
+              />
+            </div>
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              System Prompt
+            </div>
+            <div className="mb-2 text-xs leading-5 text-slate-500">
+              基于你的原始描述，系统最终执行了以下提示词：
+            </div>
+            <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">
+              {revisedPrompt}
+            </pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ContentGenerationArtifact({
   artifact,
   platform,
 }: ContentGenerationArtifactProps) {
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const originalPrompt = normalizePromptValue(artifact?.original_prompt);
+  const revisedPrompt = normalizePromptValue(artifact?.revised_prompt);
+  const promptOptimization =
+    revisedPrompt && revisedPrompt !== originalPrompt
+      ? {
+          originalPrompt,
+          revisedPrompt,
+        }
+      : null;
 
   if (!artifact) {
     return (
@@ -84,12 +175,19 @@ export function ContentGenerationArtifact({
             title="AI 配图"
           >
             <div className="space-y-4">
+              {promptOptimization ? (
+                <PromptOptimizationNotice
+                  originalPrompt={promptOptimization.originalPrompt}
+                  revisedPrompt={promptOptimization.revisedPrompt}
+                />
+              ) : null}
+
               <div className="rounded-3xl border border-border bg-[linear-gradient(135deg,rgba(255,244,214,0.96),rgba(255,255,255,0.98)_58%,rgba(255,236,214,0.96))] p-4 shadow-sm">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-foreground">Image Gallery</div>
                     <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                      Generated {generatedImages.length} images. Click any card to preview.
+                      已生成 {generatedImages.length} 张图片，点击任意卡片即可预览。
                     </div>
                   </div>
                   <div className="rounded-full bg-white/80 px-3 py-1 text-xs font-medium text-brand shadow-sm">

@@ -39,6 +39,7 @@ from app.models.schemas import (
 )
 from app.services.auth import ACCESS_TOKEN_TYPE, create_access_token, decode_token_payload
 from app.services.graph import LangGraphProvider
+from app.services.model_access import PREMIUM_MODEL_ACCESS_DENIED_DETAIL
 from app.services.tools import get_business_tools
 
 
@@ -3116,6 +3117,160 @@ def test_available_models_endpoint_returns_mimo_registry_for_compatible_provider
     assert compatible_provider["models"][0]["is_default"] is True
     assert compatible_provider["models"][0]["tags"] == ["大语言模型", "旗舰", "生产力"]
     assert compatible_provider["models"][2]["group"] == "全模态"
+
+
+def test_available_models_endpoint_returns_multi_model_gateway_registry(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-chat")
+    monkeypatch.setenv(
+        "DEEPSEEK_AVAILABLE_MODELS",
+        "deepseek-chat,deepseek-v4-flashy,deepseek-pro",
+    )
+    monkeypatch.setenv("DEEPSEEK_ARTIFACT_MODEL", "")
+    monkeypatch.setenv("PROXY_GPT_API_KEY", "proxy-gpt-test-key")
+    monkeypatch.setenv("PROXY_GPT_BASE_URL", "https://proxy.example.com/v1")
+    monkeypatch.setenv("PROXY_GPT_MODEL", "gpt-5.4-pro")
+    monkeypatch.setenv(
+        "PROXY_GPT_AVAILABLE_MODELS",
+        "gpt-5.4,gpt-5.4-flash,gpt-5.4-pro",
+    )
+    monkeypatch.setenv("PROXY_GPT_ARTIFACT_MODEL", "")
+    headers = register_user(client, username="alice-multi-model-registry")
+
+    response = client.get("/api/v1/models/available", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    deepseek_provider = next(
+        item for item in payload["items"] if item["provider_key"] == "deepseek"
+    )
+    proxy_provider = next(
+        item for item in payload["items"] if item["provider_key"] == "proxy_gpt"
+    )
+
+    assert deepseek_provider["status"] == "configured"
+    assert {model["model"] for model in deepseek_provider["models"]} == {
+        "deepseek-chat",
+        "deepseek-v4-flashy",
+        "deepseek-pro",
+    }
+    assert all(model["requires_premium"] is False for model in deepseek_provider["models"])
+    assert sum(1 for model in deepseek_provider["models"] if model["is_default"]) == 1
+    assert next(
+        model for model in deepseek_provider["models"] if model["model"] == "deepseek-chat"
+    )["is_default"] is True
+
+    assert proxy_provider["status"] == "configured"
+    assert {model["model"] for model in proxy_provider["models"]} == {
+        "gpt-5.4",
+        "gpt-5.4-flash",
+        "gpt-5.4-pro",
+    }
+    assert all(model["requires_premium"] is True for model in proxy_provider["models"])
+    assert sum(1 for model in proxy_provider["models"] if model["is_default"]) == 1
+    assert next(
+        model for model in proxy_provider["models"] if model["model"] == "gpt-5.4-pro"
+    )["is_default"] is True
+
+
+def test_available_models_endpoint_keeps_mimo_default_when_extra_gateways_are_configured(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OMNIMEDIA_LLM_PROVIDER", "langgraph")
+    monkeypatch.setenv("LANGGRAPH_INNER_PROVIDER", "compatible")
+    monkeypatch.setenv("LLM_API_KEY", "mimo-test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "mimo-v2.5-pro")
+    monkeypatch.setenv("LLM_ARTIFACT_MODEL", "mimo-v2.5-pro")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-chat")
+    monkeypatch.setenv("PROXY_GPT_API_KEY", "proxy-gpt-test-key")
+    monkeypatch.setenv("PROXY_GPT_BASE_URL", "https://proxy.example.com/v1")
+    monkeypatch.setenv("PROXY_GPT_MODEL", "gpt-5.4")
+    headers = register_user(client, username="alice-mimo-default-registry")
+
+    response = client.get("/api/v1/models/available", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"][0]["provider_key"] == "compatible"
+    assert payload["items"][0]["models"][0]["model"] == "mimo-v2.5-pro"
+    assert payload["items"][0]["models"][0]["is_default"] is True
+
+
+def test_media_chat_stream_blocks_premium_models_for_standard_user(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("PROXY_GPT_API_KEY", "proxy-gpt-test-key")
+    monkeypatch.setenv("PROXY_GPT_BASE_URL", "https://proxy.example.com/v1")
+    monkeypatch.setenv("PROXY_GPT_MODEL", "gpt-5.4")
+    headers = register_user(client, username="alice-premium-block")
+
+    response = client.post(
+        "/api/v1/media/chat/stream",
+        headers=headers,
+        json={
+            "thread_id": "thread-premium-block",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请帮我写一篇新品种草文案",
+            "materials": [],
+            "model_override": "proxy_gpt:gpt-5.4",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == PREMIUM_MODEL_ACCESS_DENIED_DETAIL
+
+
+def test_media_chat_stream_allows_premium_models_for_admin_and_persists_override(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("PROXY_GPT_API_KEY", "proxy-gpt-test-key")
+    monkeypatch.setenv("PROXY_GPT_BASE_URL", "https://proxy.example.com/v1")
+    monkeypatch.setenv("PROXY_GPT_MODEL", "gpt-5.4")
+    headers = register_admin_user(
+        client,
+        username="admin-premium-allow",
+        role="admin",
+    )
+
+    async def fake_stream(*args, **kwargs):
+        yield 'event: start\ndata: {"thread_id":"thread-premium-allow","platform":"xiaohongshu","task_type":"content_generation","materials_count":0}\n\n'
+        yield 'event: done\ndata: {"thread_id":"thread-premium-allow","status":"completed"}\n\n'
+
+    monkeypatch.setattr(agent_module.media_agent_workflow, "stream", fake_stream)
+
+    with client.stream(
+        "POST",
+        "/api/v1/media/chat/stream",
+        headers=headers,
+        json={
+            "thread_id": "thread-premium-allow",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "请帮我写一篇新品种草文案",
+            "materials": [],
+            "model_override": "proxy_gpt:gpt-5.4",
+        },
+    ) as response:
+        assert response.status_code == 200
+        raw_stream = "".join(response.iter_text())
+
+    assert 'event: start' in raw_stream
+    assert 'event: done' in raw_stream
+
+    with client.app.state.testing_session_local() as db:
+        thread = db.get(Thread, "thread-premium-allow")
+        assert thread is not None
+        assert thread.model_override == "proxy_gpt:gpt-5.4"
 
 
 def test_thread_history_returns_user_message_image_material(client: TestClient):

@@ -28,7 +28,7 @@ const theme = {
   textMuted: "#94a3b8",
 };
 
-const chartPalette = ["#ef4444", "#fb923c", "#14b8a6", "#3b82f6", "#8b5cf6", "#f59e0b"];
+const COLORS = ["#F87171", "#FBBF24", "#34D399", "#60A5FA", "#A78BFA", "#F472B6"];
 const NO_DATA_LABEL = "\u6682\u65e0\u6570\u636e";
 const TOKEN_TREND_TITLE = "30 \u5929 Token \u8d8b\u52bf";
 const MODEL_USAGE_TITLE = "\u6a21\u578b\u8c03\u7528\u5360\u6bd4";
@@ -130,9 +130,12 @@ function buildPieOption(data: AdminDashboardData | null): EChartsOption {
   const shouldShowPieLabels = usageItems.length > 1;
   const chartData =
     usageItems.length > 0
-      ? usageItems.map((item) => ({
+      ? usageItems.map((item, index) => ({
           value: item.count,
           name: item.model_name,
+          itemStyle: {
+            color: COLORS[index % COLORS.length],
+          },
         }))
       : [
           {
@@ -146,7 +149,7 @@ function buildPieOption(data: AdminDashboardData | null): EChartsOption {
 
   return {
     backgroundColor: "transparent",
-    color: chartPalette,
+    color: COLORS,
     tooltip: {
       trigger: "item",
       backgroundColor: "rgba(15, 23, 42, 0.92)",
@@ -154,7 +157,7 @@ function buildPieOption(data: AdminDashboardData | null): EChartsOption {
       textStyle: {
         color: "#f8fafc",
       },
-      formatter: usageItems.length > 0 ? "{b}: {c} ({d}%)" : "{b}",
+      formatter: usageItems.length > 0 ? "{b}: {c} Tokens ({d}%)" : "{b}",
     },
     legend: {
       bottom: 0,

@@ -157,7 +157,19 @@ Start from `.env.example`. Never commit secrets, production credentials, or priv
 - `OPENAI_MODEL`
 - `OPENAI_ARTIFACT_MODEL`
 - `OPENAI_VISION_MODEL`
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_BASE_URL`
+- `DEEPSEEK_MODEL`
+- `DEEPSEEK_ARTIFACT_MODEL`
+- `DEEPSEEK_TIMEOUT_SECONDS`
+- `PROXY_GPT_API_KEY`
+- `PROXY_GPT_BASE_URL`
+- `PROXY_GPT_MODEL`
+- `PROXY_GPT_ARTIFACT_MODEL`
+- `PROXY_GPT_TIMEOUT_SECONDS`
 - `TAVILY_API_KEY`
+
+The current model-routing baseline now supports `deepseek` and `proxy_gpt` as explicit provider keys for both `OMNIMEDIA_LLM_PROVIDER` and `LANGGRAPH_INNER_PROVIDER`. This adds environment-driven access to DeepSeek and proxy-hosted GPT-5.4 models without changing the existing default MiMo path.
 
 ### 6.2 Image generation and transcription
 
@@ -178,6 +190,8 @@ Start from `.env.example`. Never commit secrets, production credentials, or priv
 - `OPENAI_TRANSCRIPTION_BASE_URL`
 - `OPENAI_TRANSCRIPTION_API_KEY`
 - `OPENAI_TRANSCRIPTION_MODEL`
+
+The current OpenAI-compatible image path intentionally uses the classic `Images API`, meaning SDK-side `client.images.generate(...)` and gateway-side `/v1/images/generations`. Keep `response_format="b64_json"` unless you have explicitly verified that the upstream gateway already supports image generation through `Responses API` at `/v1/responses`.
 
 ### 6.3 Storage
 
@@ -563,6 +577,17 @@ The latest UI baseline deliberately removes redundant search entry points:
 - the template-library toolbar constrains the local search box to a fixed width so it no longer crushes the tab bar
 - the creator template center keeps a 3x3 `page_size=9` gallery, uses `content-start` to avoid last-page card stretching, and keeps cards aligned with `h-full + flex-col`
 
+### 7.26 OpenAI-compatible image gateway baseline
+
+The OpenAI-compatible image pipeline currently follows a compatibility-first baseline:
+
+- `app/services/image_generation.py` uses `AsyncOpenAI.images.generate(...)` for OpenAI-compatible image generation
+- requests stay fixed at `response_format="b64_json"`, `n=1`, and `size="1024x1024"` to maximize compatibility with third-party gateways that do not yet support `/v1/responses`
+- image responses must pass through `sanitize_image_response_for_log()` or an equivalent masking step before logging; raw `b64_json` payloads must never be written to console logs
+- base64 image data is treated as a server-side transient transport only: decode it immediately, persist it to local `uploads/` or object storage, and return a clean delivery URL to the frontend
+- the `/uploads` static mount in `app/main.py` is part of the local persistence path and must remain available during troubleshooting
+- the existing DashScope fallback path remains active when the OpenAI-compatible branch fails, preserving availability over protocol novelty
+
 ## 8. Backend Boundaries
 
 ### 8.1 Route groups
@@ -694,6 +719,7 @@ Validate the parts you actually changed before you push.
 - if schemas changed: verify frontend/backend contract compatibility
 - if database write paths changed: verify `SQLite` lock release and read-endpoint responsiveness
 - if ORM models or Alembic revisions changed: run `alembic upgrade head` before release
+- if the OpenAI-compatible image pipeline changed: run at least `python -m pytest tests/test_image_generation.py`
 - historical migration patches must stay idempotent; do not assume a legacy table or column already exists when hardening an old revision
 - recommended migration smoke test:
 

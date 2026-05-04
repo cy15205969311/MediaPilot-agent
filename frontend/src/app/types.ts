@@ -49,6 +49,7 @@ export type ThreadItem = {
   time: string;
   platform?: "xiaohongshu" | "douyin";
   isArchived?: boolean;
+  modelOverride?: string | null;
 };
 
 export type UploadedMaterialKind = "image" | "video" | "audio" | "text";
@@ -108,6 +109,7 @@ export type ModelDetail = {
   name: string;
   group: string;
   tags: string[];
+  requires_premium: boolean;
   is_default: boolean;
 };
 
@@ -130,6 +132,7 @@ export type HistoryThreadSummary = {
   title: string;
   latest_message_excerpt: string;
   is_archived: boolean;
+  model_override?: string | null;
   knowledge_base_scope?: string | null;
   updated_at: string;
 };
@@ -423,6 +426,8 @@ export type ContentGenerationArtifactPayload = ArtifactPayloadBase & {
   body: string;
   platform_cta: string;
   generated_images?: string[];
+  original_prompt?: string;
+  revised_prompt?: string;
 };
 
 export type HotPostAnalysisDimension = {
@@ -481,6 +486,7 @@ export type ThreadMessagesApiResponse = {
   thread_id: string;
   title: string;
   system_prompt: string;
+  model_override?: string | null;
   knowledge_base_scope?: string | null;
   messages: HistoryMessageItem[];
   materials: HistoryMaterialItem[];

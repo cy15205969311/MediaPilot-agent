@@ -13,6 +13,7 @@ from app.models.schemas import MediaChatRequest
 from app.services.agent import media_agent_workflow
 from app.services.auth import get_current_user
 from app.services.knowledge_base import normalize_knowledge_base_scope
+from app.services.model_access import ensure_model_access
 from app.services.persistence import (
     bind_material_uploads_to_thread,
     derive_thread_title,
@@ -30,6 +31,7 @@ def persist_chat_request(
     request: MediaChatRequest,
     current_user: User,
 ) -> Thread:
+    normalized_model_override = (request.model_override or "").strip() or None
     logger.info(
         "chat.persist start thread_id=%s user_id=%s materials=%s",
         request.thread_id,
@@ -53,6 +55,7 @@ def persist_chat_request(
             user_id=current_user.id,
             title=(request.thread_title or "").strip() or derive_thread_title(request.message),
             system_prompt=(request.system_prompt or "").strip(),
+            model_override=normalized_model_override,
             knowledge_base_scope=normalize_knowledge_base_scope(request.knowledge_base_scope),
         )
         db.add(thread)
@@ -65,6 +68,7 @@ def persist_chat_request(
 
         if request.system_prompt is not None:
             thread.system_prompt = request.system_prompt.strip()
+        thread.model_override = normalized_model_override
         if request.knowledge_base_scope is not None:
             thread.knowledge_base_scope = normalize_knowledge_base_scope(
                 request.knowledge_base_scope,
@@ -125,6 +129,15 @@ async def stream_media_chat(
 ) -> StreamingResponse:
     if current_user.role not in TOKEN_BYPASS_ROLES and int(current_user.token_balance or 0) <= 0:
         raise HTTPException(status_code=402, detail=INSUFFICIENT_TOKENS_DETAIL)
+
+    requested_provider_key, requested_model_name = media_agent_workflow.resolve_requested_model_target(
+        request.model_override,
+    )
+    ensure_model_access(
+        role=current_user.role,
+        provider_key=requested_provider_key,
+        model_name=requested_model_name,
+    )
 
     logger.info(
         "chat.stream route entered thread_id=%s task_type=%s user_id=%s",

@@ -180,15 +180,19 @@ def _build_model_usage_ratio(
         TokenTransaction.transaction_type == "consume",
         TokenTransaction.amount < 0,
     )
+    usage_amount = case(
+        (TokenTransaction.amount < 0, func.abs(TokenTransaction.amount)),
+        else_=TokenTransaction.amount,
+    )
     statement = (
         select(
             model_bucket.label("model_name"),
-            func.count(TokenTransaction.id).label("count"),
+            func.coalesce(func.sum(usage_amount), 0).label("count"),
         )
         .where(TokenTransaction.created_at >= start_datetime)
         .where(consume_filter)
         .group_by(model_bucket)
-        .order_by(func.count(TokenTransaction.id).desc(), model_bucket.asc())
+        .order_by(func.coalesce(func.sum(usage_amount), 0).desc(), model_bucket.asc())
     )
     rows = [
         AdminDashboardModelUsageItem(model_name=str(model_name), count=int(count or 0))

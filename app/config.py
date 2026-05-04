@@ -35,6 +35,18 @@ class OpenAITranscriptionSettings:
     model: str
 
 
+def _parse_csv_models(raw_value: str) -> tuple[str, ...]:
+    unique_models: list[str] = []
+    seen: set[str] = set()
+    for item in raw_value.split(","):
+        normalized_item = item.strip()
+        if not normalized_item or normalized_item in seen:
+            continue
+        seen.add(normalized_item)
+        unique_models.append(normalized_item)
+    return tuple(unique_models)
+
+
 def load_environment() -> Path | None:
     global _DOTENV_MTIME_NS, _DOTENV_MANAGED_KEYS
 
@@ -212,3 +224,13 @@ def get_openai_transcription_settings() -> OpenAITranscriptionSettings | None:
         )
 
     return None
+
+
+def get_deepseek_available_models() -> tuple[str, ...]:
+    load_environment()
+    return _parse_csv_models(os.getenv("DEEPSEEK_AVAILABLE_MODELS", ""))
+
+
+def get_proxy_gpt_available_models() -> tuple[str, ...]:
+    load_environment()
+    return _parse_csv_models(os.getenv("PROXY_GPT_AVAILABLE_MODELS", ""))

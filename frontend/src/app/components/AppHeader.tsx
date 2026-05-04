@@ -11,19 +11,30 @@ import {
 import { ModelSelector } from "./ModelSelector";
 import { useTheme } from "../ThemeContext";
 import { taskOptions } from "../data";
-import type { UiPlatform, UiTaskType } from "../types";
+import type {
+  AuthenticatedUser,
+  ModelProvider,
+  UiPlatform,
+  UiTaskType,
+} from "../types";
 
 type AppHeaderProps = {
   platform: UiPlatform;
   taskType: UiTaskType;
   modelOverride: string | null;
   currentDisplayName: string;
+  currentUserRole?: AuthenticatedUser["role"] | null;
+  modelProviders: ModelProvider[];
+  isLoadingModelProviders: boolean;
+  modelProvidersError: string;
   onPlatformChange: (platform: UiPlatform) => void;
   onTaskTypeChange: (taskType: UiTaskType) => void;
   onModelOverrideChange: (model: string) => void;
   onExportMarkdown: () => void;
   onOpenLeftSidebar: () => void;
   onOpenRightPanel: () => void;
+  onReloadModelProviders: () => void;
+  onPremiumUpgradePrompt?: (message: string) => void;
 };
 
 const platformOptions: Array<{ id: UiPlatform; label: string }> = [
@@ -45,12 +56,18 @@ export function AppHeader({
   taskType,
   modelOverride,
   currentDisplayName,
+  currentUserRole,
+  modelProviders,
+  isLoadingModelProviders,
+  modelProvidersError,
   onPlatformChange,
   onTaskTypeChange,
   onModelOverrideChange,
   onExportMarkdown,
   onOpenLeftSidebar,
   onOpenRightPanel,
+  onReloadModelProviders,
+  onPremiumUpgradePrompt,
 }: AppHeaderProps) {
   const { theme, toggleTheme } = useTheme();
   const isLightTheme = theme === "light";
@@ -119,7 +136,16 @@ export function AppHeader({
         </div>
       </div>
 
-      <ModelSelector onChange={onModelOverrideChange} value={modelOverride} />
+      <ModelSelector
+        currentUserRole={currentUserRole}
+        errorText={modelProvidersError}
+        isLoading={isLoadingModelProviders}
+        modelProviders={modelProviders}
+        onChange={onModelOverrideChange}
+        onPremiumUpgradePrompt={onPremiumUpgradePrompt}
+        onReloadModels={onReloadModelProviders}
+        value={modelOverride}
+      />
 
       <div className="ml-auto flex items-center gap-3">
         <button

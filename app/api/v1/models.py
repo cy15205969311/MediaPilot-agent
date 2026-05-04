@@ -7,6 +7,7 @@ from app.models.schemas import (
     AvailableModelsResponse,
 )
 from app.services.auth import get_current_user
+from app.services.model_access import model_requires_premium
 from app.services.model_registry import get_available_model_providers
 
 router = APIRouter(prefix="/api/v1/models", tags=["model-registry"])
@@ -30,6 +31,10 @@ async def list_available_models(
                     name=model.name,
                     group=model.group,
                     tags=list(model.tags),
+                    requires_premium=model_requires_premium(
+                        provider_key=provider.provider_key,
+                        model_name=model.model,
+                    ),
                     is_default=model.is_default,
                 )
                 for model in provider.models

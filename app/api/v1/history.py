@@ -85,6 +85,7 @@ def _build_thread_summary(db: Session, thread: Thread) -> ThreadSummaryItem:
             else ""
         ),
         is_archived=thread.is_archived,
+        model_override=thread.model_override,
         knowledge_base_scope=thread.knowledge_base_scope,
         updated_at=thread.updated_at,
     )
@@ -237,6 +238,7 @@ async def get_thread_messages(
         thread_id=thread_id,
         title=thread.title,
         system_prompt=thread.system_prompt,
+        model_override=thread.model_override,
         knowledge_base_scope=thread.knowledge_base_scope,
         messages=history_messages,
         materials=[

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import logging
 import mimetypes
@@ -38,6 +39,9 @@ DEFAULT_DASHSCOPE_DOUYIN_IMAGE_SIZE = "928*1664"
 DEFAULT_DASHSCOPE_XIAOHONGSHU_IMAGE_SIZE = "1104*1472"
 WANX_V1_DOUYIN_IMAGE_SIZE = "720*1280"
 WANX_V1_XIAOHONGSHU_IMAGE_SIZE = "768*1152"
+BASE64_LOG_PLACEHOLDER = "[BASE64_IMAGE_DATA_TRUNCATED_FOR_LOGS]"
+MAX_LOG_STRING_LENGTH = 1200
+SYSTEM_GENERATED_IMAGE_USER_ID = "system-generated"
 
 
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
@@ -167,6 +171,62 @@ def _describe_exception_for_log(exc: Exception) -> str:
     while getattr(root_exc, "__cause__", None) is not None:
         root_exc = root_exc.__cause__  # type: ignore[assignment]
     return f"{type(root_exc).__name__}: {root_exc}"
+
+
+def _looks_like_base64_image_data(value: str) -> bool:
+    normalized = value.strip()
+    if not normalized:
+        return False
+    if normalized.startswith("data:image/"):
+        return True
+    compact = "".join(normalized.split())
+    return len(compact) > 256 and re.fullmatch(r"[A-Za-z0-9+/=]+", compact) is not None
+
+
+def _sanitize_log_string(value: str, *, limit: int = MAX_LOG_STRING_LENGTH) -> str:
+    if _looks_like_base64_image_data(value):
+        return BASE64_LOG_PLACEHOLDER
+    if len(value) <= limit:
+        return value
+    remaining = len(value) - limit
+    return f"{value[:limit].rstrip()}... [truncated {remaining} chars]"
+
+
+def _build_base64_log_placeholder(value: object) -> str:
+    if isinstance(value, str) and value:
+        return f"[BASE64_IMAGE_DATA_TRUNCATED: {len(value)} chars]"
+    return BASE64_LOG_PLACEHOLDER
+
+
+def _sanitize_log_payload(payload: object) -> object:
+    if isinstance(payload, dict):
+        normalized_type = str(payload.get("type", "")).strip().lower()
+        return {
+            str(key): (
+                _build_base64_log_placeholder(value)
+                if (
+                    str(key).strip().lower() == "b64_json"
+                    or (
+                        normalized_type == "image_generation_call"
+                        and str(key).strip().lower() == "result"
+                    )
+                )
+                else _sanitize_log_payload(value)
+            )
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_sanitize_log_payload(item) for item in payload]
+    if isinstance(payload, tuple):
+        return [_sanitize_log_payload(item) for item in payload]
+    if isinstance(payload, str):
+        return _sanitize_log_string(payload)
+    return payload
+
+
+def _resolve_generated_image_storage_user_id(user_id: str | None) -> str:
+    normalized = (user_id or "").strip()
+    return normalized or SYSTEM_GENERATED_IMAGE_USER_ID
 
 
 def _resolve_cover_title(
@@ -304,6 +364,8 @@ def _append_openai_base64_reference(urls: list[str], candidate: object) -> None:
 
 def _append_openai_image_reference(urls: list[str], candidate: object) -> None:
     if isinstance(candidate, dict):
+        if str(candidate.get("type", "")).strip().lower() == "image_generation_call":
+            _append_openai_base64_reference(urls, candidate.get("result"))
         for key in ("url", "image"):
             _append_openai_image_reference(urls, candidate.get(key))
         _append_openai_base64_reference(urls, candidate.get("b64_json"))
@@ -387,7 +449,7 @@ def _parse_image_generation_response_json(
     *,
     provider_name: str,
 ) -> dict[str, object] | None:
-    response_text = _read_response_text(response)
+    response_text = _sanitize_log_string(_read_response_text(response))
     try:
         payload = response.json()
     except (json.JSONDecodeError, ValueError) as exc:
@@ -406,7 +468,7 @@ def _parse_image_generation_response_json(
             provider_name,
             response.status_code,
             response_text,
-            payload,
+            _sanitize_log_payload(payload),
         )
         return None
 
@@ -444,6 +506,28 @@ def _decode_data_image_url(source_url: str) -> tuple[bytes, str]:
     if not image_bytes:
         raise RuntimeError("Generated image data URL is empty.")
     return image_bytes, match.group("content_type").lower()
+
+
+def _serialize_openai_response_payload(response: object) -> dict[str, object]:
+    if isinstance(response, dict):
+        return response
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="python")
+        if isinstance(dumped, dict):
+            return dumped
+    return {"response": str(response)}
+
+
+def sanitize_image_response_for_log(response_obj: object) -> dict[str, object]:
+    try:
+        safe_data = copy.deepcopy(_serialize_openai_response_payload(response_obj))
+        sanitized = _sanitize_log_payload(safe_data)
+        if isinstance(sanitized, dict):
+            return sanitized
+        return {"response": sanitized}
+    except Exception:
+        return {"notice": "Log sanitization failed, omitted."}
 
 
 class ImageGenerationService:
@@ -496,6 +580,7 @@ class ImageGenerationService:
                 self.timeout_seconds,
             ),
         )
+        self._image_client: AsyncOpenAI | None = None
         self._prompt_client: AsyncOpenAI | None = None
 
     def resolve_backend(self) -> str:
@@ -803,7 +888,7 @@ class ImageGenerationService:
                 _read_response_text(response)
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            response_text = _read_response_text(exc.response)
+            response_text = _sanitize_log_string(_read_response_text(exc.response))
             raise RuntimeError(
                 "DashScope image generation HTTP request failed: "
                 f"{exc}; response={response_text}",
@@ -823,53 +908,32 @@ class ImageGenerationService:
         *,
         prompt: str,
     ) -> list[str]:
-        endpoint = f"{self.openai_settings.base_url.rstrip('/')}/images/generations"
-        payload = {
-            "model": self.openai_settings.model,
-            "prompt": prompt,
-            "n": 1,
-            "size": OPENAI_COMPATIBLE_IMAGE_SIZE,
-            "response_format": "b64_json",
-        }
-        headers = {
-            "Authorization": f"Bearer {self.openai_settings.api_key}",
-            "Content-Type": "application/json",
-        }
+        return await self._generate_images_with_openai_images_api(prompt=prompt)
 
+    async def _generate_images_with_openai_images_api(
+        self,
+        *,
+        prompt: str,
+    ) -> list[str]:
         try:
-            async with httpx.AsyncClient(
-                timeout=self.openai_request_timeout,
-                follow_redirects=True,
-            ) as client:
-                response = await client.post(
-                    endpoint,
-                    headers=headers,
-                    json=payload,
-                )
-                _read_response_text(response)
-                response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            response_text = _read_response_text(exc.response)
-            raise RuntimeError(
-                "OpenAI-compatible image generation HTTP request failed: "
-                f"{exc}; response={response_text}",
-            ) from exc
+            response = await self._get_image_client().images.generate(
+                model=self.openai_settings.model,
+                prompt=prompt,
+                response_format="b64_json",
+                n=1,
+                size=OPENAI_COMPATIBLE_IMAGE_SIZE,
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"OpenAI-compatible image generation request failed: {exc}",
             ) from exc
 
-        data = _parse_image_generation_response_json(
-            response,
-            provider_name="OpenAI-compatible",
-        )
-        if data is None:
-            return []
-
-        logger.info("OpenAI-compatible image generation raw response: %s", data)
+        data = _serialize_openai_response_payload(response)
+        sanitized_data = sanitize_image_response_for_log(response)
+        logger.info("OpenAI-compatible image generation raw response: %s", sanitized_data)
 
         if isinstance(data.get("error"), dict):
-            logger.error("OpenAI-compatible image generation error response: %s", data)
+            logger.error("OpenAI-compatible image generation error response: %s", sanitized_data)
             error = data["error"]
             raise RuntimeError(
                 str(error.get("message") or error.get("code") or "OpenAI-compatible image generation failed."),
@@ -881,7 +945,7 @@ class ImageGenerationService:
 
         logger.error(
             "OpenAI-compatible image generation returned no usable image references: %s",
-            data,
+            sanitized_data,
         )
         return []
 
@@ -892,15 +956,21 @@ class ImageGenerationService:
         user_id: str | None,
         thread_id: str,
     ) -> list[str]:
-        if not self.persist_results or not user_id:
+        has_data_image_urls = any(url.startswith("data:image/") for url in urls)
+        if not self.persist_results and not has_data_image_urls:
+            return urls
+        if not user_id and not has_data_image_urls:
             return urls
 
         try:
             storage_client = create_storage_client()
         except RuntimeError as exc:  # pragma: no cover - environment-specific fallback
             logger.warning("Image storage persistence skipped: %s", exc)
-            return urls
+            if not has_data_image_urls:
+                return urls
+            storage_client = create_storage_client(preferred_backend="local")
 
+        storage_user_id = _resolve_generated_image_storage_user_id(user_id)
         persisted_urls: list[str] = []
         async with httpx.AsyncClient(
             timeout=self.request_timeout,
@@ -926,22 +996,76 @@ class ImageGenerationService:
                         content_type=content_type,
                     )
                     filename = f"generated/{thread_id}/{uuid.uuid4().hex}-{index}.{extension}"
-                    stored_upload = await storage_client.upload_file(
-                        user_id=user_id,
-                        filename=filename,
-                        content_type=content_type,
-                        data=image_bytes,
+                    persisted_urls.append(
+                        await self._store_generated_image_bytes(
+                            storage_client=storage_client,
+                            storage_user_id=storage_user_id,
+                            filename=filename,
+                            content_type=content_type,
+                            image_bytes=image_bytes,
+                        )
                     )
-                    stored_path = build_stored_file_path(
-                        stored_upload.backend_name,
-                        stored_upload.object_key,
-                    )
-                    persisted_urls.append(build_delivery_url_from_stored_path(stored_path))
                 except Exception as exc:  # pragma: no cover - network/storage fallback
-                    logger.warning("Generated image persistence failed for %s: %s", url, exc)
+                    logger.warning(
+                        "Generated image persistence failed for %s: %s",
+                        _sanitize_log_string(url),
+                        exc,
+                    )
+                    if has_data_image_urls and url.startswith("data:image/"):
+                        try:
+                            fallback_storage_client = create_storage_client(
+                                preferred_backend="local"
+                            )
+                            image_bytes, content_type = _decode_data_image_url(url)
+                            extension = _resolve_extension(
+                                source_url=url,
+                                content_type=content_type,
+                            )
+                            filename = (
+                                f"generated/{thread_id}/{uuid.uuid4().hex}-{index}.{extension}"
+                            )
+                            persisted_urls.append(
+                                await self._store_generated_image_bytes(
+                                    storage_client=fallback_storage_client,
+                                    storage_user_id=storage_user_id,
+                                    filename=filename,
+                                    content_type=content_type,
+                                    image_bytes=image_bytes,
+                                )
+                            )
+                            continue
+                        except Exception as fallback_exc:
+                            logger.error(
+                                "Generated base64 image local fallback persistence failed "
+                                "thread_id=%s error=%s",
+                                thread_id,
+                                fallback_exc,
+                            )
+                            continue
                     persisted_urls.append(url)
 
         return persisted_urls
+
+    async def _store_generated_image_bytes(
+        self,
+        *,
+        storage_client,
+        storage_user_id: str,
+        filename: str,
+        content_type: str,
+        image_bytes: bytes,
+    ) -> str:
+        stored_upload = await storage_client.upload_file(
+            user_id=storage_user_id,
+            filename=filename,
+            content_type=content_type,
+            data=image_bytes,
+        )
+        stored_path = build_stored_file_path(
+            stored_upload.backend_name,
+            stored_upload.object_key,
+        )
+        return build_delivery_url_from_stored_path(stored_path)
 
     def _has_dashscope_config(self) -> bool:
         return bool(self.dashscope_api_key and self.dashscope_base_url and self.dashscope_model)
@@ -952,6 +1076,15 @@ class ImageGenerationService:
             and self.openai_settings.base_url
             and self.openai_settings.model
         )
+
+    def _get_image_client(self) -> AsyncOpenAI:
+        if self._image_client is None:
+            self._image_client = AsyncOpenAI(
+                api_key=self.openai_settings.api_key,
+                base_url=self.openai_settings.base_url,
+                timeout=self.openai_request_timeout,
+            )
+        return self._image_client
 
     def _get_prompt_client(self) -> AsyncOpenAI:
         if self._prompt_client is None:

@@ -70,8 +70,10 @@ from app.services.persistence import extract_upload_relative_path
 from app.services.providers import (
     BaseLLMProvider,
     CompatibleLLMProvider,
+    DeepSeekLLMProvider,
     MockLLMProvider,
     OpenAIProvider,
+    ProxyGPTLLMProvider,
     QwenLLMProvider,
     _resolve_compatible_generation_model,
     _supports_native_audio_understanding,
@@ -292,6 +294,10 @@ def create_langgraph_inner_provider() -> BaseLLMProvider:
         return MockLLMProvider()
     if provider_name == "openai" and os.getenv("OPENAI_API_KEY"):
         return OpenAIProvider()
+    if provider_name == "deepseek" and os.getenv("DEEPSEEK_API_KEY"):
+        return DeepSeekLLMProvider()
+    if provider_name in {"proxy_gpt", "proxy-gpt"} and os.getenv("PROXY_GPT_API_KEY"):
+        return ProxyGPTLLMProvider()
     if provider_name == "compatible":
         if os.getenv("LLM_API_KEY") and os.getenv("LLM_BASE_URL"):
             return CompatibleLLMProvider()
@@ -311,6 +317,10 @@ def create_langgraph_inner_provider() -> BaseLLMProvider:
         return CompatibleLLMProvider()
     if os.getenv("OPENAI_API_KEY"):
         return OpenAIProvider()
+    if os.getenv("DEEPSEEK_API_KEY"):
+        return DeepSeekLLMProvider()
+    if os.getenv("PROXY_GPT_API_KEY"):
+        return ProxyGPTLLMProvider()
     return MockLLMProvider()
 
 

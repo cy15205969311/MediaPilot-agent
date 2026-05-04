@@ -16,8 +16,10 @@ from app.services.persistence import ARTIFACT_TYPE_ADAPTER, persist_assistant_ou
 from app.services.providers import (
     BaseLLMProvider,
     CompatibleLLMProvider,
+    DeepSeekLLMProvider,
     MockLLMProvider,
     OpenAIProvider,
+    ProxyGPTLLMProvider,
     QwenLLMProvider,
     create_provider_from_env,
 )
@@ -95,6 +97,13 @@ class MediaAgentWorkflow:
                 )
 
         return self.provider.clone_with_model_override(normalized_override)
+
+    def resolve_requested_model_target(self, model_override: str | None) -> tuple[str, str]:
+        effective_provider = self._resolve_effective_provider(model_override)
+        resolved_provider_key = _resolve_provider_key(effective_provider)
+        resolved_model_name = _extract_provider_model_name(effective_provider)
+        normalized_model_name = normalize_model_name(resolved_model_name)
+        return resolved_provider_key, normalized_model_name or resolved_model_name
 
     async def stream(
         self,
@@ -259,6 +268,16 @@ def _build_provider_from_prefix(
             model=normalized_model,
             artifact_model=normalized_model,
         )
+    if provider_prefix == "deepseek" and normalized_model:
+        return DeepSeekLLMProvider(
+            model=normalized_model,
+            artifact_model=normalized_model,
+        )
+    if provider_prefix in {"proxy_gpt", "proxy-gpt"} and normalized_model:
+        return ProxyGPTLLMProvider(
+            model=normalized_model,
+            artifact_model=normalized_model,
+        )
     if provider_prefix == "openai" and normalized_model:
         return OpenAIProvider(
             model=normalized_model,
@@ -287,6 +306,30 @@ def _wrap_provider_for_workflow(
         search_timeout_seconds=base_provider.search_timeout_seconds,
         business_tool_max_iterations=base_provider.business_tool_max_iterations,
     )
+
+
+def _resolve_provider_key(provider: BaseLLMProvider) -> str:
+    if isinstance(provider, LangGraphProvider):
+        return _resolve_provider_key(provider.inner_provider)
+    if isinstance(provider, ProxyGPTLLMProvider):
+        return "proxy_gpt"
+    if isinstance(provider, DeepSeekLLMProvider):
+        return "deepseek"
+    if isinstance(provider, QwenLLMProvider):
+        return "dashscope"
+    if isinstance(provider, CompatibleLLMProvider):
+        return "compatible"
+    if isinstance(provider, OpenAIProvider):
+        return "openai"
+    if isinstance(provider, MockLLMProvider):
+        return "mock"
+    return ""
+
+
+def _extract_provider_model_name(provider: BaseLLMProvider) -> str:
+    if isinstance(provider, LangGraphProvider):
+        return _extract_provider_model_name(provider.inner_provider)
+    return str(getattr(provider, "model", "") or "").strip()
 
 
 def _resolve_runtime_model_name(

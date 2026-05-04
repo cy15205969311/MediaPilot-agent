@@ -36,6 +36,7 @@ import {
   deleteTemplates,
   deleteThread,
   fetchArtifacts,
+  fetchAvailableModels,
   fetchCurrentUser,
   fetchDashboardSummary,
   fetchKnowledgeScopeSources,
@@ -107,6 +108,7 @@ import type {
   TemplateCategory,
   TemplateCreatePayload,
   TemplateListQuery,
+  ModelProvider,
   TemplatePlatform,
   TemplateSkillDiscoveryItem,
   TemplateSummaryItem,
@@ -133,6 +135,13 @@ import {
   buildArtifactMarkdown,
   downloadArtifactMarkdown,
 } from "./artifactMarkdown";
+import {
+  findModelSelection,
+  getPreferredConfiguredModel,
+  isModelLockedForRole,
+  PREMIUM_MODEL_ACCESS_DENIED_MESSAGE,
+  PREMIUM_MODEL_FALLBACK_NOTICE,
+} from "./modelAccess";
 import { cleanForPublishing } from "./utils/textUtils";
 
 type AuthMode =
@@ -471,18 +480,59 @@ function buildNextTemplateQuery(
   };
 }
 
+function resolveAccessibleModelOverride(
+  providers: ModelProvider[],
+  requestedModelOverride: string | null | undefined,
+  role: AuthenticatedUser["role"] | null | undefined,
+): {
+  modelId: string;
+  downgradedFromPremium: boolean;
+} {
+  const fallbackModel = getPreferredConfiguredModel(providers, role);
+  const fallbackId = fallbackModel?.id ?? "";
+  const normalizedRequestedModel = (requestedModelOverride ?? "").trim();
+
+  if (!normalizedRequestedModel) {
+    return {
+      modelId: fallbackId,
+      downgradedFromPremium: false,
+    };
+  }
+
+  const selectedModel = findModelSelection(providers, normalizedRequestedModel);
+  if (
+    selectedModel &&
+    selectedModel.provider.status === "configured" &&
+    !isModelLockedForRole(selectedModel.model, role)
+  ) {
+    return {
+      modelId: selectedModel.model.id,
+      downgradedFromPremium: false,
+    };
+  }
+
+  return {
+    modelId: fallbackId,
+    downgradedFromPremium: Boolean(
+      selectedModel && isModelLockedForRole(selectedModel.model, role),
+    ),
+  };
+}
+
 function toThreadItem(
   id: string,
   title: string,
   excerpt: string,
   updatedAt: string,
   isArchived: boolean,
+  modelOverride: string | null = null,
 ): ThreadItem {
   return {
     id,
     title: title || excerpt || "Untitled thread",
     time: formatRelativeTime(updatedAt) || "刚刚",
     isArchived,
+    modelOverride,
   };
 }
 
@@ -495,6 +545,7 @@ function toThreadItemFromSummary(
     summary.latest_message_excerpt,
     summary.updated_at,
     summary.is_archived,
+    summary.model_override ?? null,
   );
 }
 
@@ -1192,6 +1243,11 @@ function App() {
       "";
     return storedValue.trim();
   });
+  const [availableModelProviders, setAvailableModelProviders] = useState<
+    ModelProvider[]
+  >([]);
+  const [isLoadingAvailableModels, setIsLoadingAvailableModels] = useState(false);
+  const [availableModelsError, setAvailableModelsError] = useState("");
   const [message, setMessage] = useState(
     "请帮我策划一篇关于xxx的小红书笔记",
   );
@@ -1297,9 +1353,41 @@ function App() {
   const isInitialTemplatesLoading = isLoadingTemplates && !hasLoadedTemplates;
   const isFetchingTemplatesPage = isLoadingTemplates && hasLoadedTemplates;
   const currentDisplayName = useMemo(() => getDisplayName(currentUser), [currentUser]);
+  const currentUserRole = currentUser?.role ?? null;
   const openXiaohongshuCreatorCenter = () => {
     window.open(XIAOHONGSHU_CREATOR_URL, "_blank", "noopener,noreferrer");
   };
+
+  const pushGlobalToast = useCallback(
+    (
+      tone: PublishToastState["tone"],
+      title: string,
+      messageText: string,
+      error?: string,
+    ) => {
+      setPublishToast({
+        id: Date.now(),
+        tone,
+        title,
+        message: messageText,
+        ...(error ? { error } : {}),
+      });
+    },
+    [],
+  );
+
+  const handlePremiumUpgradePrompt = useCallback(
+    (messageText = PREMIUM_MODEL_ACCESS_DENIED_MESSAGE) => {
+      setStatusText(messageText);
+      pushGlobalToast("warning", "高级模型暂不可用", messageText);
+    },
+    [pushGlobalToast],
+  );
+
+  const handlePremiumFallbackNotice = useCallback(() => {
+    setStatusText(PREMIUM_MODEL_FALLBACK_NOTICE);
+    pushGlobalToast("warning", "已切换默认模型", PREMIUM_MODEL_FALLBACK_NOTICE);
+  }, [pushGlobalToast]);
 
   const handleAuthModeChange = (mode: AuthMode) => {
     setAuthMode(mode);
@@ -1314,6 +1402,39 @@ function App() {
     }
   };
 
+  const loadAvailableModels = async (options?: { silent?: boolean }) => {
+    setIsLoadingAvailableModels(true);
+
+    try {
+      const payload = await fetchAvailableModels();
+      setAvailableModelProviders(payload.items);
+      setAvailableModelsError("");
+      return payload.items;
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleUnauthorized(error instanceof APIError ? error.message : undefined);
+        return [];
+      }
+
+      const errorMessage =
+        error instanceof APIError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "加载模型目录失败，请稍后重试。";
+
+      setAvailableModelProviders([]);
+      setAvailableModelsError(errorMessage);
+      if (!options?.silent) {
+        setStatusText("模型目录同步失败");
+      }
+
+      return [];
+    } finally {
+      setIsLoadingAvailableModels(false);
+    }
+  };
+
   useEffect(() => {
     if (currentUser === null && (getStoredToken() || getStoredRefreshToken())) {
       clearStoredToken();
@@ -1321,6 +1442,50 @@ function App() {
       clearStoredUser();
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!isAuthenticated || currentUser === null) {
+      setAvailableModelProviders([]);
+      setAvailableModelsError("");
+      setIsLoadingAvailableModels(false);
+      return;
+    }
+
+    void loadAvailableModels({ silent: true });
+  }, [currentUser?.id, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || currentUser === null || availableModelProviders.length === 0) {
+      return;
+    }
+
+    const resolvedModel = resolveAccessibleModelOverride(
+      availableModelProviders,
+      modelOverride,
+      currentUser.role,
+    );
+    const normalizedCurrentModel = modelOverride.trim();
+
+    if (resolvedModel.modelId === normalizedCurrentModel) {
+      return;
+    }
+
+    if (!normalizedCurrentModel && !resolvedModel.modelId) {
+      return;
+    }
+
+    setModelOverride(resolvedModel.modelId);
+
+    if (normalizedCurrentModel && resolvedModel.downgradedFromPremium) {
+      handlePremiumFallbackNotice();
+    }
+  }, [
+    availableModelProviders,
+    currentUser,
+    handlePremiumFallbackNotice,
+    isAuthenticated,
+    modelOverride,
+  ]);
 
   useEffect(() => {
     const onResize = () => {
@@ -1596,6 +1761,9 @@ function App() {
     setTemplatePagination(initialTemplatePaginationState);
     setHasLoadedTemplates(false);
     setTemplateSkills([]);
+    setAvailableModelProviders([]);
+    setAvailableModelsError("");
+    setIsLoadingAvailableModels(false);
     setIsLoadingDrafts(false);
     setIsLoadingKnowledgeScopes(false);
     setIsLoadingTopics(false);
@@ -1804,6 +1972,11 @@ function App() {
     try {
       const payload = await fetchThreadMessages(thread.id);
       const { chatMessages, latestArtifact } = toConversationMessages(payload.messages);
+      const savedThreadModelOverride = (
+        payload.model_override ??
+        thread.modelOverride ??
+        ""
+      ).trim();
 
       setMessages(chatMessages);
       setArtifact(latestArtifact);
@@ -1811,6 +1984,32 @@ function App() {
       setActiveThreadTitle(payload.title || thread.title);
       setActiveSystemPrompt(payload.system_prompt || "");
       setActiveKnowledgeBaseScope(payload.knowledge_base_scope || "");
+      upsertThreadInList({
+        ...thread,
+        title: payload.title || thread.title,
+        modelOverride: payload.model_override ?? null,
+      });
+
+      if (savedThreadModelOverride) {
+        const providerSnapshot =
+          availableModelProviders.length > 0
+            ? availableModelProviders
+            : await loadAvailableModels({ silent: true });
+        if (providerSnapshot.length > 0) {
+          const resolvedModel = resolveAccessibleModelOverride(
+            providerSnapshot,
+            savedThreadModelOverride,
+            currentUserRole,
+          );
+          setModelOverride(resolvedModel.modelId);
+          if (resolvedModel.downgradedFromPremium) {
+            handlePremiumFallbackNotice();
+          }
+        } else {
+          setModelOverride(savedThreadModelOverride);
+        }
+      }
+
       setStatusText("历史会话已载入");
       return "loaded";
     } catch (error) {
@@ -3470,6 +3669,7 @@ function App() {
       id: normalizedThreadId,
       title: normalizedTitle,
       time: normalizedThreadId === "thread-new" ? "草稿" : "撰写中",
+      modelOverride: modelOverride.trim() || null,
     });
     setStatusText("准备新的内容任务");
     setRightPanelOpen(true);
@@ -3696,6 +3896,7 @@ function App() {
       id: nextThreadId,
       title: nextThreadTitle,
       time: "刚刚",
+      modelOverride: modelOverride.trim() || null,
     });
 
     const noteMessages: ConversationMessageDraft[] = [];
@@ -4060,6 +4261,9 @@ function App() {
       setTemplatePagination(initialTemplatePaginationState);
       setHasLoadedTemplates(false);
       setTemplateSkills([]);
+      setAvailableModelProviders([]);
+      setAvailableModelsError("");
+      setIsLoadingAvailableModels(false);
       setIsLoadingDrafts(false);
       setIsLoadingKnowledgeScopes(false);
       setIsLoadingTopics(false);
@@ -4221,7 +4425,11 @@ function App() {
       >
         <AppHeader
           currentDisplayName={currentDisplayName}
+          currentUserRole={currentUserRole}
+          isLoadingModelProviders={isLoadingAvailableModels}
           modelOverride={modelOverride}
+          modelProviders={availableModelProviders}
+          modelProvidersError={availableModelsError}
           onExportMarkdown={() => handleExportMarkdown(displayedArtifact)}
           onModelOverrideChange={setModelOverride}
           onOpenLeftSidebar={() => {
@@ -4233,6 +4441,10 @@ function App() {
             setRightPanelOpen(true);
           }}
           onPlatformChange={setPlatform}
+          onPremiumUpgradePrompt={handlePremiumUpgradePrompt}
+          onReloadModelProviders={() => {
+            void loadAvailableModels();
+          }}
           onTaskTypeChange={setTaskType}
           platform={platform}
           taskType={taskType}

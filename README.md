@@ -182,6 +182,16 @@ npx playwright install chromium
 - `OPENAI_MODEL`
 - `OPENAI_ARTIFACT_MODEL`
 - `OPENAI_VISION_MODEL`
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_BASE_URL`
+- `DEEPSEEK_MODEL`
+- `DEEPSEEK_ARTIFACT_MODEL`
+- `DEEPSEEK_TIMEOUT_SECONDS`
+- `PROXY_GPT_API_KEY`
+- `PROXY_GPT_BASE_URL`
+- `PROXY_GPT_MODEL`
+- `PROXY_GPT_ARTIFACT_MODEL`
+- `PROXY_GPT_TIMEOUT_SECONDS`
 - `TAVILY_API_KEY`
 
 ### 6.2 图像生成与转写
@@ -203,6 +213,8 @@ npx playwright install chromium
 - `OPENAI_TRANSCRIPTION_BASE_URL`
 - `OPENAI_TRANSCRIPTION_API_KEY`
 - `OPENAI_TRANSCRIPTION_MODEL`
+
+当前 OpenAI 兼容生图链路为了适配第三方中转站，默认使用经典 `Images API`，也就是 SDK 的 `client.images.generate(...)` / 网关侧的 `/v1/images/generations`。请求固定要求 `response_format="b64_json"`，不要在未确认上游网关支持的情况下直接切到 `Responses API` 的 `/v1/responses` 生图路径。
 
 ### 6.3 存储
 
@@ -552,6 +564,15 @@ C 端本地模板中心也同步补齐了生命周期能力：
   - `团队共享`
   - `我的模板`
 
+### 7.25 OpenAI 兼容生图网关基线
+
+- `app/services/image_generation.py` 当前对 OpenAI 兼容生图统一走 SDK `AsyncOpenAI.images.generate(...)`
+- 为了兼容尚未适配 `/v1/responses` 的第三方中转站，请求固定为 `response_format="b64_json"`、`n=1`、`size="1024x1024"`
+- 后端日志必须先经过 `sanitize_image_response_for_log()` 一类的脱敏处理，严禁直接打印原始 `b64_json`
+- Base64 仅允许在服务端内存中短暂存在，随后立即解码并持久化到本地 `uploads/` 或对象存储，再向前端返回可访问 URL
+- `app/main.py` 挂载的 `/uploads` 静态目录属于本地落盘链路的一部分，排障时不要误删
+- 若 OpenAI 兼容链路失败，现有 DashScope 兜底逻辑仍然保留，用于保障可用性
+
 ## 8. 后端边界与分层规则
 
 ### 8.1 路由分组
@@ -681,6 +702,7 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 若改动 Schema：检查前后端契约兼容性
 - 若改动数据库写路径：重点检查 `SQLite` 事务释放与只读接口响应
 - 若改动 ORM 或 Alembic 迁移：发布前必须执行 `alembic upgrade head`
+- 若改动 OpenAI 兼容生图链路：至少执行 `python -m pytest tests/test_image_generation.py`
 - 历史迁移修补必须保持幂等，不要假设旧表、旧列或旧索引一定存在
 - 推荐迁移冒烟命令：
 

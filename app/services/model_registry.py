@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
+from app.config import get_deepseek_available_models, get_proxy_gpt_available_models
 from app.services.providers import (
     DEFAULT_QWEN_PRIMARY_MODEL,
     _is_dashscope_compatible_base_url,
@@ -44,6 +45,10 @@ MODEL_PRIORITY = {
     "mimo-v2.5-pro": 0,
     "mimo-v2.5": 1,
     "mimo-v2-omni": 2,
+    "deepseek-chat": 0,
+    "deepseek-reasoner": 1,
+    "gpt-5.4": 0,
+    "gpt-5.4-mini": 1,
     "qwen-max": 0,
     "qwen-plus": 1,
     "qwen-turbo": 2,
@@ -72,6 +77,8 @@ STATUS_CONFIGURED_LABEL = "\u5df2\u914d\u7f6e"
 STATUS_UNCONFIGURED_LABEL = "\u9700\u8981\u914d\u7f6e"
 DASHSCOPE_PROVIDER_LABEL = "\u963f\u91cc\u767e\u70bc (DashScope)"
 MIMO_PROVIDER_LABEL = "\u5c0f\u7c73 MiMo (Compatible API)"
+DEEPSEEK_PROVIDER_LABEL = "DeepSeek"
+PROXY_GPT_PROVIDER_LABEL = "GPT-5.4 Proxy"
 
 _MIMO_MODEL_SPECS = (
     {
@@ -93,6 +100,28 @@ _MIMO_MODEL_SPECS = (
         "tags": (TAG_MULTIMODAL, TAG_VISION),
     },
 )
+
+
+def _build_env_model_specs(*model_names: str) -> tuple[dict[str, object], ...]:
+    unique_model_names: list[str] = []
+    seen: set[str] = set()
+    for model_name in model_names:
+        normalized = model_name.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_model_names.append(normalized)
+
+    return tuple(
+        {
+            "model": model_name,
+            "name": _format_model_display_name(model_name),
+            "group": _infer_model_group(model_name),
+            "tags": _infer_model_tags(model_name),
+        }
+        for model_name in unique_model_names
+    )
+
 
 _DASHSCOPE_MODEL_IDS = (
     "cosyvoice-v1",
@@ -333,6 +362,8 @@ _DASHSCOPE_MODEL_IDS = (
 def _format_model_display_name(model_name: str) -> str:
     label = model_name
     replacements = (
+        ("deepseek", "DeepSeek"),
+        ("gpt", "GPT"),
         ("qwen3.6", "Qwen3.6"),
         ("qwen3.5", "Qwen3.5"),
         ("qwen3", "Qwen3"),
@@ -377,6 +408,8 @@ def _format_model_display_name(model_name: str) -> str:
         "lite": "Lite",
         "filetrans": "FileTrans",
         "audio": "Audio",
+        "chat": "Chat",
+        "reasoner": "Reasoner",
         "image": "Image",
         "edit": "Edit",
         "doc": "Doc",
@@ -504,6 +537,28 @@ def _resolve_compatible_default_model() -> str:
     return normalized or "mimo-v2.5-pro"
 
 
+def _resolve_deepseek_default_model() -> str:
+    default_model = (
+        os.getenv("DEEPSEEK_MODEL", "").strip()
+        or os.getenv("DEEPSEEK_ARTIFACT_MODEL", "").strip()
+        or "deepseek-chat"
+    )
+    if ":" in default_model:
+        _, _, default_model = default_model.partition(":")
+    return default_model.strip() or "deepseek-chat"
+
+
+def _resolve_proxy_gpt_default_model() -> str:
+    default_model = (
+        os.getenv("PROXY_GPT_MODEL", "").strip()
+        or os.getenv("PROXY_GPT_ARTIFACT_MODEL", "").strip()
+        or "gpt-5.4"
+    )
+    if ":" in default_model:
+        _, _, default_model = default_model.partition(":")
+    return default_model.strip() or "gpt-5.4"
+
+
 def _resolve_langgraph_inner_provider_key() -> str:
     configured_inner_provider = os.getenv("LANGGRAPH_INNER_PROVIDER", "").strip().lower()
     if configured_inner_provider:
@@ -520,6 +575,10 @@ def _resolve_langgraph_inner_provider_key() -> str:
         return "compatible"
     if os.getenv("OPENAI_API_KEY", "").strip():
         return "openai"
+    if os.getenv("DEEPSEEK_API_KEY", "").strip():
+        return "deepseek"
+    if os.getenv("PROXY_GPT_API_KEY", "").strip() and os.getenv("PROXY_GPT_BASE_URL", "").strip():
+        return "proxy_gpt"
     return "mock"
 
 
@@ -554,24 +613,51 @@ def _compatible_is_configured() -> bool:
     return False
 
 
+def _deepseek_is_configured() -> bool:
+    return bool(
+        os.getenv("DEEPSEEK_API_KEY", "").strip()
+        and _resolve_deepseek_default_model().strip()
+    )
+
+
+def _proxy_gpt_is_configured() -> bool:
+    return bool(
+        os.getenv("PROXY_GPT_API_KEY", "").strip()
+        and os.getenv("PROXY_GPT_BASE_URL", "").strip()
+        and _resolve_proxy_gpt_default_model().strip()
+    )
+
+
 def _resolve_active_provider_key() -> str:
     provider_name = os.getenv("OMNIMEDIA_LLM_PROVIDER", "").strip().lower()
     if provider_name in {"qwen", "dashscope"}:
         return "dashscope"
     if provider_name in {"compatible", "xiaomi"}:
         return "compatible"
+    if provider_name == "deepseek":
+        return "deepseek"
+    if provider_name in {"proxy_gpt", "proxy-gpt"}:
+        return "proxy_gpt"
     if provider_name in {"langgraph", "graph"}:
         inner_provider = _resolve_langgraph_inner_provider_key()
         if inner_provider in {"qwen", "dashscope"}:
             return "dashscope"
         if inner_provider in {"compatible", "xiaomi"}:
             return "compatible"
+        if inner_provider == "deepseek":
+            return "deepseek"
+        if inner_provider in {"proxy_gpt", "proxy-gpt"}:
+            return "proxy_gpt"
         return ""
     if provider_name == "auto":
         if _dashscope_is_configured():
             return "dashscope"
         if _compatible_is_configured():
             return "compatible"
+        if _deepseek_is_configured():
+            return "deepseek"
+        if _proxy_gpt_is_configured():
+            return "proxy_gpt"
     return ""
 
 
@@ -662,19 +748,84 @@ def _build_compatible_provider() -> RegisteredProvider:
     )
 
 
+def _build_configurable_provider(
+    *,
+    provider_key: str,
+    provider_label: str,
+    configured: bool,
+    default_model: str,
+    specs: tuple[dict[str, object], ...],
+) -> RegisteredProvider:
+    models = tuple(
+        sorted(
+            (
+                _build_registered_model(
+                    provider_key=provider_key,
+                    model_name=str(spec["model"]),
+                    default_model=default_model,
+                    name=str(spec["name"]),
+                    group=str(spec["group"]),
+                    tags=tuple(str(tag) for tag in spec["tags"]),
+                )
+                for spec in specs
+            ),
+            key=_model_sort_key,
+        ),
+    )
+    return RegisteredProvider(
+        provider_key=provider_key,
+        provider=provider_label,
+        status="configured" if configured else "unconfigured",
+        status_label=STATUS_CONFIGURED_LABEL if configured else STATUS_UNCONFIGURED_LABEL,
+        models=models,
+    )
+
+
+def _build_deepseek_provider() -> RegisteredProvider:
+    default_model = _resolve_deepseek_default_model()
+    available_models = get_deepseek_available_models()
+    specs = _build_env_model_specs(
+        default_model,
+        *available_models,
+        os.getenv("DEEPSEEK_ARTIFACT_MODEL", "").strip(),
+    )
+    return _build_configurable_provider(
+        provider_key="deepseek",
+        provider_label=DEEPSEEK_PROVIDER_LABEL,
+        configured=_deepseek_is_configured(),
+        default_model=default_model,
+        specs=specs,
+    )
+
+
+def _build_proxy_gpt_provider() -> RegisteredProvider:
+    default_model = _resolve_proxy_gpt_default_model()
+    available_models = get_proxy_gpt_available_models()
+    specs = _build_env_model_specs(
+        default_model,
+        *available_models,
+        os.getenv("PROXY_GPT_ARTIFACT_MODEL", "").strip(),
+    )
+    return _build_configurable_provider(
+        provider_key="proxy_gpt",
+        provider_label=PROXY_GPT_PROVIDER_LABEL,
+        configured=_proxy_gpt_is_configured(),
+        default_model=default_model,
+        specs=specs,
+    )
+
+
 def get_available_model_providers() -> tuple[RegisteredProvider, ...]:
     providers_by_key = {
         "compatible": _build_compatible_provider(),
         "dashscope": _build_dashscope_provider(),
+        "deepseek": _build_deepseek_provider(),
+        "proxy_gpt": _build_proxy_gpt_provider(),
     }
-
-    active_provider_key = _resolve_active_provider_key()
-    preferred_order = (
-        ("compatible", "dashscope")
-        if active_provider_key == "compatible"
-        else ("dashscope", "compatible")
+    return tuple(
+        providers_by_key[key]
+        for key in ("compatible", "dashscope", "deepseek", "proxy_gpt")
     )
-    return tuple(providers_by_key[key] for key in preferred_order)
 
 
 def _get_legacy_available_model_providers() -> tuple[RegisteredProvider, ...]:

@@ -179,6 +179,10 @@ class Thread(Base):
     )
     title: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     system_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    model_override: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True,
+    )
     knowledge_base_scope: Mapped[str | None] = mapped_column(
         String(120),
         nullable=True,

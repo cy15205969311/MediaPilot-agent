@@ -41,6 +41,11 @@ def run_startup_migrations() -> None:
         return
 
     user_columns = {column["name"] for column in inspector.get_columns("users")}
+    thread_columns = (
+        {column["name"] for column in inspector.get_columns("threads")}
+        if "threads" in existing_tables
+        else set()
+    )
     column_statements: list[str] = []
 
     if "role" not in user_columns:
@@ -54,6 +59,10 @@ def run_startup_migrations() -> None:
     if "token_balance" not in user_columns:
         column_statements.append(
             "ALTER TABLE users ADD COLUMN token_balance INTEGER NOT NULL DEFAULT 0"
+        )
+    if "threads" in existing_tables and "model_override" not in thread_columns:
+        column_statements.append(
+            "ALTER TABLE threads ADD COLUMN model_override VARCHAR(80)"
         )
 
     if not column_statements:
