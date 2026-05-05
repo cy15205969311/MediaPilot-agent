@@ -90,6 +90,7 @@ import type {
   ArtifactPayload,
   AuthSessionItem,
   AuthenticatedUser,
+  BackendTaskType,
   ChatStreamEvent,
   ComposerSubmitPayload,
   ConversationMessage,
@@ -294,6 +295,10 @@ function getTaskTypeFromArtifact(artifact: ArtifactPayload): UiTaskType {
     default:
       return "content_generation";
   }
+}
+
+function mapBackendTaskTypeToUiTaskType(taskType: BackendTaskType): UiTaskType {
+  return taskType;
 }
 
 function getArtifactStreamStatusText(artifact: ArtifactPayload): string {
@@ -1348,6 +1353,7 @@ function App() {
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isInsufficientTokensModalOpen, setIsInsufficientTokensModalOpen] = useState(false);
   const [isWorkspaceHeaderExpanded, setIsWorkspaceHeaderExpanded] = useState(true);
+  const [streamResolvedTaskType, setStreamResolvedTaskType] = useState<UiTaskType | null>(null);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
   const [authSessions, setAuthSessions] = useState<AuthSessionItem[]>([]);
@@ -1718,10 +1724,19 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (isStreaming) {
+      return;
+    }
     setActiveArtifactTaskType(taskType);
   }, [taskType, activeThreadId]);
 
-  const activeTaskLabel = useMemo(() => getTaskTypeLabel(taskType), [taskType]);
+  const activeTaskLabel = useMemo(() => {
+    if (isStreaming && !streamResolvedTaskType) {
+      return "等待后端确认任务类型";
+    }
+
+    return getTaskTypeLabel(streamResolvedTaskType ?? taskType);
+  }, [isStreaming, streamResolvedTaskType, taskType]);
 
   const workspaceTitle = useMemo(() => {
     if (platform === "xiaohongshu") {
@@ -1775,16 +1790,24 @@ function App() {
       null,
     [activeArtifactTaskType, artifactTaskEntries],
   );
+  const isAwaitingStreamTaskResolution = isStreaming && streamResolvedTaskType === null;
   const streamingUiState = useMemo(
     () =>
       buildStreamingUiState({
         isStreaming,
-        taskType,
+        taskType: isStreaming ? streamResolvedTaskType : taskType,
         statusText,
         toolCallTimeline,
         elapsedSeconds: streamingElapsedSeconds,
       }),
-    [isStreaming, statusText, streamingElapsedSeconds, taskType, toolCallTimeline],
+    [
+      isStreaming,
+      statusText,
+      streamingElapsedSeconds,
+      streamResolvedTaskType,
+      taskType,
+      toolCallTimeline,
+    ],
   );
   const imageStreamingUiState =
     streamingUiState?.variant === "image" ? streamingUiState : null;
@@ -1867,6 +1890,7 @@ function App() {
     setMessages([]);
     setArtifact(null);
     setToolCallTimeline([]);
+    setStreamResolvedTaskType(null);
     replaceUploadedMaterials([]);
     setMessage("");
     setActiveThreadId(nextThreadId);
@@ -1915,6 +1939,7 @@ function App() {
     setToolCallTimeline([]);
     replaceUploadedMaterials([]);
     setArtifact(null);
+    setStreamResolvedTaskType(null);
     setStatusText("请重新登录");
     setAuthMode("login");
     setAuthError(fallbackMessage);
@@ -2097,6 +2122,7 @@ function App() {
     setActiveThreadTitle(thread.title);
     setActiveTopicId(topicId);
     setToolCallTimeline([]);
+    setStreamResolvedTaskType(null);
     setStatusText("正在加载历史会话");
     setIsLoadingThreadHistory(true);
     setRightPanelOpen(true);
@@ -2116,6 +2142,7 @@ function App() {
       if (latestArtifact) {
         const restoredTaskType = getTaskTypeFromArtifact(latestArtifact);
         setTaskType(restoredTaskType);
+        setStreamResolvedTaskType(restoredTaskType);
         setActiveArtifactTaskType(restoredTaskType);
       }
       replaceUploadedMaterials([]);
@@ -3351,6 +3378,8 @@ function App() {
     streamingStartedAtRef.current = null;
     setStreamingElapsedSeconds(0);
     setIsStreaming(false);
+    setStreamResolvedTaskType(null);
+    setPublishToast(null);
     streamErrorRef.current = false;
     assistantMessageIdRef.current = null;
     setStatusText(statusMessage);
@@ -3528,6 +3557,12 @@ function App() {
   const handleStreamEvent = (event: ChatStreamEvent) => {
     switch (event.event) {
       case "start":
+        {
+          const resolvedTaskType = mapBackendTaskTypeToUiTaskType(event.task_type);
+          setStreamResolvedTaskType(resolvedTaskType);
+          setTaskType(resolvedTaskType);
+          setActiveArtifactTaskType(resolvedTaskType);
+        }
         setToolCallTimeline([]);
         setStatusText("已建立流式连接，Agent 正在组织输出");
         setActiveThreadId(event.thread_id);
@@ -3568,6 +3603,7 @@ function App() {
             createdAt: new Date().toISOString(),
           });
           setIsStreaming(false);
+          setStreamResolvedTaskType(null);
           assistantMessageIdRef.current = null;
           break;
         }
@@ -3575,11 +3611,13 @@ function App() {
         if (streamErrorRef.current) {
           streamErrorRef.current = false;
           setIsStreaming(false);
+          setStreamResolvedTaskType(null);
           assistantMessageIdRef.current = null;
           break;
         }
         setStatusText("生成完成，可继续优化、改写或导出");
         setIsStreaming(false);
+        setStreamResolvedTaskType(null);
         assistantMessageIdRef.current = null;
         break;
     }
@@ -4087,7 +4125,7 @@ function App() {
     streamErrorRef.current = false;
     setActiveView("chat");
     setArtifact(null);
-    setActiveArtifactTaskType(effectiveTaskType);
+    setStreamResolvedTaskType(null);
     setToolCallTimeline([]);
     setActiveThreadId(nextThreadId);
     setActiveThreadTitle(nextThreadTitle);
@@ -4209,6 +4247,7 @@ function App() {
       }
       if (!shouldTreatAsStopped) {
         setIsStreaming(false);
+        setStreamResolvedTaskType(null);
         assistantMessageIdRef.current = null;
       }
     } finally {
@@ -4980,6 +5019,7 @@ function App() {
               artifactActions={artifactActions}
               isDesktopCollapsed={isRightPanelCollapsed}
               isStreaming={isStreaming}
+              awaitingArtifactResolution={isAwaitingStreamTaskResolution}
               onClose={() => setRightPanelOpen(false)}
               onOpen={() => {
                 setIsRightPanelCollapsed(false);

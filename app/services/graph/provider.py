@@ -64,10 +64,6 @@ from app.services.knowledge_base import (
     normalize_knowledge_base_scope,
 )
 from app.services.image_generation import DashScopeImageGenerationService
-from app.services.intent_routing import (
-    normalize_media_chat_request,
-    should_route_to_direct_image_generation,
-)
 from app.services.media_parser import (
     MediaParserError,
     parse_document,
@@ -535,7 +531,6 @@ class LangGraphProvider(BaseLLMProvider):
         thread: Thread | None = None,
         user_id: str | None = None,
     ) -> AsyncGenerator[dict[str, object], None]:
-        request, _ = normalize_media_chat_request(request)
         inner_model_name = getattr(self.inner_provider, "model", "") or "<unset>"
         logger.info(
             "langgraph.stream start thread_id=%s task_type=%s materials=%s inner_provider=%s (model=%s)",
@@ -679,7 +674,6 @@ class LangGraphProvider(BaseLLMProvider):
                 "ocr_node": "ocr_node",
                 "search_node": "search_node",
                 "generate_draft_node": "generate_draft_node",
-                "generate_image_node": "generate_image_node",
             },
         )
         graph.add_conditional_edges(
@@ -688,7 +682,6 @@ class LangGraphProvider(BaseLLMProvider):
             {
                 "search_node": "search_node",
                 "generate_draft_node": "generate_draft_node",
-                "generate_image_node": "generate_image_node",
             },
         )
         graph.add_edge("search_node", "generate_draft_node")
@@ -731,64 +724,26 @@ class LangGraphProvider(BaseLLMProvider):
 
     async def _router_node(self, state: GraphState) -> GraphState:
         request = state["request"]
-        normalized_request, routing_resolution = normalize_media_chat_request(request)
-        state_updates: GraphState = {}
-        if routing_resolution.overridden:
-            logger.info(
-                "langgraph smart_router override thread_id=%s requested=%s resolved=%s reason=%s",
-                request.thread_id,
-                routing_resolution.requested_task_type.value,
-                routing_resolution.resolved_task_type.value,
-                routing_resolution.reason,
-            )
-            request = normalized_request
-            state_updates["request"] = normalized_request
-
         user_role = str((state.get("user_context") or {}).get("role") or "user").strip().lower()
         logger.info(
             "langgraph node=router thread_id=%s user_role=%s",
             request.thread_id,
             user_role or "user",
         )
-        if _should_bypass_to_direct_image_generation(
-            request,
-            routing_resolution=routing_resolution,
-        ):
-            resolved_image_backend = self.image_service.resolve_backend(user_role=user_role)
-            execution_plan = [EXECUTION_STEP_GENERATE_IMAGE]
-            logger.info(
-                "langgraph router bypass thread_id=%s next=%s reason=direct_image_request user_role=%s image_backend=%s execution_plan=%s",
-                request.thread_id,
-                "parse_materials_node",
-                user_role or "user",
-                resolved_image_backend,
-                execution_plan,
-            )
-            return {
-                **state_updates,
-                "needs_search": False,
-                "search_query": "",
-                "needs_image": True,
-                "direct_image_mode": True,
-                "execution_plan": execution_plan,
-                "active_execution_step": EXECUTION_STEP_GENERATE_IMAGE,
-                "next_route": "parse_materials_node",
-                "current_step": "router:direct_image_bypass",
-            }
         decision = await self._decide_search_route(request)
         execution_plan = _build_router_execution_plan(request)
         active_execution_step = execution_plan[0] if execution_plan else ""
         logger.info(
-            "langgraph router planned thread_id=%s execution_plan=%s needs_search=%s",
+            "langgraph router planned thread_id=%s mode_hint=%s execution_plan=%s needs_search=%s",
             request.thread_id,
+            request.task_type.value,
             execution_plan,
             decision.needs_search,
         )
         return {
-            **state_updates,
             "needs_search": decision.needs_search,
             "search_query": decision.search_query,
-            "needs_image": EXECUTION_STEP_GENERATE_IMAGE in execution_plan,
+            "needs_image": False,
             "direct_image_mode": False,
             "execution_plan": execution_plan,
             "active_execution_step": active_execution_step,
@@ -1058,15 +1013,6 @@ class LangGraphProvider(BaseLLMProvider):
                 state.get("needs_search"),
             )
             return "ocr_node"
-        current_execution_step = _get_current_execution_step(state)
-        if current_execution_step == EXECUTION_STEP_GENERATE_IMAGE:
-            logger.info(
-                "langgraph route=after_parse thread_id=%s next=%s execution_step=%s",
-                state["request"].thread_id,
-                "generate_image_node",
-                current_execution_step,
-            )
-            return "generate_image_node"
         if state.get("needs_search"):
             logger.info(
                 "langgraph route=after_parse thread_id=%s next=%s needs_ocr=%s",
@@ -1086,15 +1032,6 @@ class LangGraphProvider(BaseLLMProvider):
         cancelled_route = _route_to_end_if_cancelled(state, route_name="after_ocr")
         if cancelled_route is not None:
             return cancelled_route
-        current_execution_step = _get_current_execution_step(state)
-        if current_execution_step == EXECUTION_STEP_GENERATE_IMAGE:
-            logger.info(
-                "langgraph route=after_ocr thread_id=%s next=%s execution_step=%s",
-                state["request"].thread_id,
-                "generate_image_node",
-                current_execution_step,
-            )
-            return "generate_image_node"
         if state.get("needs_search"):
             logger.info(
                 "langgraph route=after_ocr thread_id=%s next=%s",
@@ -1822,7 +1759,9 @@ class LangGraphProvider(BaseLLMProvider):
         await _raise_if_state_cancelled(state)
         request = state["request"]
         user_role = str((state.get("user_context") or {}).get("role") or "user").strip().lower()
-        direct_image_mode = bool(state.get("direct_image_mode"))
+        direct_image_mode = bool(state.get("direct_image_mode")) or (
+            request.task_type == TaskType.IMAGE_GENERATION
+        )
         image_step_updates = _complete_execution_step_updates(
             state,
             expected_step=EXECUTION_STEP_GENERATE_IMAGE,
@@ -2160,33 +2099,47 @@ class LangGraphProvider(BaseLLMProvider):
         generated_images = _normalize_generated_images(state.get("generated_images"))
         image_prompt = str(state.get("image_generation_prompt") or "").strip()
         image_prompt_seed = _resolve_image_prompt_seed_text(state)
+        render_image_result = _should_render_image_result_artifact(
+            request=request,
+            state=state,
+            generated_images=generated_images,
+            image_prompt=image_prompt,
+        )
         citation_audit = _normalize_citation_audit_payload(
             state.get("knowledge_base_citation_audit", []),
         )
 
         candidate = state.get("artifact_candidate")
         if isinstance(candidate, dict):
+            candidate_type = str(candidate.get("artifact_type", "") or "").strip()
             try:
-                artifact = _validate_artifact_candidate(request, candidate)
-                artifact_payload = artifact.model_dump(mode="json")
-                if artifact_payload.get("artifact_type") in {"content_draft", "image_result"}:
-                    artifact_payload["generated_images"] = _merge_generated_images(
-                        artifact_payload.get("generated_images"),
-                        generated_images,
+                if render_image_result and candidate_type != "image_result":
+                    logger.info(
+                        "langgraph format_artifact prefers image_result fallback thread_id=%s candidate_type=%s",
+                        request.thread_id,
+                        candidate_type or "<missing>",
                     )
-                    if image_prompt:
-                        artifact_payload["revised_prompt"] = image_prompt
-                    if image_prompt_seed:
-                        artifact_payload["original_prompt"] = image_prompt_seed
-                if artifact_payload.get("artifact_type") == "image_result":
-                    artifact_payload["prompt"] = (
-                        image_prompt
-                        or str(artifact_payload.get("prompt", "")).strip()
-                        or image_prompt_seed
-                    )
-                    artifact_payload["status"] = "completed"
-                    artifact_payload["progress_message"] = None
-                    artifact_payload["progress_percent"] = None
+                else:
+                    artifact = _validate_artifact_candidate(request, candidate)
+                    artifact_payload = artifact.model_dump(mode="json")
+                    if artifact_payload.get("artifact_type") in {"content_draft", "image_result"}:
+                        artifact_payload["generated_images"] = _merge_generated_images(
+                            artifact_payload.get("generated_images"),
+                            generated_images,
+                        )
+                        if image_prompt:
+                            artifact_payload["revised_prompt"] = image_prompt
+                        if image_prompt_seed:
+                            artifact_payload["original_prompt"] = image_prompt_seed
+                    if artifact_payload.get("artifact_type") == "image_result":
+                        artifact_payload["prompt"] = (
+                            image_prompt
+                            or str(artifact_payload.get("prompt", "")).strip()
+                            or image_prompt_seed
+                        )
+                        artifact_payload["status"] = "completed"
+                        artifact_payload["progress_message"] = None
+                        artifact_payload["progress_percent"] = None
             except ValidationError as exc:
                 validation_errors.append(str(exc))
                 _emit_tool_call(writer, name="format_artifact", status="fallback")
@@ -2205,6 +2158,7 @@ class LangGraphProvider(BaseLLMProvider):
                 materials_parsed=state.get("materials_parsed", []),
                 degraded_from_provider_error=bool(artifact_fallback_reason),
                 generated_images=generated_images,
+                render_image_result=render_image_result,
                 direct_image_mode=bool(state.get("direct_image_mode")),
                 image_prompt=image_prompt,
                 image_prompt_seed=image_prompt_seed,
@@ -2288,9 +2242,7 @@ class LangGraphProvider(BaseLLMProvider):
     ) -> tuple[list[dict[str, object]], AIMessage | None]:
         await _raise_if_state_cancelled(state)
         request = state["request"]
-        if request.task_type != TaskType.CONTENT_GENERATION:
-            return [], None
-        if bool(state.get("direct_image_mode")):
+        if request.task_type not in {TaskType.CONTENT_GENERATION, TaskType.IMAGE_GENERATION}:
             return [], None
         if state.get("pending_tool_calls"):
             return [], None
@@ -2541,6 +2493,7 @@ class LangGraphProvider(BaseLLMProvider):
                 "role": "user",
                 "content": (
                     f"task_type: {request.task_type.value}\n"
+                    f"frontend_mode_hint: {request.task_type.value}\n"
                     f"platform: {request.platform.value}\n"
                     f"user_request: {request.message}\n"
                     f"review_prompt: {review_prompt}\n"
@@ -3151,10 +3104,12 @@ def _build_artifact_tool_router_messages(state: GraphState) -> list[BaseMessage]
         SystemMessage(
             content=(
                 "You are the post-review artifact tool router inside the MediaPilot LangGraph workflow. "
-                "The text draft is already complete. Call `generate_cover_images` only when the user explicitly "
-                "wants a newly generated image, poster, cover, or illustration that should accompany the final text. "
-                "Do not call any tool for text-only editing, translation, rewriting, proofreading, Q&A, analysis, "
-                "or when the user already supplied enough reference images without asking for a new generated one."
+                "The text draft is already complete. You have access to one image tool: `generate_cover_images`. "
+                "Strictly follow these rules: "
+                "1. Call `generate_cover_images` only when the user explicitly asks for a newly generated image, poster, cover, illustration, thumbnail, or other new visual asset. "
+                "2. If the user explicitly says they do not want images, only want text, or want text-only editing, you must not call any image tool under any circumstance. "
+                "3. If the request can be fully satisfied with text alone, respond without tool calls and do not add extra image generation on your own. "
+                "4. If the user already supplied enough reference images and did not ask for a new generated image, do not call the image tool."
             )
         ),
         HumanMessage(content=_build_artifact_tool_decision_prompt(state)),
@@ -3187,6 +3142,7 @@ def _build_artifact_tool_decision_prompt(state: GraphState) -> str:
     sections = [
         f"platform: {request.platform.value}",
         f"task_type: {request.task_type.value}",
+        f"frontend_mode_hint: {request.task_type.value}",
         f"user_request: {request.message}",
         f"artifact_title: {title_preview or '<none>'}",
         f"generated_image_count: {len(_normalize_generated_images(state.get('generated_images')))}",
@@ -3198,9 +3154,14 @@ def _build_artifact_tool_decision_prompt(state: GraphState) -> str:
     review_prompt = _resolve_review_prompt(state).strip()
     if review_prompt:
         sections.append("review_prompt:\n" + review_prompt)
+    if request.task_type == TaskType.IMAGE_GENERATION:
+        sections.append(
+            "mode_policy: The frontend mode suggests the user probably expects a final visual asset. "
+            "If the user does not explicitly reject images, prefer one `generate_cover_images` tool call after the draft is complete."
+        )
     sections.append(
-        "If a new generated image is needed, call `generate_cover_images`. "
-        "If no new image should be generated, respond without tool calls."
+        "Discipline: call `generate_cover_images` only for an explicitly requested new visual asset. "
+        "If the user says no images / text only, or the task can be completed with text alone, respond without tool calls."
     )
     return "\n\n".join(sections)
 
@@ -3332,6 +3293,8 @@ def _build_enriched_draft_request(
         updates["system_prompt"] = system_prompt
     if len(cleaned_materials) != len(request.materials):
         updates["materials"] = cleaned_materials
+    if request.task_type == TaskType.IMAGE_GENERATION:
+        updates["task_type"] = TaskType.CONTENT_GENERATION
 
     if not updates:
         return request
@@ -3343,8 +3306,20 @@ def _build_draft_system_prompt(
     state: GraphState,
     knowledge_base_context: str,
 ) -> str | None:
+    request = state["request"]
     base_prompt = _resolve_review_prompt(state).strip()
     prompt_sections = [base_prompt] if base_prompt else []
+
+    if request.task_type in {TaskType.CONTENT_GENERATION, TaskType.IMAGE_GENERATION}:
+        prompt_sections.append(
+            "Runtime mode hint:\n"
+            f"- The user selected frontend mode `{request.task_type.value}`.\n"
+            "- Treat this as a soft preference, not a hard route switch.\n"
+            "- Always follow the user's direct words first.\n"
+            "- If the user explicitly says they do not want images, only want text, or only want copywriting, you must answer with text only and must not trigger image generation.\n"
+            "- If the frontend mode is `image_generation` and the user does not reject images, prepare a clear visual-ready draft so the workflow can decide whether to trigger the image tool.\n"
+            "- If the frontend mode is `content_generation`, do not add image generation unless the user explicitly requests a new visual asset."
+        )
 
     if knowledge_base_context.strip():
         prompt_sections.append(
@@ -3621,6 +3596,7 @@ def _review_draft(state: GraphState) -> list[str]:
     minimum_length = {
         TaskType.TOPIC_PLANNING: 28,
         TaskType.CONTENT_GENERATION: 40,
+        TaskType.IMAGE_GENERATION: 24,
         TaskType.HOT_POST_ANALYSIS: 36,
         TaskType.COMMENT_REPLY: 28,
     }[request.task_type]
@@ -3663,129 +3639,39 @@ def _build_image_route_decision_system_prompt() -> str:
         "You are an intent router for a multimodal publishing workflow.\n"
         "Decide whether the system should trigger NEW image generation after the draft review step.\n"
         "Return only a JSON object with one boolean field: needs_image.\n"
-        "Set needs_image to true only when the user clearly wants a newly generated image, cover, "
+        "Treat `frontend_mode_hint` as a soft preference, not a hard route switch.\n"
+        "Set needs_image to true only when the user clearly and explicitly wants a newly generated image, cover, "
         "illustration, poster, thumbnail, or a publish-ready visual asset.\n"
+        "If `frontend_mode_hint` is `image_generation` and the user does not reject images, you may lean true.\n"
+        "If the user explicitly says they do not want images, only want text, or only need copywriting, needs_image must be false.\n"
         "Set needs_image to false for translation, rewriting, proofreading, Q&A, calculations, "
-        "summaries, analysis, comment replies, or other text-only editing tasks.\n"
+        "summaries, analysis, comment replies, or any other request that can be fully satisfied with text alone.\n"
         "If the user already supplied enough images and did not ask for a new generated image, prefer false.\n"
         "Be conservative. If uncertain, return false."
     )
 
 
-def _should_bypass_to_direct_image_generation(
-    request: MediaChatRequest,
-    *,
-    routing_resolution=None,
-) -> bool:
-    return should_route_to_direct_image_generation(
-        request,
-        resolution=routing_resolution,
-    )
-
-    if request.task_type != TaskType.CONTENT_GENERATION:
-        return False
-
-    normalized_message = " ".join(request.message.strip().lower().split())
-    if not normalized_message:
-        return False
-
-    explicit_negative_keywords = (
-        "不要图片",
-        "无需配图",
-        "只要文案",
-        "纯文字",
-        "text only",
-        "no image",
-        "no images",
-        "without image",
-    )
-    if any(keyword in normalized_message for keyword in explicit_negative_keywords):
-        return False
-
-    direct_only_keywords = (
-        "只要图片",
-        "只要海报",
-        "只要封面",
-        "只出图",
-        "只做图",
-        "纯出图",
-        "直接出图",
-        "直接生成图片",
-        "不要文案",
-        "无需文案",
-        "不要正文",
-        "无需正文",
-        "不要文章",
-        "image only",
-        "poster only",
-    )
-    if any(keyword in normalized_message for keyword in direct_only_keywords):
-        return True
-
-    text_generation_keywords = (
-        "写一篇",
-        "写一段",
-        "文案",
-        "正文",
-        "草稿",
-        "文章",
-        "口播",
-        "改写",
-        "翻译",
-        "评论",
-        "回复",
-        "选题",
-        "分析",
-        "拆解",
-        "脚本",
-        "图文",
-        "内容",
-        "润色",
-        "总结",
-        "提纲",
-    )
-    if any(keyword in normalized_message for keyword in text_generation_keywords):
-        return False
-
-    direct_image_patterns = (
-        r"(帮我|请|直接)?(画|做|出|生成|设计)(一张|1张|个|幅)?(图片|图|海报|封面|封面图|宣传图|主视觉)",
-        r"(请|帮我|直接)?(生成|做|出)(一张|1张)?(poster|cover|thumbnail|image)",
-    )
-    if any(re.search(pattern, normalized_message) for pattern in direct_image_patterns):
-        return True
-
-    direct_image_keywords = (
-        "海报",
-        "宣传图",
-        "主视觉",
-        "封面图",
-        "poster",
-        "thumbnail",
-        "cover image",
-    )
-    if any(keyword in normalized_message for keyword in direct_image_keywords):
-        supplemental_keywords = ("配图", "带图", "图文", "封面配图", "插图")
-        return not any(keyword in normalized_message for keyword in supplemental_keywords)
-
-    return False
-
-
 def _resolve_image_prompt_seed_text(state: GraphState) -> str:
+    request = state["request"]
+    base_message = request.message.strip()
+
     artifact_candidate = state.get("artifact_candidate")
     if isinstance(artifact_candidate, dict):
         candidate_body = str(artifact_candidate.get("body", "")).strip()
         if candidate_body:
+            if request.task_type == TaskType.IMAGE_GENERATION and base_message:
+                return f"{base_message}\n\nDraft brief:\n{candidate_body}".strip()
             return candidate_body
 
     current_draft = str(state.get("current_draft", "")).strip()
     if current_draft:
+        if request.task_type == TaskType.IMAGE_GENERATION and base_message:
+            return f"{base_message}\n\nDraft brief:\n{current_draft}".strip()
         return current_draft
 
-    if not state.get("direct_image_mode"):
+    if request.task_type != TaskType.IMAGE_GENERATION and not state.get("direct_image_mode"):
         return ""
 
-    request = state["request"]
-    base_message = request.message.strip()
     ocr_clues = [str(item).strip() for item in state.get("ocr_clues", []) if str(item).strip()]
     if not ocr_clues:
         return base_message
@@ -3850,8 +3736,6 @@ def _resolve_execution_step_route(step: str) -> str:
 
 
 def _build_router_execution_plan(request: MediaChatRequest) -> list[str]:
-    if request.task_type == TaskType.IMAGE_GENERATION:
-        return [EXECUTION_STEP_GENERATE_IMAGE]
     return [EXECUTION_STEP_DRAFT_CONTENT]
 
 
@@ -3925,6 +3809,9 @@ def _build_heuristic_image_route_decision(state: GraphState) -> ImageRouteDecisi
     )
     if image_material_count > 0:
         return ImageRouteDecision(needs_image=False)
+
+    if request.task_type == TaskType.IMAGE_GENERATION:
+        return ImageRouteDecision(needs_image=True)
 
     return ImageRouteDecision(needs_image=False)
 
@@ -4092,8 +3979,16 @@ def _validate_artifact_candidate(
     candidate: dict[str, object],
 ) -> BaseModel:
     candidate_type = str(candidate.get("artifact_type", "")).strip()
+    if candidate_type == "topic_list":
+        return TopicPlanningArtifactPayload.model_validate(candidate)
+    if candidate_type == "content_draft":
+        return ContentGenerationArtifactPayload.model_validate(candidate)
     if candidate_type == "image_result":
         return ImageGenerationArtifactPayload.model_validate(candidate)
+    if candidate_type == "hot_post_analysis":
+        return HotPostAnalysisArtifactPayload.model_validate(candidate)
+    if candidate_type == "comment_reply":
+        return CommentReplyArtifactPayload.model_validate(candidate)
     if request.task_type == TaskType.TOPIC_PLANNING:
         return TopicPlanningArtifactPayload.model_validate(candidate)
     if request.task_type == TaskType.CONTENT_GENERATION:
@@ -4133,6 +4028,27 @@ def _compact_display_text(value: str, *, limit: int = 26) -> str:
     return f"{compact[:limit].rstrip()}..."
 
 
+def _should_render_image_result_artifact(
+    *,
+    request: MediaChatRequest,
+    state: GraphState,
+    generated_images: list[str],
+    image_prompt: str,
+) -> bool:
+    if request.task_type != TaskType.IMAGE_GENERATION:
+        return False
+    if bool(state.get("direct_image_mode")):
+        return True
+    if generated_images:
+        return True
+    if image_prompt.strip():
+        return True
+    current_step = str(state.get("current_step", "") or "").strip()
+    if current_step.startswith("generate_image:"):
+        return True
+    return bool(state.get("needs_image", False))
+
+
 def _build_fallback_artifact(
     *,
     request: MediaChatRequest,
@@ -4140,13 +4056,14 @@ def _build_fallback_artifact(
     materials_parsed: list[str],
     degraded_from_provider_error: bool = False,
     generated_images: list[str] | None = None,
+    render_image_result: bool = False,
     direct_image_mode: bool = False,
     image_prompt: str = "",
     image_prompt_seed: str = "",
 ) -> BaseModel:
     supporting_context = "；".join(materials_parsed[:2]) if materials_parsed else "无补充素材"
 
-    if request.task_type == TaskType.IMAGE_GENERATION or direct_image_mode:
+    if render_image_result or direct_image_mode:
         request_summary = _compact_display_text(request.message, limit=42) or "图片生成结果"
         resolved_original_prompt = image_prompt_seed.strip() or request.message.strip()
         resolved_revised_prompt = image_prompt.strip()

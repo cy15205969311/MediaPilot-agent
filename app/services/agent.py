@@ -15,7 +15,6 @@ from app.db.database import SessionLocal
 from app.db.models import Thread, TokenTransaction, User
 from app.models.schemas import ArtifactPayloadModel, MediaChatRequest
 from app.services.graph import LangGraphProvider
-from app.services.intent_routing import normalize_media_chat_request
 from app.services.persistence import ARTIFACT_TYPE_ADAPTER, persist_assistant_output
 from app.services.providers import (
     BaseLLMProvider,
@@ -50,7 +49,6 @@ class MediaAgentWorkflow:
         thread: Thread | None = None,
         user_id: str | None = None,
     ) -> AsyncGenerator[dict[str, object], None]:
-        request, _ = normalize_media_chat_request(request)
         effective_provider = self._resolve_effective_provider(request.model_override)
 
         async for event in self._run_with_provider(
@@ -120,7 +118,6 @@ class MediaAgentWorkflow:
         thread: Thread | None = None,
         user_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
-        request, _ = normalize_media_chat_request(request)
         latest_artifact: ArtifactPayloadModel | None = None
         had_provider_error = False
         accumulated_text = ""

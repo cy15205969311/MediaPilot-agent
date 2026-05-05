@@ -36,6 +36,7 @@ type RightPanelProps = {
   artifactEntries: ArtifactTaskEntry[];
   artifactActions: ArtifactAction[];
   isStreaming: boolean;
+  awaitingArtifactResolution?: boolean;
   streamingUiState?: StreamingUiState | null;
   onSelectArtifactTaskType: (taskType: UiTaskType) => void;
   onRequestArtifactHandoff: (taskType: UiTaskType) => void;
@@ -140,6 +141,26 @@ function SmartHandoffCard(props: {
   );
 }
 
+function PendingArtifactResolutionCard() {
+  return (
+    <div className="rounded-[28px] border border-border bg-muted/70 p-5 shadow-sm">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-card text-brand shadow-sm">
+          <Sparkles className="h-5 w-5" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-foreground">
+            正在等待后端确认本次产物类型
+          </div>
+          <div className="mt-2 text-sm leading-6 text-muted-foreground">
+            当前不会再盲目按下拉框提前渲染草稿或生图占位。收到后端首个流式事件后，这里会自动切换为真实的正文结果或图片结果面板。
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function RightPanel({
   open,
   isDesktopCollapsed,
@@ -150,6 +171,7 @@ export function RightPanel({
   artifactEntries,
   artifactActions,
   isStreaming,
+  awaitingArtifactResolution = false,
   streamingUiState,
   onSelectArtifactTaskType,
   onRequestArtifactHandoff,
@@ -171,6 +193,11 @@ export function RightPanel({
     streamingUiState?.variant === "image"
       ? streamingUiState
       : null;
+  const shouldShowPendingArtifactResolution =
+    awaitingArtifactResolution &&
+    !selectedArtifact &&
+    artifactEntries.length === 0 &&
+    !imageStreamingUiState;
 
   return (
     <>
@@ -195,7 +222,10 @@ export function RightPanel({
                 当前工作流：{activeTaskLabel} · {getPlatformLabel(platform)}
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
-                当前查看：{getArtifactTabLabel(selectedArtifactTaskType)}
+                当前查看：
+                {shouldShowPendingArtifactResolution
+                  ? "待后端确认"
+                  : getArtifactTabLabel(selectedArtifactTaskType)}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -288,7 +318,9 @@ export function RightPanel({
               </div>
             ) : null}
 
-            {showCommentReplyHandoff ? (
+            {shouldShowPendingArtifactResolution ? (
+              <PendingArtifactResolutionCard />
+            ) : showCommentReplyHandoff ? (
               <SmartHandoffCard
                 buttonLabel="一键生成互动评论"
                 description={`检测到当前会话已经产出正文草稿“${contentArtifact?.title || "未命名正文"}”。是否基于这份内容，继续生成高转化率的互动评论与回复话术？`}

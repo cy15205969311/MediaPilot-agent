@@ -583,15 +583,14 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - `gpt-5.5` 仍然明确排除在当前可选列表之外
 - 用户点击未配置 provider 时，前端应该立即给出提示，而不是先接受选择、再悄悄把状态回弹到上一个模型
 
-### 7.27 智能意图归一化与流式断连刹车基线
+### 7.27 任务类型软提示与流式断连刹车基线
 
-- `app/services/intent_routing.py` 会在真正持久化会话和启动工作流之前，对 `MediaChatRequest` 做一次后端侧意图归一化
-- 当用户明明在写“只要图片/生成海报/出图”这类强生图意图时，后端可以覆盖错误的前端下拉框，把任务强制归一到 `image_generation`
-- 当用户写的是“只要文案/分析图片/根据图片写文案”等文本或图像理解意图时，后端也可以把误选的 `image_generation` 拉回 `content_generation`
-- `POST /api/v1/media/chat/stream` 会记录 override 日志，并以归一化后的任务类型进入后续持久化与 LangGraph 执行链路
-- `app/api/v1/chat.py` 当前通过 `_forward_stream_with_disconnect_cancellation(...)` 包装 SSE 转发
+- `app/services/intent_routing.py` 不再根据关键词或正则重写 `MediaChatRequest.task_type`
+- 前端传来的 `content_generation` / `image_generation` 会被原样持久化、原样进入工作流，后端不再记录或依赖 override 日志
+- 前端模式现在只是一条“软提示”，真正的文本优先级高于下拉框，不能再由网关层替用户做物理跳转
+- `app/api/v1/chat.py` 继续通过 `_forward_stream_with_disconnect_cancellation(...)` 包装 SSE 转发
 - 前端点击停止或浏览器断开连接时，后端会主动取消生产任务，避免死连接继续在后台白白推流
-- `CancelledError` 必须沿取消链路显式透传，不能被误吞成普通异常再触发通用兜底
+- `CancelledError` 与 `GlobalKillSwitchTriggered` 必须沿取消链路显式透传，不能被误吞成普通异常再触发通用兜底
 
 ### 7.28 全异步可取消工作流基线
 
@@ -600,13 +599,15 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 对于搜索、生图、外部 API 访问这类耗时节点，优先使用异步 HTTP 与异步 SDK，避免同步阻塞吞掉 `CancelledError`
 - 停止按钮、浏览器断连与后端流式取消现在属于同一条取消链路，不能在中途被当成普通异常改走兜底逻辑
 
-### 7.29 LangGraph 图文串联执行基线
+### 7.29 LangGraph Brain-First 图文执行基线
 
-- `GraphState` 当前新增 `execution_plan` 与 `active_execution_step`
-- 路由节点可以把“先写正文、再生成配图”这类复合请求拆成有序计划，例如 `["draft_content", "generate_image"]`
-- 纯生图请求仍然保持单步计划，直接进入出图链路
-- 审稿节点、结构化产物节点与生图节点都需要正确弹出已完成步骤，避免回路重复触发高成本节点
-- 当前图文串联的前端表现是渐进式产物更新：正文可先出现，配图随后补齐
+- `GraphState` 当前仍维护 `execution_plan` 与 `active_execution_step`，但所有 `content_generation` / `image_generation` 请求的首站都统一是 `draft_content`
+- `router` 节点已经废除基于前端下拉框的硬编码 bypass，不能再直接从入口跳到 `generate_image_node`
+- 前端模式会被注入到草稿 Prompt、审稿后工具决策 Prompt 与图片路由 Prompt 中，作为软提示存在
+- 如果用户明确写了“不要图片”“只要文字”“No image”，大模型与后备路由都必须严格服从，禁止触发 `generate_cover_images`
+- 如果前端模式是 `image_generation` 且用户没有拒绝图片，工作流会在审稿后通过 Tool Calling 或图片路由决策，自主判断是否调用 `generate_cover_images`
+- `image_generation` 请求在实际发生生图后仍然可以产出 `image_result`；如果最终只完成了文字需求，则必须保留 `content_draft`，不能被下拉框强行格式化成图片产物
+- 已完成的执行步骤必须继续正确出栈，避免图回路重复触发高成本节点
 
 ### 7.30 显式停止与强杀链路基线
 
@@ -623,6 +624,14 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 聊天气泡中的 `tool / note / error` 消息以及普通对话正文，超过阈值后会自动折叠并提供展开入口
 - `ContentGenerationArtifact` 与 `ImageGenerationArtifact` 会对长提示词、优化后提示词、正文草稿和平台引导语做同样的折叠处理
 - 折叠展示必须保留原始换行与复制行为，不能为了缩短 UI 而破坏提示词原文结构
+
+### 7.32 前端流式 UI 对齐基线
+
+- `frontend/src/app/App.tsx` 不再根据当前下拉框乐观渲染右侧产物类型，而是等待后端首个流式事件给出真实 `task_type`
+- 右侧面板与流式骨架屏要以 SSE 首包、实时 artifact 元数据和工具轨迹为准，不能再把“选了生图”误渲染成必定出图
+- `frontend/src/app/components/RightPanel.tsx` 在后端尚未确认产物类型前，会展示等待态而不是错误的图片或正文占位
+- `AbortController.abort()` 触发后必须同步清空 `isStreaming` / `isLoading` / 乐观骨架状态
+- 前端必须静默吞掉用户主动触发的 `AbortError`，停止生成属于预期路径，不能再弹红色失败提示
 
 ## 8. 后端边界与分层规则
 

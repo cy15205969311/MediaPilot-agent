@@ -21,7 +21,6 @@ from app.db.models import Material, Message, Thread, User
 from app.models.schemas import MediaChatRequest, MediaChatStopRequest, MediaChatStopResponse
 from app.services.agent import media_agent_workflow
 from app.services.auth import get_current_user
-from app.services.intent_routing import normalize_media_chat_request
 from app.services.knowledge_base import normalize_knowledge_base_scope
 from app.services.model_access import ensure_model_access
 from app.services.persistence import (
@@ -295,17 +294,6 @@ async def stream_media_chat(
 ) -> StreamingResponse:
     if current_user.role not in TOKEN_BYPASS_ROLES and int(current_user.token_balance or 0) <= 0:
         raise HTTPException(status_code=402, detail=INSUFFICIENT_TOKENS_DETAIL)
-
-    request, routing_resolution = normalize_media_chat_request(request)
-    if routing_resolution.overridden:
-        logger.info(
-            "smart_router override thread_id=%s user_id=%s requested=%s resolved=%s reason=%s",
-            request.thread_id,
-            current_user.id,
-            routing_resolution.requested_task_type.value,
-            routing_resolution.resolved_task_type.value,
-            routing_resolution.reason,
-        )
 
     requested_provider_key, requested_model_name = media_agent_workflow.resolve_requested_model_target(
         request.model_override,

@@ -1636,7 +1636,7 @@ def test_media_chat_stream_emits_content_generation_artifact(client: TestClient)
     assert "年度复盘" in artifact.body
 
 
-def test_media_chat_stream_normalizes_task_type_before_persist_and_stream(
+def test_media_chat_stream_preserves_requested_task_type_before_persist_and_stream(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1673,9 +1673,9 @@ def test_media_chat_stream_normalizes_task_type_before_persist_and_stream(
 
     events = collect_raw_stream_events(client, payload, headers=headers)
 
-    assert captured["persist_task_type"] == "image_generation"
-    assert captured["stream_task_type"] == "image_generation"
-    assert events[0]["task_type"] == "image_generation"
+    assert captured["persist_task_type"] == "content_generation"
+    assert captured["stream_task_type"] == "content_generation"
+    assert events[0]["task_type"] == "content_generation"
 
 
 def test_media_chat_stream_emits_image_generation_artifact_and_persists_history(

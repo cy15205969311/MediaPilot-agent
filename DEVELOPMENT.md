@@ -600,18 +600,16 @@ The model-registry contract is now a first-class runtime baseline for both backe
 - `gpt-5.5` remains intentionally excluded from the proxy registry
 - when a user clicks a provider that is still unconfigured, the frontend should surface a warning or setup prompt instead of silently accepting and later rolling the selection back
 
-### 7.28 Smart intent normalization and disconnect-aware streaming
+### 7.28 Task-type hinting and disconnect-aware streaming
 
-The media chat entrypoint now includes a stricter smart-routing and cancellation baseline:
+The media chat entrypoint now treats the frontend task mode as a hint instead of a gateway-level override:
 
-- `app/services/intent_routing.py` normalizes `MediaChatRequest` before persistence and workflow execution
-- image-only prompts can override a mistaken `content_generation` dropdown choice and route into image generation
-- explicit text-only requests and image-analysis requests with uploaded image materials can override a mistaken `image_generation` choice and route back to content generation
-- `POST /api/v1/media/chat/stream` logs the override reason and persists the normalized task type instead of the stale frontend hint
-- stream forwarding in `app/api/v1/chat.py` is now wrapped by `_forward_stream_with_disconnect_cancellation(...)`
-- the stream bridge now races disconnect detection against workflow forwarding and tears down the workflow generator on disconnect instead of only polling inside the forward loop
+- `app/services/intent_routing.py` no longer rewrites `MediaChatRequest.task_type` through keyword heuristics before persistence or workflow execution
+- requested `content_generation` / `image_generation` values are persisted as-is and move through the workflow as-is
+- the frontend mode is now advisory context for downstream prompts; direct user wording must always outrank the dropdown selection
+- stream forwarding in `app/api/v1/chat.py` remains wrapped by `_forward_stream_with_disconnect_cancellation(...)`
 - client disconnects and explicit stop actions cancel the producer task so the backend does not keep forwarding a dead SSE stream in the background
-- cancellation handling belongs in the route-layer stream bridge as well as in downstream workflow nodes; do not collapse `CancelledError` into a generic fallback path
+- cancellation handling belongs in the route-layer stream bridge as well as in downstream workflow nodes; do not collapse `CancelledError` or `GlobalKillSwitchTriggered` into a generic fallback path
 
 ### 7.29 Async-safe workflow execution baseline
 
@@ -622,16 +620,17 @@ The workflow stack now carries a stricter async-only execution rule for cancella
 - route-layer disconnect cancellation is expected to bubble through graph nodes, business tools, and provider calls without being swallowed
 - long-running workflow nodes should prefer async HTTP and async SDK clients so `CancelledError` can stop the chain before fallback work or expensive image generation starts
 
-### 7.30 Mixed draft-and-image plan execution baseline
+### 7.30 Brain-First draft-and-image tool-calling baseline
 
-The LangGraph runtime now uses a hybrid baseline for text-plus-image workflows:
+The LangGraph runtime now uses a Brain-First baseline for text-and-image workflows:
 
-- `GraphState` now carries `execution_plan` plus `active_execution_step`
-- direct image requests still bypass drafting and keep a dedicated `["generate_image"]` plan
-- normal content-generation requests stay draft-first and no longer pre-commit to a static `["draft_content", "generate_image"]` chain at router time
-- after review, the workflow can request `generate_cover_images` through a post-review tool-calling pass and then route through `tool_execution_node` before final artifact formatting
-- business tools remain pre-draft tools, while image generation is treated as a post-review artifact tool for mixed text-plus-image requests
-- image-generation exits must always pop their step so the graph does not loop back into the same expensive node
+- `GraphState` still carries `execution_plan` plus `active_execution_step`, but both `content_generation` and `image_generation` requests now start with `draft_content`
+- the router no longer bypasses directly into `generate_image_node` based on the frontend dropdown alone
+- the frontend-selected mode is injected into the draft prompt, post-review artifact-tool prompt, and image-route prompt as soft context
+- explicit user wording such as “不要图片”, “只要文字”, or “No image” must suppress image-tool execution even if the frontend mode is `image_generation`
+- after review, the workflow decides whether to call `generate_cover_images` through tool-calling or the image-route fallback instead of committing to image generation at router time
+- `image_generation` requests can still end as `image_result` after an actual image step, but text-only outcomes in image mode must remain `content_draft`
+- completed execution steps must still be popped correctly so the graph does not loop back into the same expensive node
 
 ### 7.31 Explicit stop and kill-switch cancellation baseline
 
@@ -652,6 +651,16 @@ The creator workspace now uses one shared long-text folding primitive instead of
 - chat `tool` / `note` / `error` cards and normal chat bubbles now fold oversized content instead of pushing the whole thread off screen
 - `ContentGenerationArtifact` and `ImageGenerationArtifact` now apply the same folding behavior to long prompts, revised prompts, body drafts, and CTA blocks
 - prompt readability improvements must preserve whitespace and copy behavior; do not replace structured prompt text with a lossy preview string
+
+### 7.33 Creator streaming UI alignment baseline
+
+The creator workspace now waits for backend truth before rendering task-specific streaming placeholders:
+
+- `frontend/src/app/App.tsx` does not treat the local dropdown as the source of truth for the active streaming artifact type
+- the first SSE event and subsequent artifact metadata now decide whether the right panel should behave like a text draft flow or an image-generation flow
+- `frontend/src/app/components/RightPanel.tsx` shows a pending-resolution state while the backend has not yet confirmed the real artifact type
+- `AbortController.abort()` must synchronously clear local generating/loading state and any optimistic skeleton state
+- user-triggered `AbortError` paths are expected behavior and must not surface as red failure toasts
 
 ## 8. Backend Boundaries
 

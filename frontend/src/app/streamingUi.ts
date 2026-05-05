@@ -14,7 +14,7 @@ export type StreamingUiState = {
 
 type BuildStreamingUiStateParams = {
   isStreaming: boolean;
-  taskType: UiTaskType;
+  taskType: UiTaskType | null;
   statusText: string;
   toolCallTimeline: ToolCallTraceItem[];
   elapsedSeconds: number;

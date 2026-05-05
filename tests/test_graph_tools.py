@@ -829,12 +829,12 @@ def test_langgraph_router_keeps_mixed_content_request_on_draft_first_plan():
     assert updates["direct_image_mode"] is False
 
 
-def test_langgraph_router_builds_single_step_plan_for_direct_image_request():
+def test_langgraph_router_keeps_image_mode_request_on_draft_first_plan():
     request = MediaChatRequest.model_validate(
         {
             "thread_id": "thread-router-direct-image-plan",
             "platform": "xiaohongshu",
-            "task_type": "content_generation",
+            "task_type": "image_generation",
             "message": "Generate a poster only for a summer tea launch. Image only, no copy.",
             "materials": [],
         }
@@ -852,10 +852,10 @@ def test_langgraph_router_builds_single_step_plan_for_direct_image_request():
     state = provider._build_initial_state(request)
     updates = asyncio.run(provider._router_node(state))
 
-    assert updates["execution_plan"] == ["generate_image"]
-    assert updates["active_execution_step"] == "generate_image"
-    assert updates["needs_image"] is True
-    assert updates["direct_image_mode"] is True
+    assert updates["execution_plan"] == ["draft_content"]
+    assert updates["active_execution_step"] == "draft_content"
+    assert updates["needs_image"] is False
+    assert updates["direct_image_mode"] is False
 
 
 def test_langgraph_provider_graph_compiles_with_plan_route_handlers():
@@ -1173,19 +1173,19 @@ def test_langgraph_semantic_visual_request_sets_needs_image_true():
     assert "generate_cover_images" in tool_call_names
 
 
-def test_langgraph_direct_image_request_bypasses_search_and_draft_generation():
+def test_langgraph_direct_image_request_runs_brain_first_before_image_tool():
     request = MediaChatRequest.model_validate(
         {
             "thread_id": "thread-direct-image-bypass",
             "platform": "xiaohongshu",
-            "task_type": "content_generation",
+            "task_type": "image_generation",
             "message": "Generate a poster only for a summer collab launch. Image only, no copy.",
             "materials": [],
         }
     )
 
     async def fake_prompt_builder(*, request, draft, artifact_candidate):
-        assert artifact_candidate is None
+        assert artifact_candidate is not None
         assert "image only" in draft.lower()
         return "A bright and minimal summer collaboration poster with generous white space."
 
@@ -1195,15 +1195,22 @@ def test_langgraph_direct_image_request_bypasses_search_and_draft_generation():
         assert "summer collaboration poster" in prompt.lower()
         return ["https://example.com/summer-collab-poster.png"]
 
+    async def always_generate_images(request, draft, artifact_candidate):
+        assert request.task_type.value == "image_generation"
+        assert draft
+        assert artifact_candidate is not None
+        return {"needs_image": True}
+
     provider = LangGraphProvider(
-        inner_provider=DraftForbiddenProvider(),
+        inner_provider=ImageReadyProvider(),
+        image_route_analyzer=always_generate_images,
         image_prompt_builder=fake_prompt_builder,
         image_generator=fake_image_generator,
     )
 
     custom_events, final_state = asyncio.run(collect_graph_execution(provider, request))
 
-    assert final_state["direct_image_mode"] is True
+    assert final_state["direct_image_mode"] is False
     assert final_state["needs_search"] is False
     assert final_state["request"].task_type.value == "image_generation"
     assert final_state["generated_images"] == ["https://example.com/summer-collab-poster.png"]
@@ -1212,15 +1219,9 @@ def test_langgraph_direct_image_request_bypasses_search_and_draft_generation():
         str(event["name"]) for event in custom_events if event.get("event") == "tool_call"
     ]
     assert "web_search" not in tool_call_names
-    assert "generate_draft" not in tool_call_names
+    assert "generate_draft" in tool_call_names
     assert "build_image_prompt" in tool_call_names
     assert "generate_cover_images" in tool_call_names
-
-    message_text = "".join(
-        str(event["delta"]) for event in custom_events if event["event"] == "message"
-    )
-    assert "已为你整理出一版可直接渲染的美术方案" in message_text
-    assert "summer collaboration poster" in message_text.lower()
 
     artifact_events = [event for event in custom_events if event["event"] == "artifact"]
     processing_artifact = ImageGenerationArtifactPayload.model_validate(
@@ -1236,70 +1237,46 @@ def test_langgraph_direct_image_request_bypasses_search_and_draft_generation():
     assert "summer collaboration poster" in artifact.prompt.lower()
 
 
-def test_langgraph_dedicated_image_generation_task_skips_search_and_draft_generation():
+def test_langgraph_image_mode_text_only_request_stays_text_only():
     request = MediaChatRequest.model_validate(
         {
             "thread_id": "thread-dedicated-image-generation",
             "platform": "xiaohongshu",
             "task_type": "image_generation",
-            "message": "Create a clean fruit tea launch poster with bright lighting and premium white space.",
+            "message": "Write a short Xiaohongshu caption for a fruit tea launch. No image.",
             "materials": [],
         }
     )
 
-    async def fake_prompt_builder(*, request, draft, artifact_candidate):
-        assert request.task_type.value == "image_generation"
-        assert artifact_candidate is None
-        assert "fruit tea" in draft.lower()
-        return "A clean fruit tea launch poster with bright lighting and premium white space."
+    async def unexpected_prompt_builder(*, request, draft, artifact_candidate):
+        raise AssertionError("text-only image-mode requests should not build an image prompt")
 
-    async def fake_image_generator(*, request, prompt, user_id, thread_id):
-        assert request.thread_id == thread_id
-        assert user_id is None
-        assert "fruit tea" in prompt.lower()
-        return ["https://example.com/fruit-tea-poster.png"]
+    async def unexpected_image_generator(*, request, prompt, user_id, thread_id):
+        raise AssertionError("text-only image-mode requests should not trigger image generation")
 
     provider = LangGraphProvider(
-        inner_provider=DraftForbiddenProvider(),
-        image_prompt_builder=fake_prompt_builder,
-        image_generator=fake_image_generator,
+        inner_provider=ImageReadyProvider(),
+        image_prompt_builder=unexpected_prompt_builder,
+        image_generator=unexpected_image_generator,
     )
 
-    custom_events, final_state = asyncio.run(collect_graph_execution(provider, request))
-
-    assert final_state["direct_image_mode"] is True
-    assert final_state["needs_search"] is False
-    assert final_state["generated_images"] == ["https://example.com/fruit-tea-poster.png"]
+    events = asyncio.run(collect_events(provider, request))
 
     tool_call_names = [
-        str(event["name"]) for event in custom_events if event.get("event") == "tool_call"
+        str(event["name"]) for event in events if event["event"] == "tool_call"
     ]
     assert "web_search" not in tool_call_names
-    assert "generate_draft" not in tool_call_names
-    assert "build_image_prompt" in tool_call_names
-    assert "generate_cover_images" in tool_call_names
+    assert "generate_draft" in tool_call_names
+    assert "build_image_prompt" not in tool_call_names
+    assert "generate_cover_images" not in tool_call_names
 
-    message_text = "".join(
-        str(event["delta"]) for event in custom_events if event["event"] == "message"
-    )
-    assert "已为你整理出一版可直接渲染的美术方案" in message_text
-    assert "fruit tea" in message_text.lower()
-
-    artifact_events = [event for event in custom_events if event["event"] == "artifact"]
-    processing_artifact = ImageGenerationArtifactPayload.model_validate(
-        artifact_events[0]["artifact"]
-    )
-    artifact = ImageGenerationArtifactPayload.model_validate(artifact_events[-1]["artifact"])
-    assert processing_artifact.status == "processing"
-    assert processing_artifact.generated_images == []
-    assert processing_artifact.progress_message
-    assert artifact.artifact_type == "image_result"
-    assert artifact.status == "completed"
-    assert artifact.generated_images == ["https://example.com/fruit-tea-poster.png"]
-    assert "fruit tea" in artifact.prompt.lower()
+    artifact_event = next(event for event in events if event["event"] == "artifact")
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    assert artifact.artifact_type == "content_draft"
+    assert artifact.generated_images == []
 
 
-def test_smart_task_resolution_demotes_image_task_with_image_analysis_prompt():
+def test_smart_task_resolution_preserves_requested_task_type_for_image_analysis_prompt():
     request = MediaChatRequest.model_validate(
         {
             "thread_id": "thread-smart-router-image-analysis",
@@ -1318,12 +1295,12 @@ def test_smart_task_resolution_demotes_image_task_with_image_analysis_prompt():
     resolution = resolve_media_chat_task_type(request)
 
     assert resolution.requested_task_type.value == "image_generation"
-    assert resolution.resolved_task_type.value == "content_generation"
+    assert resolution.resolved_task_type.value == "image_generation"
     assert resolution.direct_image_mode is False
-    assert resolution.reason == "image_materials_requested_for_text_or_analysis"
+    assert resolution.reason == "honor_requested_task_type"
 
 
-def test_langgraph_router_normalizes_wrong_image_task_back_to_content_generation():
+def test_langgraph_router_preserves_requested_image_task_without_heuristic_rewrite():
     request = MediaChatRequest.model_validate(
         {
             "thread_id": "thread-smart-router-text-request",
@@ -1338,14 +1315,17 @@ def test_langgraph_router_normalizes_wrong_image_task_back_to_content_generation
         return {"needs_search": False, "search_query": ""}
 
     provider = LangGraphProvider(
-        inner_provider=DraftForbiddenProvider(),
+        inner_provider=ImageReadyProvider(),
         route_analyzer=no_search_route,
     )
 
     router_state = asyncio.run(provider._router_node(provider._build_initial_state(request)))
 
-    assert router_state["request"].task_type.value == "content_generation"
+    assert "request" not in router_state
+    assert router_state["execution_plan"] == ["draft_content"]
+    assert router_state["active_execution_step"] == "draft_content"
     assert router_state["direct_image_mode"] is False
+    assert router_state["needs_image"] is False
     assert router_state["needs_search"] is False
 
 
@@ -1508,9 +1488,16 @@ def test_langgraph_direct_image_generation_emits_processing_updates(monkeypatch)
         await asyncio.sleep(0.03)
         return ["https://example.com/camping-poster.png"]
 
+    async def always_generate_images(request, draft, artifact_candidate):
+        assert request.task_type.value == "image_generation"
+        assert draft
+        assert artifact_candidate is not None
+        return {"needs_image": True}
+
     monkeypatch.setattr(graph_provider_module, "IMAGE_PROGRESS_HEARTBEAT_SECONDS", 0.01)
     provider = LangGraphProvider(
-        inner_provider=DraftForbiddenProvider(),
+        inner_provider=ImageReadyProvider(),
+        image_route_analyzer=always_generate_images,
         image_prompt_builder=fake_prompt_builder,
         image_generator=slow_image_generator,
     )
