@@ -103,6 +103,15 @@ export type MediaChatRequestPayload = {
   model_override?: string | null;
 };
 
+export type MediaChatStopRequestPayload = {
+  thread_id: string;
+};
+
+export type MediaChatStopResponse = {
+  thread_id: string;
+  cancelled: boolean;
+};
+
 export type ModelProviderStatus = "configured" | "unconfigured";
 
 export type ModelDetail = {

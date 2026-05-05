@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import inspect
 import json
 import logging
 import mimetypes
@@ -15,6 +16,11 @@ from openai import APITimeoutError
 from openai import AsyncOpenAI
 
 from app.config import get_openai_image_settings, load_environment
+from app.core.cancel_manager import (
+    GlobalKillSwitchTriggered,
+    execute_with_kill_switch,
+    raise_if_cancelled as raise_if_thread_cancelled,
+)
 from app.models.schemas import MediaChatRequest, Platform
 from app.services.model_access import role_has_premium_model_access
 from app.services.oss_client import (
@@ -38,6 +44,34 @@ OPENAI_COMPATIBLE_IMAGE_SIZE = "1024x1024"
 DEFAULT_OPENAI_IMAGE_GENERATE_TIMEOUT_SECONDS = 120.0
 DEFAULT_GENERATED_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 DEFAULT_OPENAI_COMPATIBLE_IMAGE_REQUEST_TIMEOUT_SECONDS = 180.0
+
+
+async def _invoke_with_optional_thread_id(
+    callback,
+    /,
+    *args,
+    thread_id: str,
+    **kwargs,
+):
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is None:
+        kwargs["thread_id"] = thread_id
+    else:
+        parameters = signature.parameters
+        if "thread_id" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            kwargs["thread_id"] = thread_id
+
+    result = callback(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 MAX_IMAGE_GENERATION_COUNT = 3
 DEFAULT_DASHSCOPE_DOUYIN_IMAGE_SIZE = "928*1664"
 DEFAULT_DASHSCOPE_XIAOHONGSHU_IMAGE_SIZE = "1104*1472"
@@ -51,6 +85,10 @@ SYSTEM_GENERATED_IMAGE_USER_ID = "system-generated"
 def _build_http_timeout(seconds: float) -> httpx.Timeout:
     connect_timeout = min(seconds, 10.0)
     return httpx.Timeout(seconds, connect=connect_timeout)
+
+
+def _build_async_http_client(*, timeout: httpx.Timeout) -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=timeout)
 
 
 def _read_positive_float_env(env_name: str, default: float) -> float:
@@ -655,7 +693,10 @@ class ImageGenerationService:
             return heuristic_prompt
 
         try:
-            response = await self._get_prompt_client().chat.completions.create(
+            await raise_if_thread_cancelled(request.thread_id)
+            response = await execute_with_kill_switch(
+                request.thread_id,
+                self._get_prompt_client().chat.completions.create(
                 model=self.prompt_model,
                 messages=[
                     {
@@ -678,11 +719,17 @@ class ImageGenerationService:
                 ],
                 temperature=0.5,
                 timeout=self.prompt_timeout,
+                ),
+                task_name=f"image-prompt-request:{request.thread_id}",
             )
             content = str(response.choices[0].message.content or "").strip()
             if content:
                 return content
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GlobalKillSwitchTriggered):
+            await self._reset_async_openai_client(
+                attr_name="_prompt_client",
+                client_label="image prompt",
+            )
             raise
         except Exception as exc:  # pragma: no cover - graceful fallback
             logger.warning("Image prompt builder fallback triggered: %s", exc)
@@ -698,6 +745,7 @@ class ImageGenerationService:
         user_role: str | None = None,
         thread_id: str,
     ) -> list[str]:
+        await raise_if_thread_cancelled(thread_id)
         active_backend = self.resolve_backend(user_role=user_role)
         if active_backend == "disabled":
             logger.info(
@@ -719,19 +767,24 @@ class ImageGenerationService:
         )
 
         if active_backend == "openai":
-            urls = await self._generate_images_with_openai_with_fallback(
+            urls = await _invoke_with_optional_thread_id(
+                self._generate_images_with_openai_with_fallback,
                 request=request,
                 prompt=prompt,
+                thread_id=thread_id,
             )
         else:
-            urls = await self._generate_images_with_dashscope(
+            urls = await _invoke_with_optional_thread_id(
+                self._generate_images_with_dashscope,
                 request=request,
                 prompt=prompt,
+                thread_id=thread_id,
             )
 
         if not urls:
             return []
 
+        await raise_if_thread_cancelled(thread_id)
         return await self._persist_generated_images(
             urls=urls,
             user_id=user_id,
@@ -743,16 +796,22 @@ class ImageGenerationService:
         *,
         request: MediaChatRequest,
         prompt: str,
+        thread_id: str,
     ) -> list[str]:
         try:
-            urls = await self._generate_images_with_openai(prompt=prompt)
+            await raise_if_thread_cancelled(thread_id)
+            urls = await _invoke_with_optional_thread_id(
+                self._generate_images_with_openai,
+                prompt=prompt,
+                thread_id=thread_id,
+            )
             if urls:
                 return urls
             raise RuntimeError(
                 "OpenAI-compatible image generation returned no usable image references.",
             )
         except asyncio.CancelledError:
-            logger.info("Image generation cancelled before fallback could start.")
+            logger.warning("Image generation cancelled before fallback could start.")
             raise
         except Exception as exc:
             if not self._has_dashscope_config():
@@ -767,10 +826,14 @@ class ImageGenerationService:
                 _describe_exception_for_log(exc),
             )
             try:
-                return await self._generate_images_with_dashscope(
+                return await _invoke_with_optional_thread_id(
+                    self._generate_images_with_dashscope,
                     request=request,
                     prompt=prompt,
+                    thread_id=thread_id,
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as fallback_exc:
                 logger.error(
                     "DashScope 兜底生图在 OpenAI-compatible 失败后仍然执行失败。exception=%s",
@@ -783,7 +846,9 @@ class ImageGenerationService:
         *,
         request: MediaChatRequest,
         prompt: str,
+        thread_id: str,
     ) -> list[str]:
+        await raise_if_thread_cancelled(thread_id)
         if _is_wanx_v1_model(self.dashscope_model):
             payload = {
                 "model": self.dashscope_model,
@@ -801,6 +866,7 @@ class ImageGenerationService:
             return await self._generate_images_with_dashscope_async_task(
                 payload,
                 endpoint_path="/services/aigc/text2image/image-synthesis",
+                thread_id=thread_id,
             )
 
         payload = {
@@ -828,8 +894,14 @@ class ImageGenerationService:
         }
 
         if self._should_use_dashscope_async_task():
-            return await self._generate_images_with_dashscope_async_task(payload)
-        return await self._generate_images_with_dashscope_sync(payload)
+            return await self._generate_images_with_dashscope_async_task(
+                payload,
+                thread_id=thread_id,
+            )
+        return await self._generate_images_with_dashscope_sync(
+            payload,
+            thread_id=thread_id,
+        )
 
     def _should_use_dashscope_async_task(self) -> bool:
         normalized_model = self.dashscope_model.strip().lower()
@@ -838,7 +910,10 @@ class ImageGenerationService:
     async def _generate_images_with_dashscope_sync(
         self,
         payload: dict[str, object],
+        *,
+        thread_id: str,
     ) -> list[str]:
+        await raise_if_thread_cancelled(thread_id)
         endpoint = (
             f"{self.dashscope_base_url.rstrip('/')}"
             "/services/aigc/multimodal-generation/generation"
@@ -847,6 +922,7 @@ class ImageGenerationService:
             "POST",
             endpoint,
             json=payload,
+            thread_id=thread_id,
         )
         if response is None:
             return []
@@ -857,13 +933,16 @@ class ImageGenerationService:
         payload: dict[str, object],
         *,
         endpoint_path: str = "/services/aigc/image-generation/generation",
+        thread_id: str,
     ) -> list[str]:
+        await raise_if_thread_cancelled(thread_id)
         endpoint = f"{self.dashscope_base_url.rstrip('/')}{endpoint_path}"
         response = await self._request_dashscope_json(
             "POST",
             endpoint,
             headers={"X-DashScope-Async": "enable"},
             json=payload,
+            thread_id=thread_id,
         )
         if response is None:
             return []
@@ -873,10 +952,12 @@ class ImageGenerationService:
 
         max_attempts = max(1, int(self.timeout_seconds / self.poll_interval_seconds))
         for _ in range(max_attempts):
+            await raise_if_thread_cancelled(thread_id)
             await asyncio.sleep(self.poll_interval_seconds)
             task_payload = await self._request_dashscope_json(
                 "GET",
                 f"{self.dashscope_base_url.rstrip('/')}/tasks/{task_id}",
+                thread_id=thread_id,
             )
             if task_payload is None:
                 continue
@@ -908,7 +989,10 @@ class ImageGenerationService:
         *,
         headers: dict[str, str] | None = None,
         json: dict[str, object] | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, object] | None:
+        if thread_id:
+            await raise_if_thread_cancelled(thread_id)
         request_headers = {
             "Authorization": f"Bearer {self.dashscope_api_key}",
             "Content-Type": "application/json",
@@ -921,15 +1005,23 @@ class ImageGenerationService:
                 timeout=self.request_timeout,
                 follow_redirects=True,
             ) as client:
-                response = await client.request(
-                    method,
-                    url,
-                    headers=request_headers,
-                    json=json,
+                response = await execute_with_kill_switch(
+                    thread_id or "",
+                    client.request(
+                        method,
+                        url,
+                        headers=request_headers,
+                        json=json,
+                    ),
+                    task_name=(
+                        f"dashscope-image-request:{thread_id}"
+                        if thread_id
+                        else "dashscope-image-request"
+                    ),
                 )
                 _read_response_text(response)
                 response.raise_for_status()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GlobalKillSwitchTriggered):
             raise
         except httpx.HTTPStatusError as exc:
             response_text = _sanitize_log_string(_read_response_text(exc.response))
@@ -951,24 +1043,39 @@ class ImageGenerationService:
         self,
         *,
         prompt: str,
+        thread_id: str,
     ) -> list[str]:
-        return await self._generate_images_with_openai_images_api(prompt=prompt)
+        await raise_if_thread_cancelled(thread_id)
+        return await self._generate_images_with_openai_images_api(
+            prompt=prompt,
+            thread_id=thread_id,
+        )
 
     async def _generate_images_with_openai_images_api(
         self,
         *,
         prompt: str,
+        thread_id: str,
     ) -> list[str]:
         try:
-            response = await self._get_image_client().images.generate(
-                model=self.openai_settings.model,
-                prompt=prompt,
-                response_format="url",
-                n=1,
-                size=OPENAI_COMPATIBLE_IMAGE_SIZE,
-                timeout=self.openai_generate_timeout_seconds,
+            await raise_if_thread_cancelled(thread_id)
+            response = await execute_with_kill_switch(
+                thread_id,
+                self._get_image_client().images.generate(
+                    model=self.openai_settings.model,
+                    prompt=prompt,
+                    response_format="url",
+                    n=1,
+                    size=OPENAI_COMPATIBLE_IMAGE_SIZE,
+                    timeout=self.openai_generate_timeout_seconds,
+                ),
+                task_name=f"openai-image-generate:{thread_id}",
             )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GlobalKillSwitchTriggered):
+            await self._reset_async_openai_client(
+                attr_name="_image_client",
+                client_label="image generation",
+            )
             raise
         except httpx.ReadTimeout as exc:
             logger.error(
@@ -1032,6 +1139,7 @@ class ImageGenerationService:
         user_id: str | None,
         thread_id: str,
     ) -> list[str]:
+        await raise_if_thread_cancelled(thread_id)
         has_data_image_urls = any(url.startswith("data:image/") for url in urls)
         if not self.persist_results and not has_data_image_urls:
             return urls
@@ -1051,11 +1159,16 @@ class ImageGenerationService:
             follow_redirects=True,
         ) as client:
             for index, url in enumerate(urls, start=1):
+                await raise_if_thread_cancelled(thread_id)
                 try:
                     if url.startswith("data:image/"):
                         image_bytes, content_type = _decode_data_image_url(url)
                     else:
-                        response = await client.get(url)
+                        response = await execute_with_kill_switch(
+                            thread_id,
+                            client.get(url),
+                            task_name=f"generated-image-download:{thread_id}:{index}",
+                        )
                         response.raise_for_status()
                         image_bytes = response.content
                         if not image_bytes:
@@ -1108,8 +1221,10 @@ class ImageGenerationService:
                                     content_type=content_type,
                                     image_bytes=image_bytes,
                                 )
-                            )
+                        )
                             continue
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as fallback_exc:
                             logger.error(
                                 "Generated base64 image local fallback persistence failed "
@@ -1153,12 +1268,41 @@ class ImageGenerationService:
             and self.openai_settings.model
         )
 
+    async def _reset_async_openai_client(
+        self,
+        *,
+        attr_name: str,
+        client_label: str,
+    ) -> None:
+        client = getattr(self, attr_name, None)
+        if client is None:
+            return
+
+        setattr(self, attr_name, None)
+        try:
+            await client.close()
+        except asyncio.CancelledError:
+            logger.debug(
+                "Async client close interrupted during %s cancellation cleanup.",
+                client_label,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to close async client during %s cancellation cleanup.",
+                client_label,
+                exc_info=True,
+            )
+
     def _get_image_client(self) -> AsyncOpenAI:
         if self._image_client is None:
             self._image_client = AsyncOpenAI(
                 api_key=self.openai_settings.api_key,
                 base_url=self.openai_settings.base_url,
                 timeout=self.openai_request_timeout,
+                max_retries=0,
+                http_client=_build_async_http_client(
+                    timeout=self.openai_request_timeout,
+                ),
             )
         return self._image_client
 
@@ -1168,6 +1312,8 @@ class ImageGenerationService:
                 api_key=self.prompt_api_key,
                 base_url=self.prompt_base_url,
                 timeout=self.prompt_timeout,
+                max_retries=0,
+                http_client=_build_async_http_client(timeout=self.prompt_timeout),
             )
         return self._prompt_client
 

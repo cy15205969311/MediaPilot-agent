@@ -608,7 +608,16 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 审稿节点、结构化产物节点与生图节点都需要正确弹出已完成步骤，避免回路重复触发高成本节点
 - 当前图文串联的前端表现是渐进式产物更新：正文可先出现，配图随后补齐
 
-### 7.30 创作者长文本折叠展示基线
+### 7.30 显式停止与强杀链路基线
+
+- `POST /api/v1/media/chat/stop` 与 SSE 断连共用同一条会话级取消语义，前端显式停止不再只是 UI 状态变更
+- `app/core/cancel_manager.py` 维护按 `thread_id` 隔离的取消记录与运行中任务注册表，收到停止信号后会立即执行 `task.cancel()`
+- `app/api/v1/chat.py` 在 `_forward_stream_with_disconnect_cancellation(...)` 中把 `GlobalKillSwitchTriggered` 视为预期结束路径，避免 SSE 边界误走通用兜底或打印噪声异常
+- `app/services/graph/provider.py` 在图路由与下一跳切换前增加陷门拦截，被取消的线程会直接导向 `END`，不会继续进入下一轮草稿、工具或生图
+- `app/core/cancel_manager.py` 提供 `execute_with_kill_switch(...)` 主动轮询包装器，已经覆盖生图提示词生成、实际出图与图片下载等长耗时 I/O
+- 停止链路中的 `GlobalKillSwitchTriggered` 与 `CancelledError` 必须优先透传，不能被降级成普通异常后继续重试或触发兜底
+
+### 7.31 创作者长文本折叠展示基线
 
 - `frontend/src/app/components/CollapsibleText.tsx` 是统一的长文本折叠组件
 - 聊天气泡中的 `tool / note / error` 消息以及普通对话正文，超过阈值后会自动折叠并提供展开入口
@@ -676,6 +685,7 @@ C 端本地模板中心也同步补齐了生命周期能力：
 ### 9.2 媒体与生成工作流
 
 - `POST /api/v1/media/chat/stream`
+- `POST /api/v1/media/chat/stop`
 - `GET /api/v1/media/threads`
 - `GET /api/v1/media/threads/{thread_id}/messages`
 - `PATCH /api/v1/media/threads/{thread_id}`
@@ -746,6 +756,7 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 若改动 ORM 或 Alembic 迁移：发布前必须执行 `alembic upgrade head`
 - 若改动 OpenAI 兼容生图链路：至少执行 `python -m pytest tests/test_image_generation.py`
 - 若改动模型注册表、provider 可用性判断或模型选择器回退逻辑：执行 `python -m pytest tests/test_chat.py -q -k "mimo_registry or proxy_gpt_matrix or keeps_mimo_default"`
+- 若改动停止链路、图路由陷门或生图强杀包装器：执行 `python -m pytest tests/test_chat.py tests/test_graph_tools.py tests/test_image_generation.py -q`
 - 历史迁移修补必须保持幂等，不要假设旧表、旧列或旧索引一定存在
 - 推荐迁移冒烟命令：
 

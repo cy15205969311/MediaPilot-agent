@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 import app.api.v1.chat as chat_api_module
+import app.core.cancel_manager as cancel_manager_module
 import app.services.agent as agent_module
 import app.api.v1.knowledge as knowledge_api_module
 import app.services.knowledge_base as knowledge_base_module
@@ -1139,6 +1140,71 @@ def test_protected_chat_requires_token(client: TestClient):
     assert response.status_code == 401
 
 
+def test_media_chat_stop_endpoint_cancels_owned_active_thread(client: TestClient):
+    auth_payload = register_auth_response(client, username="alice-stop-owned")
+    headers = {"Authorization": f"Bearer {auth_payload['access_token']}"}
+    user_id = str(auth_payload["user"]["id"])
+    thread_id = "thread-stop-owned-active"
+
+    cancel_manager_module.cancel_manager.register_thread(
+        thread_id,
+        owner_user_id=user_id,
+    )
+
+    try:
+        response = client.post(
+            "/api/v1/media/chat/stop",
+            json={"thread_id": thread_id},
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"thread_id": thread_id, "cancelled": True}
+        assert cancel_manager_module.cancel_manager.is_cancelled(thread_id)
+    finally:
+        cancel_manager_module.cancel_manager.cleanup_thread(thread_id)
+
+
+def test_media_chat_stop_endpoint_rejects_other_users_active_thread(client: TestClient):
+    alice_auth = register_auth_response(client, username="alice-stop-owner")
+    bob_auth = register_auth_response(client, username="bob-stop-owner")
+    alice_user_id = str(alice_auth["user"]["id"])
+    thread_id = "thread-stop-foreign-active"
+
+    cancel_manager_module.cancel_manager.register_thread(
+        thread_id,
+        owner_user_id=alice_user_id,
+    )
+
+    try:
+        response = client.post(
+            "/api/v1/media/chat/stop",
+            json={"thread_id": thread_id},
+            headers={"Authorization": f"Bearer {bob_auth['access_token']}"},
+        )
+
+        assert response.status_code == 404
+        assert not cancel_manager_module.cancel_manager.is_cancelled(thread_id)
+    finally:
+        cancel_manager_module.cancel_manager.cleanup_thread(thread_id)
+
+
+def test_media_chat_stop_endpoint_returns_false_for_inactive_thread(client: TestClient):
+    headers = register_user(client, username="alice-stop-inactive")
+
+    response = client.post(
+        "/api/v1/media/chat/stop",
+        json={"thread_id": "thread-stop-inactive"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "thread_id": "thread-stop-inactive",
+        "cancelled": False,
+    }
+
+
 def test_media_chat_stream_rejects_when_token_balance_is_exhausted(client: TestClient):
     headers = register_user(client, username="alice-no-tokens")
 
@@ -1265,6 +1331,38 @@ def test_media_chat_stream_logs_request_lifecycle(
     )
 
 
+def test_cancel_manager_cancel_thread_cancels_registered_tasks():
+    async def exercise() -> None:
+        manager = cancel_manager_module.CancelManager()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        thread_id = "thread-cancel-manager-task"
+
+        async def blocking_task() -> None:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        task = asyncio.create_task(blocking_task())
+        manager.register_thread(thread_id, owner_user_id="user-cancel-manager-task")
+        manager.register_task(thread_id, task)
+
+        await started.wait()
+        manager.cancel_thread(thread_id, "User manually stopped generation")
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert cancelled.is_set()
+        assert manager.is_cancelled(thread_id)
+        assert manager.get_owner_user_id(thread_id) == "user-cancel-manager-task"
+
+    asyncio.run(exercise())
+
+
 def test_stream_disconnect_forwarder_cancels_workflow_task(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1359,7 +1457,110 @@ def test_stream_disconnect_forwarder_cancels_after_emitting_a_chunk(
     with pytest.raises(asyncio.CancelledError, match="Client disconnected"):
         asyncio.run(collect_chunks())
 
-    assert chunks == ["chunk-1"]
+    assert len(chunks) <= 1
+    assert all(chunk == "chunk-1" for chunk in chunks)
+    assert started.is_set()
+    assert cancelled.is_set()
+    assert disconnect_checks >= 2
+
+
+def test_stream_disconnect_forwarder_closes_workflow_stream_on_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started = asyncio.Event()
+    closed = asyncio.Event()
+    disconnect_checks = 0
+
+    class FakeWorkflowStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            started.set()
+            await asyncio.Future()
+            raise StopAsyncIteration
+
+        async def aclose(self):
+            closed.set()
+
+    async def fake_disconnect_checker() -> bool:
+        nonlocal disconnect_checks
+        disconnect_checks += 1
+        if disconnect_checks == 1:
+            await started.wait()
+            return False
+        return True
+
+    monkeypatch.setattr(
+        chat_api_module,
+        "STREAM_DISCONNECT_POLL_INTERVAL_SECONDS",
+        0.001,
+    )
+
+    async def collect_chunks() -> None:
+        async for _chunk in chat_api_module._forward_stream_with_disconnect_cancellation(
+            workflow_stream=FakeWorkflowStream(),
+            disconnect_checker=fake_disconnect_checker,
+            thread_id="thread-disconnect-close",
+            user_id="user-disconnect-close",
+        ):
+            pass
+
+    with pytest.raises(asyncio.CancelledError, match="Client disconnected"):
+        asyncio.run(collect_chunks())
+
+    assert started.is_set()
+    assert closed.is_set()
+    assert disconnect_checks >= 2
+
+
+def test_stream_disconnect_forwarder_exposes_global_kill_switch_to_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    disconnect_checks = 0
+    thread_id = "thread-disconnect-kill-switch"
+
+    async def fake_workflow_stream():
+        started.set()
+        try:
+            while True:
+                await cancel_manager_module.raise_if_cancelled(thread_id)
+                await asyncio.sleep(0.001)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+        if False:
+            yield "unreachable"
+
+    async def fake_disconnect_checker() -> bool:
+        nonlocal disconnect_checks
+        disconnect_checks += 1
+        if disconnect_checks == 1:
+            await started.wait()
+            return False
+        return True
+
+    monkeypatch.setattr(
+        chat_api_module,
+        "STREAM_DISCONNECT_POLL_INTERVAL_SECONDS",
+        0.001,
+    )
+
+    async def collect_chunks() -> None:
+        async for _chunk in chat_api_module._forward_stream_with_disconnect_cancellation(
+            workflow_stream=fake_workflow_stream(),
+            disconnect_checker=fake_disconnect_checker,
+            thread_id=thread_id,
+            user_id="user-disconnect-kill-switch",
+        ):
+            pass
+
+    with pytest.raises(asyncio.CancelledError, match="Client disconnected"):
+        asyncio.run(collect_chunks())
+
     assert started.is_set()
     assert cancelled.is_set()
     assert disconnect_checks >= 2

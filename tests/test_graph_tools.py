@@ -1,9 +1,18 @@
 import asyncio
 import json
 
+import httpx
 import pytest
+from langchain_core.messages import HumanMessage
 
+import app.core.cancel_manager as cancel_manager_module
+import app.services.providers as providers_module
 import app.services.graph.provider as graph_provider_module
+from app.core.context import (
+    RequestCancellationContext,
+    reset_request_cancellation_context,
+    set_request_cancellation_context,
+)
 from app.db.models import Thread
 from app.models.schemas import (
     ContentGenerationArtifactPayload,
@@ -205,7 +214,12 @@ def test_langgraph_tool_execution_cancellation_bubbles_out(monkeypatch):
         }
     )
 
-    async def cancelled_business_tool(name: str, arguments: dict[str, object]) -> str:
+    async def cancelled_business_tool(
+        name: str,
+        arguments: dict[str, object],
+        *,
+        thread_id: str | None = None,
+    ) -> str:
         raise asyncio.CancelledError()
 
     provider = LangGraphProvider(inner_provider=BusinessToolRecordingProvider())
@@ -231,6 +245,139 @@ def test_langgraph_tool_execution_cancellation_bubbles_out(monkeypatch):
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(provider._tool_execution_node(state))
+
+
+def test_langgraph_tool_execution_aborts_before_running_tool_when_request_is_cancelled(
+    monkeypatch,
+):
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-tool-execution-pre-cancelled",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "Cancel before any business tool runs.",
+            "materials": [],
+        }
+    )
+
+    called = False
+
+    async def unexpected_business_tool(
+        name: str,
+        arguments: dict[str, object],
+        *,
+        thread_id: str | None = None,
+    ) -> str:
+        nonlocal called
+        called = True
+        return "should not run"
+
+    provider = LangGraphProvider(inner_provider=BusinessToolRecordingProvider())
+    monkeypatch.setattr(
+        graph_provider_module,
+        "get_stream_writer",
+        lambda: (lambda payload: None),
+    )
+    monkeypatch.setattr(
+        graph_provider_module,
+        "execute_business_tool_async",
+        unexpected_business_tool,
+    )
+
+    state = provider._build_initial_state(request)
+    state["pending_tool_calls"] = [
+        {
+            "id": "tool-call-pre-cancelled",
+            "name": "analyze_market_trends",
+            "args": {"platform": "xiaohongshu", "category": "鍦板煙鏂囨梾"},
+        }
+    ]
+
+    async def run_with_cancelled_thread() -> None:
+        cancel_manager_module.cancel_manager.register_thread(request.thread_id)
+        cancel_manager_module.cancel_manager.cancel_thread(
+            request.thread_id,
+            "Client disconnected",
+        )
+        try:
+            await provider._tool_execution_node(state)
+        finally:
+            cancel_manager_module.cancel_manager.cleanup_thread(request.thread_id)
+
+    with pytest.raises(asyncio.CancelledError, match="Client disconnected"):
+        asyncio.run(run_with_cancelled_thread())
+
+    assert called is False
+
+
+def test_langgraph_route_after_generate_draft_forces_end_when_request_is_cancelled():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-route-cancelled-before-next-hop",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "Stop before the graph enters the next route.",
+            "materials": [],
+        }
+    )
+    provider = LangGraphProvider(inner_provider=BusinessToolRecordingProvider())
+    state = provider._build_initial_state(request)
+
+    cancel_manager_module.cancel_manager.register_thread(request.thread_id)
+    cancel_manager_module.cancel_manager.cancel_thread(
+        request.thread_id,
+        "User manually stopped generation",
+    )
+    try:
+        assert provider._route_after_generate_draft(state) == graph_provider_module.END
+    finally:
+        cancel_manager_module.cancel_manager.cleanup_thread(request.thread_id)
+
+
+def test_openai_tool_binding_adapter_aborts_before_sdk_request_when_context_is_cancelled():
+    called = False
+    thread_id = "thread-tool-binding-preflight-cancelled"
+
+    class FakeCompletionsAPI:
+        async def create(self, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("cancelled tool-binding request should never hit the SDK")
+
+    class FakeChatAPI:
+        def __init__(self) -> None:
+            self.completions = FakeCompletionsAPI()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChatAPI()
+
+    adapter = providers_module._OpenAIToolBindingAdapter(
+        client_factory=lambda: FakeClient(),
+        model="gpt-test",
+        timeout=httpx.Timeout(5.0),
+    )
+    runnable = adapter.bind_tools([graph_provider_module.generate_cover_images])
+
+    async def run_cancelled_request() -> None:
+        cancel_manager_module.cancel_manager.register_thread(thread_id)
+        token = set_request_cancellation_context(
+            RequestCancellationContext(thread_id=thread_id),
+        )
+        cancel_manager_module.cancel_manager.cancel_thread(
+            thread_id,
+            "User manually stopped generation",
+        )
+        try:
+            await runnable.ainvoke([HumanMessage(content="please decide whether to call a tool")])
+        finally:
+            reset_request_cancellation_context(token)
+            cancel_manager_module.cancel_manager.cleanup_thread(thread_id)
+
+    with pytest.raises(asyncio.CancelledError, match="User manually stopped generation"):
+        asyncio.run(run_cancelled_request())
+
+    assert called is False
 
 
 def test_analyze_market_trends_tool_returns_structured_mock_json(monkeypatch):
@@ -653,7 +800,7 @@ def test_langgraph_autonomously_considers_business_tools_for_planning_requests()
     assert "generate_content_outline" in inner_provider.last_request_message
 
 
-def test_langgraph_router_builds_two_step_execution_plan_for_mixed_content_request():
+def test_langgraph_router_keeps_mixed_content_request_on_draft_first_plan():
     request = MediaChatRequest.model_validate(
         {
             "thread_id": "thread-router-two-step-plan",
@@ -676,9 +823,9 @@ def test_langgraph_router_builds_two_step_execution_plan_for_mixed_content_reque
     state = provider._build_initial_state(request)
     updates = asyncio.run(provider._router_node(state))
 
-    assert updates["execution_plan"] == ["draft_content", "generate_image"]
+    assert updates["execution_plan"] == ["draft_content"]
     assert updates["active_execution_step"] == "draft_content"
-    assert updates["needs_image"] is True
+    assert updates["needs_image"] is False
     assert updates["direct_image_mode"] is False
 
 
@@ -709,6 +856,87 @@ def test_langgraph_router_builds_single_step_plan_for_direct_image_request():
     assert updates["active_execution_step"] == "generate_image"
     assert updates["needs_image"] is True
     assert updates["direct_image_mode"] is True
+
+
+def test_langgraph_provider_graph_compiles_with_plan_route_handlers():
+    provider = LangGraphProvider(inner_provider=ImageReadyProvider())
+
+    assert provider.graph is not None
+    assert hasattr(provider, "_route_after_format_artifact")
+    assert hasattr(provider, "_route_after_review")
+    assert hasattr(provider, "_route_after_tool_execution")
+
+
+def test_langgraph_route_after_format_artifact_dispatches_from_execution_plan():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-route-after-format-artifact",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "先写文案，再补一张配图。",
+            "materials": [],
+        }
+    )
+    provider = LangGraphProvider(inner_provider=ImageReadyProvider())
+
+    next_image_state = provider._build_initial_state(request)
+    next_image_state["execution_plan"] = ["generate_image"]
+    next_image_state["active_execution_step"] = "generate_image"
+    assert provider._route_after_format_artifact(next_image_state) == "generate_image_node"
+
+    finished_state = provider._build_initial_state(request)
+    finished_state["execution_plan"] = []
+    finished_state["active_execution_step"] = ""
+    assert provider._route_after_format_artifact(finished_state) == graph_provider_module.END
+
+
+def test_langgraph_review_exit_requests_image_tool_when_post_review_image_is_needed():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-post-review-image-tool",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "Write a Xiaohongshu launch post and add a matching cover image.",
+            "materials": [],
+        }
+    )
+
+    async def always_generate_images(request, draft, artifact_candidate):
+        assert request.task_type.value == "content_generation"
+        assert draft
+        return {"needs_image": True}
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        image_route_analyzer=always_generate_images,
+    )
+
+    state = provider._build_initial_state(request)
+    state["execution_plan"] = ["draft_content"]
+    state["active_execution_step"] = "draft_content"
+    state["current_draft"] = "A polished product-launch draft ready for review."
+    state["artifact_candidate"] = {
+        "artifact_type": "content_draft",
+        "title": "Launch Post",
+        "title_candidates": ["A", "B"],
+        "body": "A polished product-launch draft ready for review.",
+        "platform_cta": "Save this for launch day.",
+    }
+
+    updates = asyncio.run(
+        provider._build_review_exit_update(
+            state,
+            next_route="format_artifact_node",
+            current_step="review:passed",
+        )
+    )
+
+    assert updates["next_route"] == "tool_execution_node"
+    assert updates["tool_execution_next_route"] == "format_artifact_node"
+    assert updates["execution_plan"] == []
+    assert updates["active_execution_step"] == ""
+    assert updates["needs_image"] is True
+    assert updates["pending_tool_calls"][0]["name"] == "generate_cover_images"
 
 
 def test_langgraph_injects_knowledge_base_context_before_final_generation(monkeypatch):
@@ -864,10 +1092,7 @@ def test_langgraph_attaches_generated_images_to_content_artifact():
     assert "generate_cover_images" in tool_call_names
 
     artifact_events = [event for event in events if event["event"] == "artifact"]
-    assert len(artifact_events) >= 2
-
-    first_artifact = ContentGenerationArtifactPayload.model_validate(artifact_events[0]["artifact"])
-    assert first_artifact.generated_images == []
+    assert len(artifact_events) >= 1
 
     artifact = ContentGenerationArtifactPayload.model_validate(artifact_events[-1]["artifact"])
     assert artifact.generated_images == [
@@ -1206,6 +1431,63 @@ def test_langgraph_direct_image_generation_cancellation_bubbles_out(
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(provider._generate_image_node(state))
+
+
+def test_langgraph_direct_image_generation_cancels_inflight_task_on_outer_cancellation(
+    monkeypatch,
+    caplog,
+):
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-image-generation-hard-cancel",
+            "platform": "xiaohongshu",
+            "task_type": "image_generation",
+            "message": "Create a product poster and stop it midway.",
+            "materials": [],
+        }
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_prompt_builder(*, request, draft, artifact_candidate):
+        return "A product poster with crisp studio lighting and a centered bottle hero shot."
+
+    async def hanging_image_generator(*, request, prompt, user_id, thread_id):
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    provider = LangGraphProvider(
+        inner_provider=DraftForbiddenProvider(),
+        image_prompt_builder=fake_prompt_builder,
+        image_generator=hanging_image_generator,
+    )
+
+    monkeypatch.setattr(
+        graph_provider_module,
+        "get_stream_writer",
+        lambda: (lambda payload: None),
+    )
+    state = provider._build_initial_state(request)
+    state["needs_image"] = True
+    state["direct_image_mode"] = True
+
+    async def run_and_cancel() -> None:
+        task = asyncio.create_task(provider._generate_image_node(state))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(run_and_cancel())
+
+    assert started.is_set()
+    assert cancelled.is_set()
+    assert "💥 生图任务被物理强杀" in caplog.text
 
 
 def test_langgraph_direct_image_generation_emits_processing_updates(monkeypatch):

@@ -24,6 +24,8 @@ import type {
   KnowledgeUploadApiResponse,
   LogoutResponse,
   MediaChatRequestPayload,
+  MediaChatStopRequestPayload,
+  MediaChatStopResponse,
   PasswordResetConfirmPayload,
   PasswordResetConfirmResponse,
   PasswordResetRequestApiResponse,
@@ -156,6 +158,28 @@ function clearStoredSession(): void {
   clearStoredToken();
   clearStoredRefreshToken();
   clearStoredUser();
+}
+
+export async function stopChatStream(
+  threadId: string,
+): Promise<MediaChatStopResponse> {
+  const payload: MediaChatStopRequestPayload = {
+    thread_id: threadId,
+  };
+
+  const response = await fetchWithInterceptor(
+    "/api/v1/media/chat/stop",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS },
+  );
+
+  return (await response.json()) as MediaChatStopResponse;
 }
 
 export function isUnauthorizedError(error: unknown): boolean {

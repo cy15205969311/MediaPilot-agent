@@ -609,6 +609,7 @@ The media chat entrypoint now includes a stricter smart-routing and cancellation
 - explicit text-only requests and image-analysis requests with uploaded image materials can override a mistaken `image_generation` choice and route back to content generation
 - `POST /api/v1/media/chat/stream` logs the override reason and persists the normalized task type instead of the stale frontend hint
 - stream forwarding in `app/api/v1/chat.py` is now wrapped by `_forward_stream_with_disconnect_cancellation(...)`
+- the stream bridge now races disconnect detection against workflow forwarding and tears down the workflow generator on disconnect instead of only polling inside the forward loop
 - client disconnects and explicit stop actions cancel the producer task so the backend does not keep forwarding a dead SSE stream in the background
 - cancellation handling belongs in the route-layer stream bridge as well as in downstream workflow nodes; do not collapse `CancelledError` into a generic fallback path
 
@@ -623,15 +624,27 @@ The workflow stack now carries a stricter async-only execution rule for cancella
 
 ### 7.30 Mixed draft-and-image plan execution baseline
 
-The LangGraph runtime no longer treats every request as a single-hop task:
+The LangGraph runtime now uses a hybrid baseline for text-plus-image workflows:
 
 - `GraphState` now carries `execution_plan` plus `active_execution_step`
-- the router can normalize mixed requests into ordered steps such as `["draft_content", "generate_image"]`
-- direct image requests still bypass drafting and produce a single-step plan
-- review and formatting exits are allowed to hand off into the next pending execution step instead of always terminating at `END`
+- direct image requests still bypass drafting and keep a dedicated `["generate_image"]` plan
+- normal content-generation requests stay draft-first and no longer pre-commit to a static `["draft_content", "generate_image"]` chain at router time
+- after review, the workflow can request `generate_cover_images` through a post-review tool-calling pass and then route through `tool_execution_node` before final artifact formatting
+- business tools remain pre-draft tools, while image generation is treated as a post-review artifact tool for mixed text-plus-image requests
 - image-generation exits must always pop their step so the graph does not loop back into the same expensive node
 
-### 7.31 Creator long-text progressive disclosure baseline
+### 7.31 Explicit stop and kill-switch cancellation baseline
+
+The streaming stack now treats user stop actions as a thread-scoped hard-stop contract instead of a best-effort UI hint:
+
+- `POST /api/v1/media/chat/stop` lets the frontend stop a live generation by `thread_id`, and `app/api/v1/chat.py` treats SSE disconnects as the same cancellation signal
+- `app/core/cancel_manager.py` keeps per-thread cancellation records plus registered `asyncio.Task` handles, so explicit stops can call `task.cancel()` immediately instead of waiting for another stream chunk
+- `_forward_stream_with_disconnect_cancellation(...)` handles `GlobalKillSwitchTriggered` as an expected termination path, allowing the SSE boundary to exit cleanly without falling into generic fallback or noisy server-error logging
+- `app/services/graph/provider.py` now adds route-level trap doors before expensive next hops; cancelled threads must route to `END` instead of entering another draft, tool, or image step
+- `execute_with_kill_switch(...)` actively polls thread cancellation while awaiting long-running I/O, and is now the required wrapper for cancellation-sensitive image prompt generation, image generation, and image download calls
+- provider and image-service preflight checks must re-raise cancellation immediately; do not swallow `GlobalKillSwitchTriggered` or downgrade it into a normal retryable exception
+
+### 7.32 Creator long-text progressive disclosure baseline
 
 The creator workspace now uses one shared long-text folding primitive instead of rendering every large prompt or log block at full height:
 
@@ -703,6 +716,7 @@ Mutable commercial, security, and notification baselines should follow the KV co
 ### 9.2 Media and generation workflow
 
 - `POST /api/v1/media/chat/stream`
+- `POST /api/v1/media/chat/stop`
 - `GET /api/v1/media/threads`
 - `GET /api/v1/media/threads/{thread_id}/messages`
 - `PATCH /api/v1/media/threads/{thread_id}`
@@ -773,6 +787,7 @@ Validate the parts you actually changed before you push.
 - if ORM models or Alembic revisions changed: run `alembic upgrade head` before release
 - if the OpenAI-compatible image pipeline changed: run at least `python -m pytest tests/test_image_generation.py`
 - if the model registry, provider availability, or selector normalization changed: run `python -m pytest tests/test_chat.py -q -k "mimo_registry or proxy_gpt_matrix or keeps_mimo_default"`
+- if the stop pipeline, graph trap doors, or kill-switch wrappers changed: run `python -m pytest tests/test_chat.py tests/test_graph_tools.py tests/test_image_generation.py -q`
 - historical migration patches must stay idempotent; do not assume a legacy table or column already exists when hardening an old revision
 - recommended migration smoke test:
 

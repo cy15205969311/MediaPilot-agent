@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import BaseTool, tool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from openai import (
@@ -29,11 +30,13 @@ from openai import (
     OpenAIError,
     RateLimitError,
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import load_environment
+from app.core.cancel_manager import cancel_manager, raise_if_cancelled as raise_if_thread_cancelled
+from app.core.context import raise_if_cancelled
 from app.db.models import Thread, UploadRecord, User
 from app.models.schemas import (
     CitationAuditItem,
@@ -298,6 +301,7 @@ class GraphState(TypedDict, total=False):
     next_route: str
     messages: list[BaseMessage]
     pending_tool_calls: list[dict[str, object]]
+    tool_execution_next_route: str
     business_tool_results: list[str]
     business_tool_iteration: int
     knowledge_base_scope: str
@@ -320,8 +324,58 @@ class ImageRouteDecision(BaseModel):
     needs_image: bool = False
 
 
+class GenerateCoverImagesToolInput(BaseModel):
+    reason: str = Field(
+        default="",
+        description=(
+            "Optional short reason for generating a new cover image, poster, or illustration "
+            "for the current draft."
+        ),
+    )
+
+
 EXECUTION_STEP_DRAFT_CONTENT = "draft_content"
 EXECUTION_STEP_GENERATE_IMAGE = "generate_image"
+GENERATE_COVER_IMAGES_TOOL_NAME = "generate_cover_images"
+
+
+@tool(args_schema=GenerateCoverImagesToolInput)
+def generate_cover_images(reason: str = "") -> str:
+    """Generate a new cover image or supporting visual for the current draft only when the user explicitly wants a newly created image."""
+    return json.dumps(
+        {
+            "status": "deferred",
+            "reason": reason,
+        },
+        ensure_ascii=False,
+    )
+
+
+async def _raise_if_request_cancelled(request: MediaChatRequest) -> None:
+    await raise_if_cancelled()
+    await raise_if_thread_cancelled(request.thread_id)
+
+
+async def _raise_if_state_cancelled(state: GraphState) -> None:
+    request = state.get("request")
+    if request is None:
+        await raise_if_cancelled()
+        return
+    await _raise_if_request_cancelled(request)
+
+
+def _route_to_end_if_cancelled(state: GraphState, *, route_name: str) -> str | None:
+    request = state.get("request")
+    if request is None:
+        return None
+    if not cancel_manager.is_cancelled(request.thread_id):
+        return None
+    logger.warning(
+        "langgraph route=%s aborted_by_cancel thread_id=%s forcing_end=true",
+        route_name,
+        request.thread_id,
+    )
+    return END
 
 
 def create_langgraph_inner_provider() -> BaseLLMProvider:
@@ -400,6 +454,8 @@ class LangGraphProvider(BaseLLMProvider):
         self.search_request_timeout = _build_http_timeout(self.search_timeout_seconds)
         self.business_tools = get_business_tools()
         self.bound_business_tool_llm = self._bind_business_tool_llm()
+        self.artifact_tools: list[BaseTool] = [generate_cover_images]
+        self.bound_artifact_tool_llm = self._bind_artifact_tool_llm()
         self.business_tool_max_iterations = business_tool_max_iterations
         self._vision_client: AsyncOpenAI | None = None
         logger.info(
@@ -452,6 +508,25 @@ class LangGraphProvider(BaseLLMProvider):
             )
             return None
 
+    def _bind_artifact_tool_llm(self):
+        if not self.artifact_tools:
+            return None
+        try:
+            return self.inner_provider.bind_tools(self.artifact_tools)
+        except NotImplementedError:
+            logger.info(
+                "Inner provider %s does not expose bind_tools; artifact tool routing will use image-route fallback.",
+                type(self.inner_provider).__name__,
+            )
+            return None
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Failed to bind artifact tools on inner provider %s: %s",
+                type(self.inner_provider).__name__,
+                exc,
+            )
+            return None
+
     async def generate_stream(
         self,
         request: MediaChatRequest,
@@ -487,10 +562,12 @@ class LangGraphProvider(BaseLLMProvider):
         state_token_usage = normalize_model_token_usage(initial_state.get("token_usage"))
 
         try:
+            await _raise_if_request_cancelled(request)
             async for mode, chunk in self.graph.astream(
                 initial_state,
                 stream_mode=["custom", "updates"],
             ):
+                await _raise_if_request_cancelled(request)
                 if not isinstance(chunk, dict):
                     continue
 
@@ -563,6 +640,7 @@ class LangGraphProvider(BaseLLMProvider):
             "next_route": "parse_materials_node",
             "messages": [],
             "pending_tool_calls": [],
+            "tool_execution_next_route": "",
             "business_tool_results": [],
             "business_tool_iteration": 0,
             "knowledge_base_scope": "",
@@ -622,11 +700,19 @@ class LangGraphProvider(BaseLLMProvider):
                 "review_node": "review_node",
             },
         )
-        graph.add_edge("tool_execution_node", "generate_draft_node")
+        graph.add_conditional_edges(
+            "tool_execution_node",
+            self._route_after_tool_execution,
+            {
+                "generate_draft_node": "generate_draft_node",
+                "format_artifact_node": "format_artifact_node",
+            },
+        )
         graph.add_conditional_edges(
             "review_node",
             self._route_after_review,
             {
+                "tool_execution_node": "tool_execution_node",
                 "generate_draft_node": "generate_draft_node",
                 "format_artifact_node": "format_artifact_node",
             },
@@ -637,7 +723,7 @@ class LangGraphProvider(BaseLLMProvider):
             self._route_after_format_artifact,
             {
                 "generate_image_node": "generate_image_node",
-                "end": END,
+                END: END,
             },
         )
 
@@ -711,6 +797,9 @@ class LangGraphProvider(BaseLLMProvider):
         }
 
     def _route_from_router(self, state: GraphState) -> str:
+        cancelled_route = _route_to_end_if_cancelled(state, route_name="after_router")
+        if cancelled_route is not None:
+            return cancelled_route
         return state.get("next_route", "parse_materials_node")
 
     async def _parse_materials_node(self, state: GraphState) -> GraphState:
@@ -958,6 +1047,9 @@ class LangGraphProvider(BaseLLMProvider):
         }
 
     def _route_after_parse(self, state: GraphState) -> str:
+        cancelled_route = _route_to_end_if_cancelled(state, route_name="after_parse")
+        if cancelled_route is not None:
+            return cancelled_route
         if state.get("needs_ocr"):
             logger.info(
                 "langgraph route=after_parse thread_id=%s next=%s needs_search=%s",
@@ -991,6 +1083,9 @@ class LangGraphProvider(BaseLLMProvider):
         return "generate_draft_node"
 
     def _route_after_ocr(self, state: GraphState) -> str:
+        cancelled_route = _route_to_end_if_cancelled(state, route_name="after_ocr")
+        if cancelled_route is not None:
+            return cancelled_route
         current_execution_step = _get_current_execution_step(state)
         if current_execution_step == EXECUTION_STEP_GENERATE_IMAGE:
             logger.info(
@@ -1015,6 +1110,7 @@ class LangGraphProvider(BaseLLMProvider):
         return "generate_draft_node"
 
     async def _ocr_node(self, state: GraphState) -> GraphState:
+        await _raise_if_state_cancelled(state)
         writer = get_stream_writer()
         _emit_tool_call(writer, name="ocr", status="processing")
         image_urls = [
@@ -1067,6 +1163,7 @@ class LangGraphProvider(BaseLLMProvider):
         }
 
     async def _search_node(self, state: GraphState) -> GraphState:
+        await _raise_if_state_cancelled(state)
         writer = get_stream_writer()
         request = state["request"]
         search_query = (state.get("search_query") or "").strip() or _build_default_search_query(
@@ -1131,6 +1228,7 @@ class LangGraphProvider(BaseLLMProvider):
         }
 
     async def _generate_draft_node(self, state: GraphState) -> GraphState:
+        await _raise_if_state_cancelled(state)
         writer = get_stream_writer()
         _emit_tool_call(writer, name="generate_draft", status="processing")
         logger.info(
@@ -1142,6 +1240,7 @@ class LangGraphProvider(BaseLLMProvider):
         )
 
         request = state["request"]
+        await _raise_if_state_cancelled(state)
         pending_tool_calls, planner_message = await self._request_business_tool_calls(state)
         updated_messages = list(state.get("messages", []))
         if planner_message is not None:
@@ -1149,6 +1248,7 @@ class LangGraphProvider(BaseLLMProvider):
         if pending_tool_calls:
             return {
                 "pending_tool_calls": pending_tool_calls,
+                "tool_execution_next_route": "generate_draft_node",
                 "messages": updated_messages,
                 "business_tool_iteration": state.get("business_tool_iteration", 0) + 1,
                 "current_step": "generate_draft:tool_calls_requested",
@@ -1158,6 +1258,7 @@ class LangGraphProvider(BaseLLMProvider):
         knowledge_base_context = str(state.get("knowledge_base_context", "") or "").strip()
         knowledge_base_citation_audit = list(state.get("knowledge_base_citation_audit", []))
         if knowledge_base_scope and not knowledge_base_context:
+            await _raise_if_state_cancelled(state)
             _emit_tool_call(
                 writer,
                 name="retrieve_knowledge_base",
@@ -1261,12 +1362,14 @@ class LangGraphProvider(BaseLLMProvider):
         artifact_fallback_reason: str | None = None
         draft_token_usage: dict[str, int] = {}
 
+        await _raise_if_state_cancelled(state)
         async for event in self.inner_provider.generate_stream(
             adapted_request,
             db=state.get("db"),
             thread=None,
             user_id=state.get("user_id"),
         ):
+            await _raise_if_state_cancelled(state)
             event_name = str(event.get("event", ""))
 
             if event_name in {"start", "tool_call"}:
@@ -1327,6 +1430,9 @@ class LangGraphProvider(BaseLLMProvider):
         }
 
     def _route_after_generate_draft(self, state: GraphState) -> str:
+        cancelled_route = _route_to_end_if_cancelled(state, route_name="after_generate_draft")
+        if cancelled_route is not None:
+            return cancelled_route
         pending_tool_calls = state.get("pending_tool_calls") or _get_latest_ai_tool_calls(state)
         if pending_tool_calls:
             logger.info(
@@ -1344,10 +1450,16 @@ class LangGraphProvider(BaseLLMProvider):
         return "review_node"
 
     async def _tool_execution_node(self, state: GraphState) -> GraphState:
+        await _raise_if_state_cancelled(state)
         writer = get_stream_writer()
         pending_tool_calls = list(state.get("pending_tool_calls") or _get_latest_ai_tool_calls(state))
         tool_results = list(state.get("business_tool_results", []))
         messages = list(state.get("messages", []))
+        generated_images = _normalize_generated_images(state.get("generated_images"))
+        image_generation_prompt = str(state.get("image_generation_prompt") or "").strip()
+        tool_execution_next_route = str(
+            state.get("tool_execution_next_route", "generate_draft_node") or "generate_draft_node",
+        )
 
         logger.info(
             "langgraph node=tool_execution thread_id=%s tool_calls=%s",
@@ -1356,18 +1468,57 @@ class LangGraphProvider(BaseLLMProvider):
         )
 
         for tool_call in pending_tool_calls:
+            await _raise_if_state_cancelled(state)
             tool_name = str(tool_call.get("name", ""))
             raw_args = tool_call.get("args", {})
             tool_args = raw_args if isinstance(raw_args, dict) else {}
             tool_call_id = str(tool_call.get("id") or f"call_{uuid.uuid4().hex}")
-            _emit_tool_call(
-                writer,
-                name=tool_name,
-                status="processing",
-                message=f"\u6b63\u5728\u8c03\u7528\u4e1a\u52a1\u5de5\u5177: {tool_name}...",
-            )
             try:
-                result = await execute_business_tool_async(tool_name, tool_args)
+                if tool_name == GENERATE_COVER_IMAGES_TOOL_NAME:
+                    await _raise_if_state_cancelled(state)
+                    image_updates = await self._execute_generate_cover_images_tool(
+                        state,
+                        tool_args=tool_args,
+                    )
+                    generated_images = _merge_generated_images(
+                        generated_images,
+                        _normalize_generated_images(image_updates.get("generated_images")),
+                    )
+                    image_generation_prompt = str(
+                        image_updates.get("image_generation_prompt")
+                        or image_generation_prompt
+                        or "",
+                    ).strip()
+                    tool_payload = {
+                        "generated_images": _normalize_generated_images(
+                            image_updates.get("generated_images"),
+                        ),
+                        "image_generation_prompt": str(
+                            image_updates.get("image_generation_prompt") or "",
+                        ).strip(),
+                        "status": image_updates.get("current_step", "generate_image:completed"),
+                    }
+                    messages.append(
+                        ToolMessage(
+                            content=json.dumps(tool_payload, ensure_ascii=False),
+                            tool_call_id=tool_call_id,
+                            name=tool_name,
+                        )
+                    )
+                    continue
+
+                _emit_tool_call(
+                    writer,
+                    name=tool_name,
+                    status="processing",
+                    message=f"\u6b63\u5728\u8c03\u7528\u4e1a\u52a1\u5de5\u5177: {tool_name}...",
+                )
+                await _raise_if_state_cancelled(state)
+                result = await execute_business_tool_async(
+                    tool_name,
+                    tool_args,
+                    thread_id=state["request"].thread_id,
+                )
                 formatted_result = _format_business_tool_result(tool_name, result)
                 tool_results.append(formatted_result)
                 messages.append(
@@ -1383,10 +1534,18 @@ class LangGraphProvider(BaseLLMProvider):
                     status="completed",
                     message=f"\u4e1a\u52a1\u5de5\u5177\u8c03\u7528\u5b8c\u6210: {tool_name}",
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # pragma: no cover - defensive path
-                logger.exception("Business tool execution failed: %s", exc)
-                error_text = f"\u4e1a\u52a1\u5de5\u5177 {tool_name} \u8c03\u7528\u5931\u8d25\uff1a{exc}"
-                tool_results.append(_format_business_tool_result(tool_name, error_text))
+                logger.exception("Tool execution failed: %s", exc)
+                error_prefix = (
+                    "\u751f\u56fe\u5de5\u5177"
+                    if tool_name == GENERATE_COVER_IMAGES_TOOL_NAME
+                    else "\u4e1a\u52a1\u5de5\u5177"
+                )
+                error_text = f"{error_prefix} {tool_name} \u8c03\u7528\u5931\u8d25\uff1a{exc}"
+                if tool_name != GENERATE_COVER_IMAGES_TOOL_NAME:
+                    tool_results.append(_format_business_tool_result(tool_name, error_text))
                 messages.append(
                     ToolMessage(
                         content=error_text,
@@ -1394,21 +1553,26 @@ class LangGraphProvider(BaseLLMProvider):
                         name=tool_name,
                     )
                 )
-                _emit_tool_call(
-                    writer,
-                    name=tool_name,
-                    status="failed",
-                    message=error_text,
-                )
+                if tool_name != GENERATE_COVER_IMAGES_TOOL_NAME:
+                    _emit_tool_call(
+                        writer,
+                        name=tool_name,
+                        status="failed",
+                        message=error_text,
+                    )
 
         return {
             "business_tool_results": tool_results,
             "messages": messages,
             "pending_tool_calls": [],
+            "tool_execution_next_route": tool_execution_next_route,
+            "generated_images": generated_images,
+            "image_generation_prompt": image_generation_prompt,
             "current_step": "tool_execution:completed",
         }
 
     async def _review_node(self, state: GraphState) -> GraphState:
+        await _raise_if_state_cancelled(state)
         writer = get_stream_writer()
         logger.info(
             "langgraph node=review thread_id=%s retry_count=%s has_error=%s",
@@ -1437,6 +1601,7 @@ class LangGraphProvider(BaseLLMProvider):
                         ),
                     )
                     if retry_delay_seconds > 0:
+                        await _raise_if_state_cancelled(state)
                         await asyncio.sleep(retry_delay_seconds)
                     return await self._build_review_exit_update(
                         state,
@@ -1578,19 +1743,34 @@ class LangGraphProvider(BaseLLMProvider):
                 state.get("execution_plan"),
                 expected_step=EXECUTION_STEP_DRAFT_CONTENT,
             )
-            should_append_image_step = EXECUTION_STEP_GENERATE_IMAGE not in remaining_plan
-            if should_append_image_step and (await self._decide_image_route(state)).needs_image:
-                remaining_plan.append(EXECUTION_STEP_GENERATE_IMAGE)
             updates["execution_plan"] = remaining_plan
             updates["active_execution_step"] = remaining_plan[0] if remaining_plan else ""
-            updates["needs_image"] = bool(state.get("needs_image", False)) or (
-                EXECUTION_STEP_GENERATE_IMAGE in remaining_plan
+            post_review_state = dict(state)
+            post_review_state.update(updates)
+            tool_calls, planner_message = await self._request_post_review_tool_calls(
+                post_review_state,
             )
+            next_messages = list(state.get("messages", []))
+            if planner_message is not None:
+                next_messages.append(planner_message)
+            if planner_message is not None or tool_calls:
+                updates["messages"] = next_messages
+            if tool_calls:
+                updates["pending_tool_calls"] = tool_calls
+                updates["tool_execution_next_route"] = "format_artifact_node"
+                updates["next_route"] = "tool_execution_node"
+                updates["needs_image"] = True
+            else:
+                updates["tool_execution_next_route"] = ""
+                updates["needs_image"] = bool(state.get("needs_image", False))
         else:
             updates["needs_image"] = bool(state.get("needs_image", False))
         return updates
 
     def _route_after_review(self, state: GraphState) -> str:
+        cancelled_route = _route_to_end_if_cancelled(state, route_name="after_review")
+        if cancelled_route is not None:
+            return cancelled_route
         next_route = state.get("next_route", "format_artifact_node")
         logger.info(
             "langgraph route=after_review thread_id=%s next=%s execution_plan=%s needs_image=%s",
@@ -1601,26 +1781,45 @@ class LangGraphProvider(BaseLLMProvider):
         )
         return next_route
 
+    def _route_after_tool_execution(self, state: GraphState) -> str:
+        cancelled_route = _route_to_end_if_cancelled(state, route_name="after_tool_execution")
+        if cancelled_route is not None:
+            return cancelled_route
+        next_route = state.get("tool_execution_next_route", "generate_draft_node")
+        if next_route not in {"generate_draft_node", "format_artifact_node"}:
+            next_route = "generate_draft_node"
+        logger.info(
+            "langgraph route=after_tool_execution thread_id=%s next=%s pending_tool_calls=%s",
+            state["request"].thread_id,
+            next_route,
+            len(state.get("pending_tool_calls", [])),
+        )
+        return next_route
+
     def _route_after_format_artifact(self, state: GraphState) -> str:
+        cancelled_route = _route_to_end_if_cancelled(state, route_name="after_format_artifact")
+        if cancelled_route is not None:
+            return cancelled_route
         next_execution_step = _get_current_execution_step(state)
-        if next_execution_step == EXECUTION_STEP_GENERATE_IMAGE:
-            logger.info(
-                "langgraph route=after_format_artifact thread_id=%s next=%s execution_plan=%s",
+        next_route = _resolve_execution_step_route(next_execution_step)
+        if next_route == END and next_execution_step:
+            logger.warning(
+                "langgraph route=after_format_artifact thread_id=%s encountered_unknown_execution_step=%s execution_plan=%s",
                 state["request"].thread_id,
-                "generate_image_node",
+                next_execution_step,
                 state.get("execution_plan", []),
             )
-            return "generate_image_node"
 
         logger.info(
             "langgraph route=after_format_artifact thread_id=%s next=%s execution_plan=%s",
             state["request"].thread_id,
-            "end",
+            next_route,
             state.get("execution_plan", []),
         )
-        return "end"
+        return next_route
 
     async def _generate_image_node(self, state: GraphState) -> GraphState:
+        await _raise_if_state_cancelled(state)
         request = state["request"]
         user_role = str((state.get("user_context") or {}).get("role") or "user").strip().lower()
         direct_image_mode = bool(state.get("direct_image_mode"))
@@ -1672,6 +1871,7 @@ class LangGraphProvider(BaseLLMProvider):
             status="processing",
             message="正在提炼图片提示词..." if direct_image_mode else "正在提炼封面配图提示词...",
         )
+        await _raise_if_state_cancelled(state)
         try:
             prompt = await self._build_image_prompt_for_state(state)
         except asyncio.CancelledError:
@@ -1755,45 +1955,51 @@ class LangGraphProvider(BaseLLMProvider):
                 state,
                 prompt=prompt,
             ),
+            name=f"langgraph-image-generation:{request.thread_id}",
         )
         loop = asyncio.get_running_loop()
         image_started_at = loop.time()
         try:
             while True:
-                try:
-                    generated_images = await asyncio.wait_for(
-                        asyncio.shield(image_task),
-                        timeout=IMAGE_PROGRESS_HEARTBEAT_SECONDS,
-                    )
+                await _raise_if_state_cancelled(state)
+                done, _ = await asyncio.wait(
+                    {image_task},
+                    timeout=IMAGE_PROGRESS_HEARTBEAT_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if image_task in done:
+                    generated_images = await image_task
                     break
-                except asyncio.TimeoutError:
-                    elapsed_seconds = loop.time() - image_started_at
-                    progress_message, progress_percent = _build_image_progress_state(
-                        elapsed_seconds,
-                    )
-                    _emit_tool_call(
+
+                elapsed_seconds = loop.time() - image_started_at
+                progress_message, progress_percent = _build_image_progress_state(
+                    elapsed_seconds,
+                )
+                _emit_tool_call(
+                    writer,
+                    name="generate_cover_images",
+                    status="processing",
+                    message=progress_message,
+                )
+                if direct_image_mode:
+                    _emit_artifact(
                         writer,
-                        name="generate_cover_images",
-                        status="processing",
-                        message=progress_message,
+                        _build_processing_image_artifact(
+                            request=request,
+                            prompt=prompt,
+                            image_prompt_seed=draft_text,
+                            progress_message=progress_message,
+                            progress_percent=progress_percent,
+                        ),
                     )
-                    if direct_image_mode:
-                        _emit_artifact(
-                            writer,
-                            _build_processing_image_artifact(
-                                request=request,
-                                prompt=prompt,
-                                image_prompt_seed=draft_text,
-                                progress_message=progress_message,
-                                progress_percent=progress_percent,
-                            ),
-                        )
         except asyncio.CancelledError:
-            image_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await image_task
-            logger.info(
-                "Image generation cancelled thread_id=%s user_role=%s",
+            await self._cancel_image_generation_task(
+                image_task,
+                thread_id=request.thread_id,
+                user_role=user_role or "user",
+            )
+            logger.error(
+                "💥 生图任务被物理强杀 (Client Disconnected/Task Cancelled)! thread_id=%s user_role=%s",
                 request.thread_id,
                 user_role or "user",
             )
@@ -1852,6 +2058,28 @@ class LangGraphProvider(BaseLLMProvider):
             **image_step_updates,
         }
 
+    async def _cancel_image_generation_task(
+        self,
+        task: asyncio.Task[list[str]],
+        *,
+        thread_id: str,
+        user_role: str,
+    ) -> None:
+        if not task.done():
+            task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.debug(
+                "Image generation task cleanup observed a terminal exception. thread_id=%s user_role=%s",
+                thread_id,
+                user_role,
+                exc_info=True,
+            )
+
     def _is_image_generation_available(self, *, user_role: str | None = None) -> bool:
         return self.image_generator is not None or self.image_service.is_enabled(
             user_role=user_role,
@@ -1876,6 +2104,7 @@ class LangGraphProvider(BaseLLMProvider):
         prompt: str,
     ) -> list[str]:
         request = state["request"]
+        await _raise_if_state_cancelled(state)
         generator = self.image_generator or self.image_service.generate_images
         generator_kwargs: dict[str, object] = {
             "request": request,
@@ -2023,6 +2252,7 @@ class LangGraphProvider(BaseLLMProvider):
         self,
         state: GraphState,
     ) -> tuple[list[dict[str, object]], AIMessage | None]:
+        await _raise_if_state_cancelled(state)
         request = state["request"]
         if not self.business_tools:
             return [], None
@@ -2052,13 +2282,54 @@ class LangGraphProvider(BaseLLMProvider):
             return [], None
         return tool_calls, _build_tool_call_ai_message(tool_calls)
 
+    async def _request_post_review_tool_calls(
+        self,
+        state: GraphState,
+    ) -> tuple[list[dict[str, object]], AIMessage | None]:
+        await _raise_if_state_cancelled(state)
+        request = state["request"]
+        if request.task_type != TaskType.CONTENT_GENERATION:
+            return [], None
+        if bool(state.get("direct_image_mode")):
+            return [], None
+        if state.get("pending_tool_calls"):
+            return [], None
+        if not _is_image_generation_eligible(state):
+            return [], None
+
+        if self.bound_artifact_tool_llm is not None:
+            try:
+                tool_calls, ai_message = await self._request_llm_artifact_tool_calls(state)
+                if tool_calls:
+                    return tool_calls, ai_message
+            except Exception as exc:  # pragma: no cover - model/tool fallback boundary
+                logger.warning(
+                    "Artifact tool LLM decision failed for thread_id=%s, falling back to image-route planner: %s",
+                    request.thread_id,
+                    exc,
+                )
+
+        await _raise_if_state_cancelled(state)
+        if (await self._decide_image_route(state)).needs_image:
+            tool_calls = [
+                {
+                    "id": f"call_{uuid.uuid4().hex}",
+                    "name": GENERATE_COVER_IMAGES_TOOL_NAME,
+                    "args": {},
+                }
+            ]
+            return tool_calls, _build_tool_call_ai_message(tool_calls)
+        return [], None
+
     async def _request_llm_business_tool_calls(
         self,
         state: GraphState,
     ) -> tuple[list[dict[str, object]], AIMessage]:
+        await _raise_if_state_cancelled(state)
         if self.bound_business_tool_llm is None:
             raise RuntimeError("Business tool LLM is not bound.")
         request = state["request"]
+        await _raise_if_state_cancelled(state)
         ai_message = await self.bound_business_tool_llm.ainvoke(
             _build_business_tool_router_messages(state),
         )
@@ -2073,6 +2344,49 @@ class LangGraphProvider(BaseLLMProvider):
             [call["name"] for call in normalized_calls],
         )
         return normalized_calls, ai_message
+
+    async def _request_llm_artifact_tool_calls(
+        self,
+        state: GraphState,
+    ) -> tuple[list[dict[str, object]], AIMessage]:
+        await _raise_if_state_cancelled(state)
+        if self.bound_artifact_tool_llm is None:
+            raise RuntimeError("Artifact tool LLM is not bound.")
+        request = state["request"]
+        await _raise_if_state_cancelled(state)
+        ai_message = await self.bound_artifact_tool_llm.ainvoke(
+            _build_artifact_tool_router_messages(state),
+        )
+        normalized_calls: list[dict[str, object]] = []
+        for raw_call in ai_message.tool_calls or []:
+            normalized_call = _normalize_business_tool_call(raw_call)
+            if normalized_call is not None:
+                normalized_calls.append(normalized_call)
+        logger.info(
+            "langgraph artifact tool decision thread_id=%s tool_calls=%s",
+            request.thread_id,
+            [call["name"] for call in normalized_calls],
+        )
+        return normalized_calls, ai_message
+
+    async def _execute_generate_cover_images_tool(
+        self,
+        state: GraphState,
+        *,
+        tool_args: dict[str, object],
+    ) -> GraphState:
+        image_state = dict(state)
+        image_state["needs_image"] = True
+
+        reason = str(tool_args.get("reason") or "").strip()
+        if reason:
+            logger.info(
+                "langgraph artifact image tool invoked thread_id=%s reason=%s",
+                state["request"].thread_id,
+                reason,
+            )
+
+        return await self._generate_image_node(image_state)
 
     async def _decide_search_route(self, request: MediaChatRequest) -> SearchRouteDecision:
         if self.route_analyzer is not None:
@@ -2093,6 +2407,7 @@ class LangGraphProvider(BaseLLMProvider):
         self,
         request: MediaChatRequest,
     ) -> SearchRouteDecision:
+        await _raise_if_request_cancelled(request)
         if isinstance(self.inner_provider, CompatibleLLMProvider):
             if not self.inner_provider.api_key or not self.inner_provider.base_url:
                 return _build_heuristic_search_route_decision(request)
@@ -2129,12 +2444,14 @@ class LangGraphProvider(BaseLLMProvider):
             "timeout": timeout,
         }
 
+        await _raise_if_request_cancelled(request)
         try:
             response = await client.chat.completions.create(
                 **request_kwargs,
                 response_format={"type": "json_object"},
             )
         except BadRequestError:
+            await _raise_if_request_cancelled(request)
             response = await client.chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
@@ -2182,6 +2499,7 @@ class LangGraphProvider(BaseLLMProvider):
         draft_text: str,
         artifact_candidate: dict[str, object] | None,
     ) -> ImageRouteDecision:
+        await _raise_if_state_cancelled(state)
         if isinstance(self.inner_provider, CompatibleLLMProvider):
             if not self.inner_provider.api_key or not self.inner_provider.base_url:
                 return _build_heuristic_image_route_decision(state)
@@ -2244,12 +2562,14 @@ class LangGraphProvider(BaseLLMProvider):
             "timeout": timeout,
         }
 
+        await _raise_if_state_cancelled(state)
         try:
             response = await client.chat.completions.create(
                 **request_kwargs,
                 response_format={"type": "json_object"},
             )
         except BadRequestError:
+            await _raise_if_state_cancelled(state)
             response = await client.chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
@@ -2419,6 +2739,7 @@ class LangGraphProvider(BaseLLMProvider):
 
         try:
             logger.info("Requesting vision analysis with model=%s", self.vision_model)
+            await _raise_if_request_cancelled(request)
             response = await self._get_vision_client().chat.completions.create(
                 **request_kwargs,
                 response_format={"type": "json_object"},
@@ -2429,6 +2750,7 @@ class LangGraphProvider(BaseLLMProvider):
                 self.vision_model,
                 exc,
             )
+            await _raise_if_request_cancelled(request)
             response = await self._get_vision_client().chat.completions.create(
                 **request_kwargs,
             )
@@ -2824,6 +3146,22 @@ def _build_business_tool_router_messages(state: GraphState) -> list[BaseMessage]
     ]
 
 
+def _build_artifact_tool_router_messages(state: GraphState) -> list[BaseMessage]:
+    return [
+        SystemMessage(
+            content=(
+                "You are the post-review artifact tool router inside the MediaPilot LangGraph workflow. "
+                "The text draft is already complete. Call `generate_cover_images` only when the user explicitly "
+                "wants a newly generated image, poster, cover, or illustration that should accompany the final text. "
+                "Do not call any tool for text-only editing, translation, rewriting, proofreading, Q&A, analysis, "
+                "or when the user already supplied enough reference images without asking for a new generated one."
+            )
+        ),
+        HumanMessage(content=_build_artifact_tool_decision_prompt(state)),
+        *state.get("messages", []),
+    ]
+
+
 def _build_business_tool_decision_prompt(state: GraphState) -> str:
     request = state["request"]
     sections = [
@@ -2837,6 +3175,33 @@ def _build_business_tool_decision_prompt(state: GraphState) -> str:
     search_results = state.get("search_results", "").strip()
     if search_results:
         sections.append("\u641c\u7d22\u4e0a\u4e0b\u6587\uff1a\n" + search_results)
+    return "\n\n".join(sections)
+
+
+def _build_artifact_tool_decision_prompt(state: GraphState) -> str:
+    request = state["request"]
+    artifact_candidate = state.get("artifact_candidate")
+    title_preview = ""
+    if isinstance(artifact_candidate, dict):
+        title_preview = str(artifact_candidate.get("title", "") or "").strip()
+    sections = [
+        f"platform: {request.platform.value}",
+        f"task_type: {request.task_type.value}",
+        f"user_request: {request.message}",
+        f"artifact_title: {title_preview or '<none>'}",
+        f"generated_image_count: {len(_normalize_generated_images(state.get('generated_images')))}",
+        "draft_preview:\n" + (_resolve_image_prompt_seed_text(state)[:1600] or "<empty>"),
+    ]
+    materials = state.get("materials_parsed", [])
+    if materials:
+        sections.append("material_preview:\n" + "\n".join(materials[:4]))
+    review_prompt = _resolve_review_prompt(state).strip()
+    if review_prompt:
+        sections.append("review_prompt:\n" + review_prompt)
+    sections.append(
+        "If a new generated image is needed, call `generate_cover_images`. "
+        "If no new image should be generated, respond without tool calls."
+    )
     return "\n\n".join(sections)
 
 
@@ -3477,21 +3842,17 @@ def _complete_execution_step_updates(
     }
 
 
+def _resolve_execution_step_route(step: str) -> str:
+    normalized_step = str(step or "").strip()
+    if normalized_step == EXECUTION_STEP_GENERATE_IMAGE:
+        return "generate_image_node"
+    return END
+
+
 def _build_router_execution_plan(request: MediaChatRequest) -> list[str]:
     if request.task_type == TaskType.IMAGE_GENERATION:
         return [EXECUTION_STEP_GENERATE_IMAGE]
-
-    execution_plan = [EXECUTION_STEP_DRAFT_CONTENT]
-    preview_state: GraphState = {
-        "request": request,
-        "current_draft": request.message,
-        "generated_images": [],
-        "artifact_candidate": None,
-        "direct_image_mode": False,
-    }
-    if _build_heuristic_image_route_decision(preview_state).needs_image:
-        execution_plan.append(EXECUTION_STEP_GENERATE_IMAGE)
-    return execution_plan
+    return [EXECUTION_STEP_DRAFT_CONTENT]
 
 
 def _is_image_generation_eligible(state: GraphState) -> bool:

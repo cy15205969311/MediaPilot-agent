@@ -28,6 +28,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import load_environment
+from app.core.cancel_manager import raise_if_cancelled as raise_if_thread_cancelled
+from app.core.context import raise_if_cancelled as raise_if_request_cancelled
 from app.db.models import Message, Thread
 from app.models.schemas import (
     ArtifactPayloadModel,
@@ -234,6 +236,14 @@ def _build_transient_stream_error_event(
     )
 
 
+async def _raise_if_provider_request_cancelled(
+    request: MediaChatRequest | None = None,
+) -> None:
+    await raise_if_request_cancelled()
+    if request is not None:
+        await raise_if_thread_cancelled(request.thread_id)
+
+
 class _OpenAIToolBindingAdapter:
     def __init__(
         self,
@@ -263,6 +273,7 @@ class _OpenAIToolBindingAdapter:
 
         async def _invoke(messages_input: Any) -> AIMessage:
             messages = _coerce_tool_binding_messages(messages_input)
+            await _raise_if_provider_request_cancelled()
             response = await self._client_factory().chat.completions.create(
                 model=self._model,
                 messages=[_serialize_tool_binding_message(message) for message in messages],
@@ -653,6 +664,7 @@ class OpenAIProvider(BaseLLMProvider):
             )
             try:
                 try:
+                    await _raise_if_provider_request_cancelled(request)
                     stream = await self._get_client().chat.completions.create(
                         **stream_request_kwargs,
                         stream_options={"include_usage": True},
@@ -663,6 +675,7 @@ class OpenAIProvider(BaseLLMProvider):
                         self.model,
                         request.thread_id,
                     )
+                    await _raise_if_provider_request_cancelled(request)
                     stream = await self._get_client().chat.completions.create(**stream_request_kwargs)
 
                 async for chunk in stream:
@@ -844,11 +857,13 @@ class OpenAIProvider(BaseLLMProvider):
         }
 
         try:
+            await _raise_if_provider_request_cancelled(request)
             response = await self._get_client().chat.completions.create(
                 **request_kwargs,
                 response_format={"type": "json_object"},
             )
         except BadRequestError:
+            await _raise_if_provider_request_cancelled(request)
             response = await self._get_client().chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
@@ -1075,6 +1090,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
             )
             try:
                 try:
+                    await _raise_if_provider_request_cancelled(request)
                     stream = await self._get_client().chat.completions.create(
                         **stream_request_kwargs,
                         stream_options={"include_usage": True},
@@ -1085,6 +1101,7 @@ class CompatibleLLMProvider(BaseLLMProvider):
                         request_model,
                         request.thread_id,
                     )
+                    await _raise_if_provider_request_cancelled(request)
                     stream = await self._get_client().chat.completions.create(**stream_request_kwargs)
 
                 async for chunk in stream:
@@ -1280,11 +1297,13 @@ class CompatibleLLMProvider(BaseLLMProvider):
         }
 
         try:
+            await _raise_if_provider_request_cancelled(request)
             response = await self._get_client().chat.completions.create(
                 **request_kwargs,
                 response_format={"type": "json_object"},
             )
         except BadRequestError:
+            await _raise_if_provider_request_cancelled(request)
             response = await self._get_client().chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content or ""
@@ -1430,6 +1449,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
             )
             stream_usage_recorder: dict[str, object] = {}
             async for delta in self._stream_text_with_fallback(
+                request=request,
                 messages=messages,
                 temperature=0.7,
                 max_generation_tokens=request.max_generation_tokens,
@@ -1592,12 +1612,14 @@ class QwenLLMProvider(CompatibleLLMProvider):
 
         async def _request_model_response(model_name: str):
             try:
+                await _raise_if_provider_request_cancelled(request)
                 return await self._get_client().chat.completions.create(
                     model=model_name,
                     response_format={"type": "json_object"},
                     **request_kwargs,
                 )
             except BadRequestError:
+                await _raise_if_provider_request_cancelled(request)
                 return await self._get_client().chat.completions.create(
                     model=model_name,
                     **request_kwargs,
@@ -1628,6 +1650,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
     async def _stream_text_with_fallback(
         self,
         *,
+        request: MediaChatRequest,
         messages: list[ConversationMessage],
         temperature: float,
         max_generation_tokens: int | None = None,
@@ -1652,6 +1675,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
                         max_generation_tokens=max_generation_tokens,
                     )
                     try:
+                        await _raise_if_provider_request_cancelled(request)
                         stream = await self._get_client().chat.completions.create(
                             **stream_request_kwargs,
                             stream_options={"include_usage": True},
@@ -1661,6 +1685,7 @@ class QwenLLMProvider(CompatibleLLMProvider):
                             "Qwen streaming include_usage rejected by upstream; token usage may be unavailable. model=%s",
                             model_name,
                         )
+                        await _raise_if_provider_request_cancelled(request)
                         stream = await self._get_client().chat.completions.create(**stream_request_kwargs)
 
                     async for chunk in stream:

@@ -24,6 +24,8 @@ from openai import (
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import load_environment
+from app.core.cancel_manager import raise_if_cancelled as raise_if_thread_cancelled
+from app.core.context import raise_if_cancelled
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 DEFAULT_SEARCH_TIMEOUT_SECONDS = 20.0
@@ -255,6 +257,12 @@ def _build_http_timeout(seconds: float) -> httpx.Timeout:
     return httpx.Timeout(seconds, connect=connect_timeout)
 
 
+async def _raise_if_tool_cancelled(thread_id: str | None = None) -> None:
+    await raise_if_cancelled()
+    if thread_id:
+        await raise_if_thread_cancelled(thread_id)
+
+
 def _build_market_trend_query(platform: str, category: str) -> str:
     return (
         f"{_platform_label(platform)} {category} 热门关键词 热点 趋势 爆款 "
@@ -288,7 +296,12 @@ def _request_tavily_market_search(query: str) -> dict[str, Any]:
     return data
 
 
-async def _request_tavily_market_search_async(query: str) -> dict[str, Any]:
+async def _request_tavily_market_search_async(
+    query: str,
+    *,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    await _raise_if_tool_cancelled(thread_id)
     api_key = _load_tavily_api_key()
     if not api_key:
         raise RuntimeError("TAVILY_API_KEY is not configured")
@@ -568,7 +581,13 @@ def analyze_market_trends(platform: str, category: str) -> str:
         )
 
 
-async def analyze_market_trends_async(platform: str, category: str) -> str:
+async def analyze_market_trends_async(
+    platform: str,
+    category: str,
+    *,
+    thread_id: str | None = None,
+) -> str:
+    await _raise_if_tool_cancelled(thread_id)
     normalized_platform = _normalize_platform(platform)
     normalized_category = _normalize_category(category)
     profile = _resolve_market_profile(normalized_category)
@@ -588,7 +607,10 @@ async def analyze_market_trends_async(platform: str, category: str) -> str:
         )
 
     try:
-        live_payload = await _request_tavily_market_search_async(search_query)
+        live_payload = await _request_tavily_market_search_async(
+            search_query,
+            thread_id=thread_id,
+        )
         return json.dumps(
             _build_live_market_trend_result(
                 platform=normalized_platform,
@@ -817,7 +839,12 @@ def _request_tavily_skill_search(query: str) -> dict[str, Any]:
     return data
 
 
-async def _request_tavily_skill_search_async(query: str) -> dict[str, Any]:
+async def _request_tavily_skill_search_async(
+    query: str,
+    *,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    await _raise_if_tool_cancelled(thread_id)
     api_key = _load_tavily_api_key()
     if not api_key:
         raise RuntimeError("TAVILY_API_KEY is not configured")
@@ -1167,7 +1194,9 @@ async def _invoke_skill_extractor_llm_async(
     keyword: str,
     category: str,
     search_context: str,
+    thread_id: str | None = None,
 ) -> SkillTemplateList:
+    await _raise_if_tool_cancelled(thread_id)
     config = _load_skill_extractor_config()
     if config is None:
         raise RuntimeError("No LLM extractor configuration available")
@@ -1514,7 +1543,10 @@ def search_prompt_skills(keyword: str, category: str | None = None) -> dict[str,
 async def search_prompt_skills_async(
     keyword: str,
     category: str | None = None,
+    *,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
+    await _raise_if_tool_cancelled(thread_id)
     normalized_keyword = _normalize_skill_keyword(keyword)
     normalized_category = _normalize_skill_category(category)
     search_query = _build_prompt_skill_query(normalized_keyword, normalized_category)
@@ -1537,7 +1569,10 @@ async def search_prompt_skills_async(
     api_key = _load_tavily_api_key()
     if api_key:
         try:
-            live_payload = await _request_tavily_skill_search_async(search_query)
+            live_payload = await _request_tavily_skill_search_async(
+                search_query,
+                thread_id=thread_id,
+            )
             search_sources = _build_skill_search_sources(live_payload)
             search_context = _build_skill_search_context(live_payload)
             logger.info(
@@ -1581,6 +1616,7 @@ async def search_prompt_skills_async(
                 keyword=normalized_keyword,
                 category=resolved_category,
                 search_context=search_context,
+                thread_id=thread_id,
             )
             items = _build_structured_skill_items(
                 keyword=normalized_keyword,
@@ -1644,6 +1680,7 @@ async def search_prompt_skills_async(
                 keyword=normalized_keyword,
                 category=resolved_category,
                 search_context=fallback_context,
+                thread_id=thread_id,
             )
             items = _build_structured_skill_items(
                 keyword=normalized_keyword,
@@ -1777,17 +1814,25 @@ def execute_business_tool(name: str, arguments: dict[str, Any]) -> str:
     return str(tool_item.invoke(arguments))
 
 
-async def execute_business_tool_async(name: str, arguments: dict[str, Any]) -> str:
+async def execute_business_tool_async(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    thread_id: str | None = None,
+) -> str:
+    await _raise_if_tool_cancelled(thread_id)
     if name == analyze_market_trends.name:
         return await analyze_market_trends_async(
             platform=str(arguments.get("platform", "")),
             category=str(arguments.get("category", "")),
+            thread_id=thread_id,
         )
 
     if name == discover_prompt_skills.name:
         result = await search_prompt_skills_async(
             keyword=str(arguments.get("keyword", "")),
             category=str(arguments.get("category", "")).strip() or None,
+            thread_id=thread_id,
         )
         return json.dumps(result, ensure_ascii=False)
 

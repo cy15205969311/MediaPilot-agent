@@ -63,6 +63,7 @@ import {
   resetPassword,
   setStoredUser,
   renameKnowledgeScope,
+  stopChatStream,
   unregisterActiveStreamController,
   updateTopic,
   updateThread,
@@ -1365,6 +1366,7 @@ function App() {
   }, [modelOverride]);
 
   const abortRef = useRef<AbortController | null>(null);
+  const streamingThreadIdRef = useRef<string | null>(null);
   const stopRequestedRef = useRef(false);
   const assistantMessageIdRef = useRef<string | null>(null);
   const streamErrorRef = useRef(false);
@@ -1378,6 +1380,17 @@ function App() {
   const textInputRef = useRef<HTMLInputElement | null>(null);
   const streamingStartedAtRef = useRef<number | null>(null);
 
+  const requestActiveStreamStop = () => {
+    const activeStreamingThreadId = streamingThreadIdRef.current?.trim();
+    if (!activeStreamingThreadId) {
+      return;
+    }
+
+    void stopChatStream(activeStreamingThreadId).catch((error) => {
+      console.warn("Failed to stop backend chat stream", error);
+    });
+  };
+
   const cancelActiveStream = () => {
     if (!abortRef.current) {
       return;
@@ -1386,6 +1399,13 @@ function App() {
     unregisterActiveStreamController(abortRef.current);
     abortRef.current.abort();
     abortRef.current = null;
+  };
+
+  const interruptActiveStream = (options?: { requestBackendStop?: boolean }) => {
+    if (options?.requestBackendStop !== false) {
+      requestActiveStreamStop();
+    }
+    cancelActiveStream();
   };
 
   const isAuthenticated = Boolean(
@@ -1846,7 +1866,7 @@ function App() {
   const handleUnauthorized = (
     fallbackMessage = "当前登录状态已失效，请重新登录。",
   ) => {
-    cancelActiveStream();
+    interruptActiveStream({ requestBackendStop: false });
     clearStoredToken();
     clearStoredRefreshToken();
     clearStoredUser();
@@ -2054,7 +2074,7 @@ function App() {
     topicId: string | null = null,
     options?: { silentNotFound?: boolean },
   ): Promise<"loaded" | "not_found" | "failed"> => {
-    cancelActiveStream();
+    interruptActiveStream();
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
@@ -3498,6 +3518,7 @@ function App() {
         setToolCallTimeline([]);
         setStatusText("已建立流式连接，Agent 正在组织输出");
         setActiveThreadId(event.thread_id);
+        streamingThreadIdRef.current = event.thread_id;
         updateAssistantTimestamp(new Date().toISOString());
         break;
       case "message":
@@ -3822,7 +3843,7 @@ function App() {
     const normalizedKnowledgeBaseScope = draftKnowledgeBaseScope.trim();
     const normalizedThreadId = draftTargetThreadId?.trim() || "thread-new";
 
-    cancelActiveStream();
+    interruptActiveStream();
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     streamErrorRef.current = false;
@@ -3889,12 +3910,12 @@ function App() {
   };
 
   const handleStopStreaming = () => {
-    if (!isStreaming || !abortRef.current) {
+    if (!isStreaming && !abortRef.current && !streamingThreadIdRef.current) {
       return;
     }
 
     stopRequestedRef.current = true;
-    cancelActiveStream();
+    interruptActiveStream();
     finalizeStreamingUiAfterAbort({
       manual: true,
       appendNotice: true,
@@ -4028,7 +4049,7 @@ function App() {
       return;
     }
 
-    cancelActiveStream();
+    interruptActiveStream();
     stopRequestedRef.current = false;
 
     const isExistingThread = activeThreadId !== "thread-new";
@@ -4062,6 +4083,7 @@ function App() {
     setStreamingElapsedSeconds(0);
     setIsStreaming(true);
     setRightPanelOpen(true);
+    streamingThreadIdRef.current = nextThreadId;
     upsertThreadInList({
       id: nextThreadId,
       title: nextThreadTitle,
@@ -4179,6 +4201,9 @@ function App() {
       unregisterActiveStreamController(controller);
       if (abortRef.current === controller) {
         abortRef.current = null;
+      }
+      if (streamingThreadIdRef.current === nextThreadId) {
+        streamingThreadIdRef.current = null;
       }
     }
   };
@@ -4414,7 +4439,7 @@ function App() {
   };
 
   const handleLogout = async () => {
-    cancelActiveStream();
+    interruptActiveStream();
 
     try {
       await logoutAPI();

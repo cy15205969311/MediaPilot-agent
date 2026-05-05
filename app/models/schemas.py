@@ -159,6 +159,18 @@ class MediaChatRequest(SchemaModel):
     )
 
 
+class MediaChatStopRequest(SchemaModel):
+    thread_id: str = Field(..., min_length=1, description="Active thread identifier to cancel.")
+
+
+class MediaChatStopResponse(SchemaModel):
+    thread_id: str = Field(..., description="Thread identifier targeted by the stop request.")
+    cancelled: bool = Field(
+        ...,
+        description="Whether an active backend stream was found and marked for cancellation.",
+    )
+
+
 class UploadMediaResponse(SchemaModel):
     url: str = Field(..., description="Frontend delivery URL or signed preview URL.")
     file_type: str = Field(..., description="Top-level file type.")

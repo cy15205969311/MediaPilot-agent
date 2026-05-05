@@ -9,9 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.cancel_manager import GlobalKillSwitchTriggered, cancel_manager
+from app.core.context import (
+    RequestCancellationContext,
+    raise_if_cancelled,
+    reset_request_cancellation_context,
+    set_request_cancellation_context,
+)
 from app.db.database import get_db
 from app.db.models import Material, Message, Thread, User
-from app.models.schemas import MediaChatRequest
+from app.models.schemas import MediaChatRequest, MediaChatStopRequest, MediaChatStopResponse
 from app.services.agent import media_agent_workflow
 from app.services.auth import get_current_user
 from app.services.intent_routing import normalize_media_chat_request
@@ -31,14 +38,14 @@ STREAM_DISCONNECT_POLL_INTERVAL_SECONDS = 0.1
 _STREAM_FORWARDER_END = object()
 
 
-async def _cancel_stream_producer(task: asyncio.Task[None]) -> None:
+async def _cancel_background_task(task: asyncio.Task[object] | asyncio.Task[None]) -> None:
     if task.done():
         return
 
     task.cancel()
     try:
         await task
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, GlobalKillSwitchTriggered):
         pass
 
 
@@ -51,6 +58,16 @@ async def _close_workflow_stream(workflow_stream: AsyncGenerator[str, None]) -> 
         logger.debug("workflow stream close skipped due to cleanup error", exc_info=True)
 
 
+async def _shutdown_workflow_stream(
+    *,
+    producer_task: asyncio.Task[None],
+    workflow_stream: AsyncGenerator[str, None],
+) -> None:
+    await _cancel_background_task(producer_task)
+    with suppress(asyncio.CancelledError):
+        await _close_workflow_stream(workflow_stream)
+
+
 async def _forward_stream_with_disconnect_cancellation(
     *,
     workflow_stream: AsyncGenerator[str, None],
@@ -59,6 +76,12 @@ async def _forward_stream_with_disconnect_cancellation(
     user_id: str,
 ) -> AsyncGenerator[str, None]:
     queue: asyncio.Queue[object] = asyncio.Queue()
+    cancel_manager.register_thread(thread_id, owner_user_id=user_id)
+    cancellation_context = RequestCancellationContext(
+        disconnect_checker=disconnect_checker,
+        thread_id=thread_id,
+    )
+    context_token = set_request_cancellation_context(cancellation_context)
 
     async def produce() -> None:
         try:
@@ -80,16 +103,46 @@ async def _forward_stream_with_disconnect_cancellation(
         produce(),
         name=f"media-chat-stream-producer:{thread_id}",
     )
+    cancel_manager.register_task(thread_id, producer_task)
+
+    async def watch_for_disconnect() -> None:
+        try:
+            while True:
+                if await cancellation_context.refresh_disconnect_state():
+                    logger.warning(
+                        "瀹㈡埛绔凡鏂紑杩炴帴锛屽噯澶囧己鍒跺彇娑?LangGraph 宸ヤ綔娴?thread_id=%s user_id=%s",
+                        thread_id,
+                        user_id,
+                    )
+                    cancellation_context.cancel("Client disconnected")
+                    queue.put_nowait(asyncio.CancelledError("Client disconnected"))
+                    await _shutdown_workflow_stream(
+                        producer_task=producer_task,
+                        workflow_stream=workflow_stream,
+                    )
+                    return
+                await asyncio.sleep(STREAM_DISCONNECT_POLL_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            queue.put_nowait(exc)
+
+    disconnect_task: asyncio.Task[None] | None = None
 
     try:
         while True:
-            if await disconnect_checker():
+            await raise_if_cancelled()
+            if await cancellation_context.refresh_disconnect_state():
                 logger.warning(
                     "客户端已断开连接，准备强制取消 LangGraph 工作流 thread_id=%s user_id=%s",
                     thread_id,
                     user_id,
                 )
-                await _cancel_stream_producer(producer_task)
+                cancellation_context.cancel("Client disconnected")
+                await _shutdown_workflow_stream(
+                    producer_task=producer_task,
+                    workflow_stream=workflow_stream,
+                )
                 raise asyncio.CancelledError("Client disconnected")
 
             try:
@@ -101,24 +154,42 @@ async def _forward_stream_with_disconnect_cancellation(
                 continue
 
             if item is _STREAM_FORWARDER_END:
+                await raise_if_cancelled()
                 break
             if isinstance(item, BaseException):
+                if isinstance(item, (asyncio.CancelledError, GlobalKillSwitchTriggered)):
+                    cancellation_context.cancel(str(item) or "Client disconnected")
                 raise item
 
             yield str(item)
             await asyncio.sleep(0)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, GlobalKillSwitchTriggered) as exc:
+        cancellation_context.cancel("Streaming response cancelled")
         logger.warning(
             "流式响应已显式取消，准备销毁后端执行链路 thread_id=%s user_id=%s",
             thread_id,
             user_id,
         )
-        await _cancel_stream_producer(producer_task)
+        if isinstance(exc, GlobalKillSwitchTriggered):
+            logger.info(
+                "Agent process explicitly terminated by global kill switch thread_id=%s user_id=%s",
+                thread_id,
+                user_id,
+            )
+        await _shutdown_workflow_stream(
+            producer_task=producer_task,
+            workflow_stream=workflow_stream,
+        )
         raise
     finally:
-        await _cancel_stream_producer(producer_task)
-        with suppress(asyncio.CancelledError):
-            await _close_workflow_stream(workflow_stream)
+        if disconnect_task is not None:
+            await _cancel_background_task(disconnect_task)
+        await _shutdown_workflow_stream(
+            producer_task=producer_task,
+            workflow_stream=workflow_stream,
+        )
+        cancel_manager.cleanup_thread(thread_id)
+        reset_request_cancellation_context(context_token)
 
 
 def persist_chat_request(
@@ -257,12 +328,15 @@ async def stream_media_chat(
         request.task_type.value,
     )
     current_user_id = str(current_user.id)
+    cancel_manager.register_thread(request.thread_id, owner_user_id=current_user_id)
     try:
         thread = persist_chat_request(db, request, current_user)
     except HTTPException:
+        cancel_manager.cleanup_thread(request.thread_id)
         raise
     except SQLAlchemyError as exc:
         db.rollback()
+        cancel_manager.cleanup_thread(request.thread_id)
         raise HTTPException(
             status_code=500,
             detail="保存会话数据失败，请稍后重试。",
@@ -293,3 +367,48 @@ async def stream_media_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/chat/stop", response_model=MediaChatStopResponse)
+async def stop_media_chat(
+    request: MediaChatStopRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> MediaChatStopResponse:
+    normalized_thread_id = request.thread_id.strip()
+    active_record = cancel_manager.get_record(normalized_thread_id)
+    thread = db.scalar(select(Thread).where(Thread.id == normalized_thread_id))
+
+    if thread is not None and thread.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Conversation thread not found")
+
+    if thread is None:
+        active_owner_user_id = active_record.owner_user_id if active_record is not None else None
+        if active_owner_user_id and active_owner_user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Conversation thread not found")
+        if active_owner_user_id != current_user.id:
+            logger.info(
+                "chat.stop ignored because no active owned stream exists thread_id=%s user_id=%s",
+                normalized_thread_id,
+                current_user.id,
+            )
+            return MediaChatStopResponse(thread_id=normalized_thread_id, cancelled=False)
+
+    if active_record is None:
+        logger.info(
+            "chat.stop found no active stream thread_id=%s user_id=%s",
+            normalized_thread_id,
+            current_user.id,
+        )
+        return MediaChatStopResponse(thread_id=normalized_thread_id, cancelled=False)
+
+    logger.warning(
+        "chat.stop triggered task cancellation thread_id=%s user_id=%s",
+        normalized_thread_id,
+        current_user.id,
+    )
+    cancel_manager.cancel_thread(
+        normalized_thread_id,
+        "User manually stopped generation",
+    )
+    return MediaChatStopResponse(thread_id=normalized_thread_id, cancelled=True)

@@ -4,6 +4,11 @@ import json
 import httpx
 import pytest
 
+from app.core.cancel_manager import (
+    GlobalKillSwitchTriggered,
+    cancel_manager,
+    execute_with_kill_switch,
+)
 from app.models.schemas import MediaChatRequest
 from app.services import image_generation as image_generation_module
 from app.services.image_generation import (
@@ -27,6 +32,52 @@ def test_image_generation_service_auto_falls_back_to_openai_backend(monkeypatch)
     assert service.resolve_backend() == "openai"
     assert service.resolve_model() == "gpt-image-2"
     assert service.is_enabled() is True
+
+
+def test_image_generation_service_builds_managed_async_openai_clients(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_PROMPT_API_KEY", "test-prompt-key")
+    monkeypatch.setenv("IMAGE_PROMPT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("IMAGE_PROMPT_MODEL", "qwen-turbo")
+
+    captured_kwargs: list[dict[str, object]] = []
+
+    class DummyAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured_kwargs.append(kwargs)
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(image_generation_module, "AsyncOpenAI", DummyAsyncOpenAI)
+
+    service = ImageGenerationService()
+    service._get_image_client()
+    service._get_prompt_client()
+
+    assert len(captured_kwargs) == 2
+    image_client_kwargs, prompt_client_kwargs = captured_kwargs
+
+    assert image_client_kwargs["api_key"] == "test-image-key"
+    assert image_client_kwargs["base_url"] == "https://www.onetopai.asia/v1"
+    assert image_client_kwargs["timeout"] == service.openai_request_timeout
+    assert image_client_kwargs["max_retries"] == 0
+    assert isinstance(image_client_kwargs["http_client"], httpx.AsyncClient)
+
+    assert prompt_client_kwargs["api_key"] == "test-prompt-key"
+    assert (
+        prompt_client_kwargs["base_url"]
+        == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    assert prompt_client_kwargs["timeout"] == service.prompt_timeout
+    assert prompt_client_kwargs["max_retries"] == 0
+    assert isinstance(prompt_client_kwargs["http_client"], httpx.AsyncClient)
+
+    asyncio.run(image_client_kwargs["http_client"].aclose())
+    asyncio.run(prompt_client_kwargs["http_client"].aclose())
 
 
 def test_image_generation_service_routes_standard_user_to_dashscope_backend(
@@ -176,6 +227,179 @@ def test_generate_images_does_not_fallback_when_openai_generation_is_cancelled(
                 thread_id=request.thread_id,
             )
         )
+
+
+def test_openai_image_generation_cancellation_closes_managed_client(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+
+    service = ImageGenerationService()
+    closed = {"value": False}
+
+    class FakeImagesAPI:
+        async def generate(self, **kwargs):
+            raise asyncio.CancelledError()
+
+    class FakeOpenAIClient:
+        def __init__(self):
+            self.images = FakeImagesAPI()
+
+        async def close(self):
+            closed["value"] = True
+
+    service._image_client = FakeOpenAIClient()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            service._generate_images_with_openai_images_api(
+                prompt="cancel the in-flight image request",
+                thread_id="thread-openai-client-cancel",
+            )
+        )
+
+    assert closed["value"] is True
+    assert service._image_client is None
+
+
+def test_image_generation_service_respects_global_kill_switch_before_sdk_request(
+    monkeypatch,
+):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+
+    service = ImageGenerationService()
+    thread_id = "thread-image-kill-switch"
+    called = False
+
+    class FakeImagesAPI:
+        async def generate(self, **kwargs):
+            nonlocal called
+            called = True
+            return None
+
+    class FakeOpenAIClient:
+        images = FakeImagesAPI()
+
+    monkeypatch.setattr(service, "_get_image_client", lambda: FakeOpenAIClient())
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": thread_id,
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "generate a cover image",
+            "materials": [],
+        }
+    )
+
+    async def run_cancelled_request() -> None:
+        cancel_manager.register_thread(thread_id)
+        cancel_manager.cancel_thread(thread_id, "Client disconnected")
+        try:
+            await service.generate_images(
+                request=request,
+                prompt="make a cover image",
+                user_id="user-123",
+                user_role="super_admin",
+                thread_id=thread_id,
+            )
+        finally:
+            cancel_manager.cleanup_thread(thread_id)
+
+    with pytest.raises(asyncio.CancelledError, match="Client disconnected"):
+        asyncio.run(run_cancelled_request())
+
+    assert called is False
+
+
+def test_execute_with_kill_switch_cancels_inflight_task_when_thread_is_stopped():
+    thread_id = "thread-active-kill-switch"
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_operation() -> str:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def run_cancelled_request() -> None:
+        cancel_manager.register_thread(thread_id)
+        killer = asyncio.create_task(_cancel_thread_after_start(thread_id, started))
+        try:
+            await execute_with_kill_switch(thread_id, blocking_operation())
+        finally:
+            await killer
+            cancel_manager.cleanup_thread(thread_id)
+
+    async def _cancel_thread_after_start(target_thread_id: str, start_event: asyncio.Event) -> None:
+        await start_event.wait()
+        cancel_manager.cancel_thread(target_thread_id, "User manually stopped generation")
+
+    with pytest.raises(GlobalKillSwitchTriggered, match="User manually stopped generation"):
+        asyncio.run(run_cancelled_request())
+
+    assert cancelled.is_set()
+
+
+def test_openai_image_generation_inflight_kill_switch_raises_poison_pill(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+
+    service = ImageGenerationService()
+    thread_id = "thread-openai-image-inflight-killed"
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    closed = {"value": False}
+
+    class FakeImagesAPI:
+        async def generate(self, **kwargs):
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    class FakeOpenAIClient:
+        def __init__(self):
+            self.images = FakeImagesAPI()
+
+        async def close(self):
+            closed["value"] = True
+
+    service._image_client = FakeOpenAIClient()
+
+    async def run_cancelled_request() -> None:
+        cancel_manager.register_thread(thread_id)
+        killer = asyncio.create_task(_cancel_thread_after_start(thread_id, started))
+        try:
+            await service._generate_images_with_openai_images_api(
+                prompt="cancel this in-flight image generation",
+                thread_id=thread_id,
+            )
+        finally:
+            await killer
+            cancel_manager.cleanup_thread(thread_id)
+
+    async def _cancel_thread_after_start(target_thread_id: str, start_event: asyncio.Event) -> None:
+        await start_event.wait()
+        cancel_manager.cancel_thread(target_thread_id, "User manually stopped generation")
+
+    with pytest.raises(GlobalKillSwitchTriggered, match="User manually stopped generation"):
+        asyncio.run(run_cancelled_request())
+
+    assert cancelled.is_set()
+    assert closed["value"] is True
+    assert service._image_client is None
 
 
 def test_openai_non_gpt_image_2_still_uses_images_generate_sdk(monkeypatch):
@@ -421,6 +645,7 @@ def test_openai_image_generation_uses_configurable_per_request_timeout(monkeypat
     result = asyncio.run(
         service._generate_images_with_openai_images_api(
             prompt="make a timeout override cover image",
+            thread_id="thread-openai-timeout-override",
         )
     )
 
@@ -458,6 +683,7 @@ def test_openai_image_generation_redacts_base64_payloads_in_logs(monkeypatch, ca
         result = asyncio.run(
             service._generate_images_with_openai(
                 prompt="make a lifestyle cover image",
+                thread_id="thread-openai-log-redaction",
             )
         )
 

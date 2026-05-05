@@ -1,4 +1,5 @@
 import asyncio
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.cancel_manager import raise_if_cancelled as raise_if_thread_cancelled
 from app.core.text_normalization import repair_possible_mojibake
 from app.db.database import SessionLocal
 from app.db.models import Thread, TokenTransaction, User
@@ -74,12 +76,14 @@ class MediaAgentWorkflow:
             db=db,
             user_id=user_id,
         )
+        await raise_if_thread_cancelled(budgeted_request.thread_id)
         async for event in effective_provider.generate_stream(
             budgeted_request,
             db=db,
             thread=thread,
             user_id=user_id,
         ):
+            await raise_if_thread_cancelled(budgeted_request.thread_id)
             yield event
 
     def _resolve_effective_provider(self, model_override: str | None) -> BaseLLMProvider:
@@ -145,6 +149,7 @@ class MediaAgentWorkflow:
         )
 
         try:
+            await raise_if_thread_cancelled(request.thread_id)
             async for event in self._run_with_provider(
                 effective_provider,
                 request,
@@ -152,6 +157,7 @@ class MediaAgentWorkflow:
                 thread=thread,
                 user_id=user_id,
             ):
+                await raise_if_thread_cancelled(request.thread_id)
                 event_name = str(event.get("event", "message"))
 
                 if event_name == "message":
@@ -179,6 +185,7 @@ class MediaAgentWorkflow:
                     and user_id is not None
                     and not had_provider_error
                 ):
+                    await raise_if_thread_cancelled(request.thread_id)
                     accumulated_token_usage = merge_model_token_usage(
                         accumulated_token_usage,
                         event.get("token_usage"),
@@ -195,6 +202,7 @@ class MediaAgentWorkflow:
                             len(accumulated_text),
                             latest_artifact is not None,
                         )
+                        await raise_if_thread_cancelled(request.thread_id)
                         persist_assistant_output(
                             db,
                             thread_id=request.thread_id,
@@ -237,6 +245,7 @@ class MediaAgentWorkflow:
                         latest_artifact is not None,
                     )
 
+                await raise_if_thread_cancelled(request.thread_id)
                 yield self._format_sse(event, event=event_name)
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
