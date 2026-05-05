@@ -634,6 +634,22 @@ function revokeBlobPreview(url?: string) {
   }
 }
 
+function normalizeStoppedArtifact(
+  artifact: ArtifactPayload | null,
+  progressMessage: string,
+): ArtifactPayload | null {
+  if (!artifact || artifact.artifact_type !== "image_result" || artifact.status !== "processing") {
+    return artifact;
+  }
+
+  return {
+    ...artifact,
+    status: "completed",
+    progress_message: progressMessage,
+    progress_percent: null,
+  };
+}
+
 function toMaterialPayload(item: UploadedMaterial): MediaChatMaterialPayload {
   return {
     type: mapMaterialKindToSchema(item.kind),
@@ -3280,6 +3296,69 @@ function App() {
     });
   };
 
+  const finalizeStreamingUiAfterAbort = (options?: {
+    manual?: boolean;
+    appendNotice?: boolean;
+    statusMessage?: string;
+  }) => {
+    const manual = options?.manual ?? false;
+    const appendNotice = options?.appendNotice ?? false;
+    const statusMessage =
+      options?.statusMessage ??
+      (manual ? "已停止生成，当前已输出内容已保留" : "上一项任务已终止");
+    const stopDetailMessage = manual
+      ? "本次任务已由用户手动终止，未完成步骤已全部停止。"
+      : "上一项任务已提前终止，未完成步骤已全部停止。";
+    const imageProgressMessage = manual
+      ? "本次图片生成已由用户手动终止，可基于当前提示词重新发起出图。"
+      : "上一项图片生成已提前终止，可重新发起新的出图请求。";
+    const nowIso = new Date().toISOString();
+
+    removeAssistantPlaceholderIfEmpty();
+    streamingStartedAtRef.current = null;
+    setStreamingElapsedSeconds(0);
+    setIsStreaming(false);
+    streamErrorRef.current = false;
+    assistantMessageIdRef.current = null;
+    setStatusText(statusMessage);
+    setToolCallTimeline((current) =>
+      current.map((step) =>
+        isToolCallProcessingStatus(step.status)
+          ? {
+              ...step,
+              status: "skipped",
+              message: stopDetailMessage,
+              updatedAt: nowIso,
+            }
+          : step,
+      ),
+    );
+    setArtifact((current) => normalizeStoppedArtifact(current, imageProgressMessage));
+    setMessages((current) =>
+      current.map((item) => {
+        const nextArtifact = normalizeStoppedArtifact(item.artifact ?? null, imageProgressMessage);
+        if (!nextArtifact || nextArtifact === item.artifact) {
+          return item;
+        }
+
+        return {
+          ...item,
+          artifact: nextArtifact,
+        };
+      }),
+    );
+
+    if (appendNotice) {
+      appendSystemMessage({
+        id: createId("stream-stopped"),
+        role: "note",
+        title: "生成已终止",
+        content: "[已由用户手动终止] 当前已输出内容会保留在对话中，可继续编辑或重新发起任务。",
+        createdAt: nowIso,
+      });
+    }
+  };
+
   const enqueueMaterialFiles = (
     incomingFiles: File[],
     source: MaterialCaptureSource,
@@ -3815,15 +3894,12 @@ function App() {
     }
 
     stopRequestedRef.current = true;
-    unregisterActiveStreamController(abortRef.current);
-    abortRef.current.abort();
-    abortRef.current = null;
-    removeAssistantPlaceholderIfEmpty();
-    streamingStartedAtRef.current = null;
-    setStreamingElapsedSeconds(0);
-    setIsStreaming(false);
-    assistantMessageIdRef.current = null;
-    setStatusText("已停止生成，当前已输出内容已保留");
+    cancelActiveStream();
+    finalizeStreamingUiAfterAbort({
+      manual: true,
+      appendNotice: true,
+      statusMessage: "已停止生成，当前已输出内容已保留",
+    });
   };
 
   const handleDeleteThread = async (thread: ThreadItem) => {
@@ -4055,11 +4131,13 @@ function App() {
       await refreshCurrentUserProfile({ silent: true });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        setStatusText(
-          stopRequestedRef.current
+        finalizeStreamingUiAfterAbort({
+          manual: stopRequestedRef.current,
+          appendNotice: false,
+          statusMessage: stopRequestedRef.current
             ? "已停止生成，当前已输出内容已保留"
             : "上一项任务已终止",
-        );
+        });
       } else if (isUnauthorizedError(error)) {
         handleUnauthorized(error instanceof APIError ? error.message : undefined);
       } else if (isInsufficientTokensError(error)) {
@@ -4092,8 +4170,10 @@ function App() {
           createdAt: new Date().toISOString(),
         });
       }
-      setIsStreaming(false);
-      assistantMessageIdRef.current = null;
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setIsStreaming(false);
+        assistantMessageIdRef.current = null;
+      }
     } finally {
       stopRequestedRef.current = false;
       unregisterActiveStreamController(controller);

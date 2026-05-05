@@ -12,6 +12,7 @@ import {
 
 import type { ContentGenerationArtifactPayload, UiPlatform } from "../../types";
 import { ArtifactSection } from "../ArtifactSection";
+import { CollapsibleText } from "../CollapsibleText";
 import { CopyButton } from "../CopyButton";
 
 type ContentGenerationArtifactProps = {
@@ -29,7 +30,7 @@ function getPlatformHint(platform: UiPlatform) {
   return "当前结果更偏小红书图文结构，适合继续补充封面文案、标签和互动引导。";
 }
 
-function normalizePromptValue(value: string | undefined) {
+function normalizePromptValue(value: string | null | undefined) {
   return value?.trim() ?? "";
 }
 
@@ -88,20 +89,35 @@ function PromptOptimizationNotice(props: {
             data-testid="artifact-prompt-optimization-details"
           >
             <div className="absolute right-2 top-2">
-              <CopyButton
-                ariaLabel="复制优化后的提示词"
-                text={revisedPrompt}
-              />
+              <CopyButton ariaLabel="复制优化后的提示词" text={revisedPrompt} />
             </div>
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-              System Prompt
+              Prompt Optimization
             </div>
-            <div className="mb-2 text-xs leading-5 text-slate-500">
-              基于你的原始描述，系统最终执行了以下提示词：
+            <div className="space-y-3">
+              <div>
+                <div className="mb-1 text-xs font-semibold text-slate-500">原始描述</div>
+                <CollapsibleText
+                  className="rounded-xl bg-slate-50 p-3 text-sm leading-6 text-slate-600"
+                  collapseKey={`content-original:${originalPrompt}`}
+                  contentClassName="whitespace-pre-wrap break-words"
+                  maxLines={4}
+                >
+                  {originalPrompt}
+                </CollapsibleText>
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold text-slate-500">系统执行提示词</div>
+                <CollapsibleText
+                  className="rounded-xl bg-white p-3 text-sm leading-6 text-slate-700"
+                  collapseKey={`content-revised:${revisedPrompt}`}
+                  contentClassName="whitespace-pre-wrap break-words"
+                  maxLines={6}
+                >
+                  {revisedPrompt}
+                </CollapsibleText>
+              </div>
             </div>
-            <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">
-              {revisedPrompt}
-            </pre>
           </div>
         </div>
       </div>
@@ -128,8 +144,7 @@ export function ContentGenerationArtifact({
     return (
       <ArtifactSection title="内容生成结果">
         <div className="rounded-2xl bg-muted p-4 text-sm leading-6 text-muted-foreground">
-          流式生成完成后，这里会根据后端返回的 `content_draft` artifact
-          自动展示标题候选、配图、正文草稿和平台引导语。
+          流式生成完成后，这里会根据后端返回的 `content_draft` artifact 自动展示标题候选、配图、正文草稿和平台引导语。
         </div>
       </ArtifactSection>
     );
@@ -156,7 +171,14 @@ export function ContentGenerationArtifact({
             {artifact.title_candidates.map((title) => (
               <div key={title} className="rounded-2xl border border-border bg-muted p-4">
                 <div className="flex items-start justify-between gap-3">
-                  <div className="text-sm font-medium leading-6 text-foreground">{title}</div>
+                  <CollapsibleText
+                    className="min-w-0 flex-1 text-sm font-medium leading-6 text-foreground"
+                    collapseKey={`title:${title}`}
+                    contentClassName="whitespace-pre-wrap break-words"
+                    maxLines={3}
+                  >
+                    {title}
+                  </CollapsibleText>
                   <CopyButton ariaLabel="复制标题候选" text={title} />
                 </div>
               </div>
@@ -167,10 +189,7 @@ export function ContentGenerationArtifact({
         {generatedImages.length > 0 ? (
           <ArtifactSection
             action={
-              <CopyButton
-                ariaLabel="复制全部配图链接"
-                text={generatedImages.join("\n")}
-              />
+              <CopyButton ariaLabel="复制全部配图链接" text={generatedImages.join("\n")} />
             }
             title="AI 配图"
           >
@@ -185,13 +204,13 @@ export function ContentGenerationArtifact({
               <div className="rounded-3xl border border-border bg-[linear-gradient(135deg,rgba(255,244,214,0.96),rgba(255,255,255,0.98)_58%,rgba(255,236,214,0.96))] p-4 shadow-sm">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-semibold text-foreground">Image Gallery</div>
+                    <div className="text-sm font-semibold text-foreground">配图画廊</div>
                     <div className="mt-1 text-xs leading-5 text-muted-foreground">
                       已生成 {generatedImages.length} 张图片，点击任意卡片即可预览。
                     </div>
                   </div>
                   <div className="rounded-full bg-white/80 px-3 py-1 text-xs font-medium text-brand shadow-sm">
-                    {generatedImages.length} images
+                    {generatedImages.length} 张
                   </div>
                 </div>
               </div>
@@ -247,9 +266,14 @@ export function ContentGenerationArtifact({
           action={<CopyButton ariaLabel="复制正文草稿" text={artifact.body} />}
           title="正文草稿"
         >
-          <div className="whitespace-pre-wrap rounded-2xl bg-muted p-4 text-sm leading-7 text-card-foreground">
+          <CollapsibleText
+            className="rounded-2xl bg-muted p-4 text-sm leading-7 text-card-foreground"
+            collapseKey={`content-body:${artifact.body}`}
+            contentClassName="whitespace-pre-wrap break-words"
+            maxLines={8}
+          >
             {artifact.body}
-          </div>
+          </CollapsibleText>
         </ArtifactSection>
 
         <ArtifactSection
@@ -257,9 +281,14 @@ export function ContentGenerationArtifact({
           title="平台引导语"
         >
           <div className="space-y-3">
-            <div className="rounded-2xl bg-brand-soft p-4 text-sm leading-7 text-brand-soft-foreground">
+            <CollapsibleText
+              className="rounded-2xl bg-brand-soft p-4 text-sm leading-7 text-brand-soft-foreground"
+              collapseKey={`platform-cta:${artifact.platform_cta}`}
+              contentClassName="whitespace-pre-wrap break-words"
+              maxLines={5}
+            >
               {artifact.platform_cta}
-            </div>
+            </CollapsibleText>
             <div className="rounded-2xl border border-border bg-card p-4 text-sm leading-6 text-muted-foreground">
               <div className="mb-2 flex items-center gap-2 font-semibold text-foreground">
                 <MessageSquareQuote className="h-4 w-4 text-muted-foreground" />

@@ -612,6 +612,34 @@ The media chat entrypoint now includes a stricter smart-routing and cancellation
 - client disconnects and explicit stop actions cancel the producer task so the backend does not keep forwarding a dead SSE stream in the background
 - cancellation handling belongs in the route-layer stream bridge as well as in downstream workflow nodes; do not collapse `CancelledError` into a generic fallback path
 
+### 7.29 Async-safe workflow execution baseline
+
+The workflow stack now carries a stricter async-only execution rule for cancellation-sensitive work:
+
+- `app/services/graph/provider.py` routes tool work through `execute_business_tool_async(...)` instead of wrapping synchronous business-tool execution in `asyncio.to_thread(...)`
+- Tavily search, prompt-skill extraction, and related OpenAI-compatible helper calls now expose async variants in `app/services/tools.py`
+- route-layer disconnect cancellation is expected to bubble through graph nodes, business tools, and provider calls without being swallowed
+- long-running workflow nodes should prefer async HTTP and async SDK clients so `CancelledError` can stop the chain before fallback work or expensive image generation starts
+
+### 7.30 Mixed draft-and-image plan execution baseline
+
+The LangGraph runtime no longer treats every request as a single-hop task:
+
+- `GraphState` now carries `execution_plan` plus `active_execution_step`
+- the router can normalize mixed requests into ordered steps such as `["draft_content", "generate_image"]`
+- direct image requests still bypass drafting and produce a single-step plan
+- review and formatting exits are allowed to hand off into the next pending execution step instead of always terminating at `END`
+- image-generation exits must always pop their step so the graph does not loop back into the same expensive node
+
+### 7.31 Creator long-text progressive disclosure baseline
+
+The creator workspace now uses one shared long-text folding primitive instead of rendering every large prompt or log block at full height:
+
+- `frontend/src/app/components/CollapsibleText.tsx` is the reusable clamp-and-expand component
+- chat `tool` / `note` / `error` cards and normal chat bubbles now fold oversized content instead of pushing the whole thread off screen
+- `ContentGenerationArtifact` and `ImageGenerationArtifact` now apply the same folding behavior to long prompts, revised prompts, body drafts, and CTA blocks
+- prompt readability improvements must preserve whitespace and copy behavior; do not replace structured prompt text with a lossy preview string
+
 ## 8. Backend Boundaries
 
 ### 8.1 Route groups

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from openai import (
     APIConnectionError,
     APIError,
     APITimeoutError,
+    AsyncOpenAI,
     AuthenticationError,
     BadRequestError,
     OpenAI,
@@ -286,6 +288,32 @@ def _request_tavily_market_search(query: str) -> dict[str, Any]:
     return data
 
 
+async def _request_tavily_market_search_async(query: str) -> dict[str, Any]:
+    api_key = _load_tavily_api_key()
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY is not configured")
+
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "topic": "general",
+        "search_depth": "advanced",
+        "max_results": DEFAULT_MARKET_TREND_RESULTS,
+        "include_answer": True,
+        "include_raw_content": False,
+    }
+
+    timeout = _build_http_timeout(_load_search_timeout_seconds())
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(TAVILY_SEARCH_URL, json=payload)
+        response.raise_for_status()
+
+    data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("Tavily returned a non-object payload")
+    return data
+
+
 def _extract_keyword_candidates(text: str) -> list[str]:
     compact = re.sub(r"https?://\S+", " ", text)
     tokens = re.split(r"[\s,，。！？!?\|/:：;；、（）()\[\]【】<>《》\"“”'‘’·]+", compact)
@@ -540,6 +568,53 @@ def analyze_market_trends(platform: str, category: str) -> str:
         )
 
 
+async def analyze_market_trends_async(platform: str, category: str) -> str:
+    normalized_platform = _normalize_platform(platform)
+    normalized_category = _normalize_category(category)
+    profile = _resolve_market_profile(normalized_category)
+    search_query = _build_market_trend_query(normalized_platform, normalized_category)
+
+    api_key = _load_tavily_api_key()
+    if not api_key:
+        return json.dumps(
+            _build_mock_market_trend_result(
+                platform=normalized_platform,
+                category=normalized_category,
+                profile=profile,
+                data_mode="mock",
+                query=search_query,
+            ),
+            ensure_ascii=False,
+        )
+
+    try:
+        live_payload = await _request_tavily_market_search_async(search_query)
+        return json.dumps(
+            _build_live_market_trend_result(
+                platform=normalized_platform,
+                category=normalized_category,
+                query=search_query,
+                profile=profile,
+                payload=live_payload,
+            ),
+            ensure_ascii=False,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover - network/runtime fallback
+        return json.dumps(
+            _build_mock_market_trend_result(
+                platform=normalized_platform,
+                category=normalized_category,
+                profile=profile,
+                data_mode="mock_fallback",
+                query=search_query,
+                fallback_reason=str(exc),
+            ),
+            ensure_ascii=False,
+        )
+
+
 SKILL_DISCOVERY_BLUEPRINTS: tuple[dict[str, str | None], ...] = (
     {
         "id": "skill-travel-emotion-route",
@@ -734,6 +809,32 @@ def _request_tavily_skill_search(query: str) -> dict[str, Any]:
     timeout = _build_http_timeout(_load_search_timeout_seconds())
     with httpx.Client(timeout=timeout) as client:
         response = client.post(TAVILY_SEARCH_URL, json=payload)
+        response.raise_for_status()
+
+    data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("Tavily returned a non-object payload")
+    return data
+
+
+async def _request_tavily_skill_search_async(query: str) -> dict[str, Any]:
+    api_key = _load_tavily_api_key()
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY is not configured")
+
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "topic": "general",
+        "search_depth": "advanced",
+        "max_results": DEFAULT_SKILL_DISCOVERY_RESULTS,
+        "include_answer": True,
+        "include_raw_content": True,
+    }
+
+    timeout = _build_http_timeout(_load_search_timeout_seconds())
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(TAVILY_SEARCH_URL, json=payload)
         response.raise_for_status()
 
     data = response.json()
@@ -992,6 +1093,16 @@ def _build_openai_client(config: SkillExtractorConfig) -> OpenAI:
     return OpenAI(**client_kwargs)
 
 
+def _build_async_openai_client(config: SkillExtractorConfig) -> AsyncOpenAI:
+    client_kwargs: dict[str, Any] = {
+        "api_key": config.api_key,
+        "timeout": _build_http_timeout(config.timeout_seconds),
+    }
+    if config.base_url:
+        client_kwargs["base_url"] = config.base_url
+    return AsyncOpenAI(**client_kwargs)
+
+
 def _invoke_skill_extractor_llm(
     *,
     keyword: str,
@@ -1027,6 +1138,65 @@ def _invoke_skill_extractor_llm(
         )
     except BadRequestError:
         response = client.chat.completions.create(**request_kwargs)
+
+    content = response.choices[0].message.content or ""
+    logger.info(
+        "Skill extractor raw response keyword=%s category=%s preview=%s",
+        keyword,
+        category,
+        _preview_log_text(content),
+    )
+
+    parsed_templates = SkillTemplateList.model_validate(
+        json.loads(_extract_first_json_object(content))
+    )
+    logger.info(
+        "Skill extractor parsed %s templates for keyword=%s category=%s",
+        len(parsed_templates.templates),
+        keyword,
+        category,
+    )
+    if len(parsed_templates.templates) == 0:
+        raise RuntimeError("LLM structured extractor returned an empty templates list")
+
+    return parsed_templates
+
+
+async def _invoke_skill_extractor_llm_async(
+    *,
+    keyword: str,
+    category: str,
+    search_context: str,
+) -> SkillTemplateList:
+    config = _load_skill_extractor_config()
+    if config is None:
+        raise RuntimeError("No LLM extractor configuration available")
+
+    client = _build_async_openai_client(config)
+    system_prompt = SKILL_SYSTEM_PROMPT_TEMPLATE.format(
+        category=category,
+        query=keyword,
+        search_context=search_context,
+    )
+    user_prompt = SKILL_USER_PROMPT_TEMPLATE.format(category=category)
+
+    request_kwargs = {
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "timeout": _build_http_timeout(config.timeout_seconds),
+    }
+
+    try:
+        response = await client.chat.completions.create(
+            **request_kwargs,
+            response_format={"type": "json_object"},
+        )
+    except BadRequestError:
+        response = await client.chat.completions.create(**request_kwargs)
 
     content = response.choices[0].message.content or ""
     logger.info(
@@ -1341,6 +1511,200 @@ def search_prompt_skills(keyword: str, category: str | None = None) -> dict[str,
     }
 
 
+async def search_prompt_skills_async(
+    keyword: str,
+    category: str | None = None,
+) -> dict[str, Any]:
+    normalized_keyword = _normalize_skill_keyword(keyword)
+    normalized_category = _normalize_skill_category(category)
+    search_query = _build_prompt_skill_query(normalized_keyword, normalized_category)
+    resolved_category = _infer_skill_category(
+        " ".join(filter(None, [normalized_keyword, normalized_category or ""])),
+        normalized_category,
+    )
+
+    logger.info(
+        "Skill discovery started keyword=%s category=%s query=%s",
+        normalized_keyword,
+        resolved_category,
+        search_query,
+    )
+
+    fallback_reason: str | None = None
+    search_sources: list[dict[str, str]] = []
+    search_context = ""
+
+    api_key = _load_tavily_api_key()
+    if api_key:
+        try:
+            live_payload = await _request_tavily_skill_search_async(search_query)
+            search_sources = _build_skill_search_sources(live_payload)
+            search_context = _build_skill_search_context(live_payload)
+            logger.info(
+                "Tavily skill discovery succeeded query=%s sources=%s context_preview=%s",
+                search_query,
+                len(search_sources),
+                _preview_log_text(search_context),
+            )
+            if not search_context:
+                fallback_reason = "Tavily returned an empty search context"
+                logger.warning(
+                    "Tavily skill discovery returned empty context query=%s payload_preview=%s",
+                    search_query,
+                    _preview_log_text(json.dumps(live_payload, ensure_ascii=False)),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - network/runtime fallback
+            fallback_reason = str(exc)
+            logger.exception(
+                "Prompt skill discovery search failed for query=%s: %s",
+                search_query,
+                exc,
+            )
+    else:
+        logger.info(
+            "Skill discovery has no Tavily API key; query=%s will use fallback paths",
+            search_query,
+        )
+
+    extractor_config = _load_skill_extractor_config()
+    if extractor_config is None:
+        logger.info(
+            "Skill discovery has no extractor model configured query=%s",
+            search_query,
+        )
+
+    if search_context and extractor_config is not None:
+        try:
+            extracted_templates = await _invoke_skill_extractor_llm_async(
+                keyword=normalized_keyword,
+                category=resolved_category,
+                search_context=search_context,
+            )
+            items = _build_structured_skill_items(
+                keyword=normalized_keyword,
+                category=resolved_category,
+                templates=extracted_templates,
+                sources=search_sources,
+                data_mode="live_tavily",
+            )
+            return {
+                "query": search_query,
+                "category": normalized_category,
+                "items": items,
+                "templates": items,
+                "total": len(items),
+                "data_mode": "live_tavily",
+                "fallback_reason": fallback_reason,
+            }
+        except asyncio.CancelledError:
+            raise
+        except (
+            APIConnectionError,
+            APIError,
+            APITimeoutError,
+            AuthenticationError,
+            OpenAIError,
+            RateLimitError,
+            ValidationError,
+            ValueError,
+            RuntimeError,
+            json.JSONDecodeError,
+        ) as exc:
+            fallback_reason = str(exc)
+            logger.exception(
+                "Prompt skill structured extraction failed for query=%s: %s",
+                search_query,
+                exc,
+            )
+
+    if extractor_config is not None:
+        fallback_context_override = (
+            "No external search context is available. Use internal knowledge of high-performing "
+            "prompt frameworks such as RTF, BROKE, CREATE, ICEL, and PAS to synthesize reusable "
+            f"meta-prompts for the {resolved_category} category and the query '{normalized_keyword}'."
+        )
+        fallback_context = (
+            search_context
+            or (
+                "当前外部搜索上下文不可用。请基于你对流行 Prompt framework（RTF/BROKE/CREATE/ICEL）的已有知识，"
+                f"专注于 {resolved_category} 领域，针对“{normalized_keyword}”输出 3 个高级元提示词模板。"
+            )
+        )
+        if not search_context:
+            fallback_context = fallback_context_override
+        logger.info(
+            "Skill discovery invoking LLM fallback query=%s context_preview=%s",
+            search_query,
+            _preview_log_text(fallback_context),
+        )
+        try:
+            extracted_templates = await _invoke_skill_extractor_llm_async(
+                keyword=normalized_keyword,
+                category=resolved_category,
+                search_context=fallback_context,
+            )
+            items = _build_structured_skill_items(
+                keyword=normalized_keyword,
+                category=resolved_category,
+                templates=extracted_templates,
+                sources=[],
+                data_mode="llm_fallback",
+            )
+            return {
+                "query": search_query,
+                "category": normalized_category,
+                "items": items,
+                "templates": items,
+                "total": len(items),
+                "data_mode": "llm_fallback",
+                "fallback_reason": fallback_reason,
+            }
+        except asyncio.CancelledError:
+            raise
+        except (
+            APIConnectionError,
+            APIError,
+            APITimeoutError,
+            AuthenticationError,
+            OpenAIError,
+            RateLimitError,
+            ValidationError,
+            ValueError,
+            RuntimeError,
+            json.JSONDecodeError,
+        ) as exc:
+            fallback_reason = str(exc)
+            logger.exception(
+                "Prompt skill LLM fallback extraction failed for query=%s: %s",
+                search_query,
+                exc,
+            )
+
+    response_mode = "mock_fallback" if fallback_reason else "mock"
+    logger.error(
+        "Skill discovery fell back to hardcoded templates query=%s mode=%s reason=%s",
+        search_query,
+        response_mode,
+        fallback_reason or "no_live_or_llm_path",
+    )
+    items = _build_mock_skill_items(
+        keyword=normalized_keyword,
+        category=resolved_category,
+        data_mode=response_mode,
+    )
+    return {
+        "query": search_query,
+        "category": normalized_category,
+        "items": items,
+        "templates": items,
+        "total": len(items),
+        "data_mode": response_mode,
+        "fallback_reason": fallback_reason,
+    }
+
+
 @tool(args_schema=PromptSkillSearchInput)
 def discover_prompt_skills(keyword: str, category: str = "") -> str:
     """Discover reusable prompt structures and skill-like template ideas as JSON, preferring live Tavily search when configured."""
@@ -1411,3 +1775,23 @@ def execute_business_tool(name: str, arguments: dict[str, Any]) -> str:
     if tool_item is None:
         raise ValueError(f"Unknown business tool: {name}")
     return str(tool_item.invoke(arguments))
+
+
+async def execute_business_tool_async(name: str, arguments: dict[str, Any]) -> str:
+    if name == analyze_market_trends.name:
+        return await analyze_market_trends_async(
+            platform=str(arguments.get("platform", "")),
+            category=str(arguments.get("category", "")),
+        )
+
+    if name == discover_prompt_skills.name:
+        result = await search_prompt_skills_async(
+            keyword=str(arguments.get("keyword", "")),
+            category=str(arguments.get("category", "")).strip() or None,
+        )
+        return json.dumps(result, ensure_ascii=False)
+
+    if name == generate_content_outline.name:
+        return execute_business_tool(name, arguments)
+
+    return execute_business_tool(name, arguments)

@@ -194,6 +194,45 @@ def test_business_tool_registry_exports_openai_function_schema():
     assert set(parameters["required"]) == {"platform", "category"}
 
 
+def test_langgraph_tool_execution_cancellation_bubbles_out(monkeypatch):
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-tool-execution-cancelled",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "先分析市场热点，然后我会立刻停止。",
+            "materials": [],
+        }
+    )
+
+    async def cancelled_business_tool(name: str, arguments: dict[str, object]) -> str:
+        raise asyncio.CancelledError()
+
+    provider = LangGraphProvider(inner_provider=BusinessToolRecordingProvider())
+    monkeypatch.setattr(
+        graph_provider_module,
+        "get_stream_writer",
+        lambda: (lambda payload: None),
+    )
+    monkeypatch.setattr(
+        graph_provider_module,
+        "execute_business_tool_async",
+        cancelled_business_tool,
+    )
+
+    state = provider._build_initial_state(request)
+    state["pending_tool_calls"] = [
+        {
+            "id": "tool-call-1",
+            "name": "analyze_market_trends",
+            "args": {"platform": "xiaohongshu", "category": "地域文旅"},
+        }
+    ]
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(provider._tool_execution_node(state))
+
+
 def test_analyze_market_trends_tool_returns_structured_mock_json(monkeypatch):
     monkeypatch.setattr(business_tools, "_load_tavily_api_key", lambda: "")
 
@@ -614,6 +653,64 @@ def test_langgraph_autonomously_considers_business_tools_for_planning_requests()
     assert "generate_content_outline" in inner_provider.last_request_message
 
 
+def test_langgraph_router_builds_two_step_execution_plan_for_mixed_content_request():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-router-two-step-plan",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "帮我写一篇北京文旅种草图文，并配一张首页海报。",
+            "materials": [],
+        }
+    )
+
+    async def no_search(_: MediaChatRequest) -> dict[str, object]:
+        return {"needs_search": False, "search_query": ""}
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        route_analyzer=no_search,
+        image_prompt_builder=lambda **_: "",
+    )
+
+    state = provider._build_initial_state(request)
+    updates = asyncio.run(provider._router_node(state))
+
+    assert updates["execution_plan"] == ["draft_content", "generate_image"]
+    assert updates["active_execution_step"] == "draft_content"
+    assert updates["needs_image"] is True
+    assert updates["direct_image_mode"] is False
+
+
+def test_langgraph_router_builds_single_step_plan_for_direct_image_request():
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-router-direct-image-plan",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "Generate a poster only for a summer tea launch. Image only, no copy.",
+            "materials": [],
+        }
+    )
+
+    async def no_search(_: MediaChatRequest) -> dict[str, object]:
+        return {"needs_search": False, "search_query": ""}
+
+    provider = LangGraphProvider(
+        inner_provider=ImageReadyProvider(),
+        route_analyzer=no_search,
+        image_prompt_builder=lambda **_: "",
+    )
+
+    state = provider._build_initial_state(request)
+    updates = asyncio.run(provider._router_node(state))
+
+    assert updates["execution_plan"] == ["generate_image"]
+    assert updates["active_execution_step"] == "generate_image"
+    assert updates["needs_image"] is True
+    assert updates["direct_image_mode"] is True
+
+
 def test_langgraph_injects_knowledge_base_context_before_final_generation(monkeypatch):
     inner_provider = BusinessToolRecordingProvider()
 
@@ -766,8 +863,13 @@ def test_langgraph_attaches_generated_images_to_content_artifact():
     assert "build_image_prompt" in tool_call_names
     assert "generate_cover_images" in tool_call_names
 
-    artifact_event = next(event for event in events if event["event"] == "artifact")
-    artifact = ContentGenerationArtifactPayload.model_validate(artifact_event["artifact"])
+    artifact_events = [event for event in events if event["event"] == "artifact"]
+    assert len(artifact_events) >= 2
+
+    first_artifact = ContentGenerationArtifactPayload.model_validate(artifact_events[0]["artifact"])
+    assert first_artifact.generated_images == []
+
+    artifact = ContentGenerationArtifactPayload.model_validate(artifact_events[-1]["artifact"])
     assert artifact.generated_images == [
         "https://example.com/generated-cover-1.png",
         "https://example.com/generated-cover-2.png",

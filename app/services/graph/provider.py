@@ -92,7 +92,7 @@ from app.services.token_usage import (
     merge_model_token_usage,
     normalize_model_token_usage,
 )
-from app.services.tools import execute_business_tool, get_business_tools
+from app.services.tools import execute_business_tool_async, get_business_tools
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -307,6 +307,8 @@ class GraphState(TypedDict, total=False):
     image_generation_prompt: str
     generated_images: list[str]
     direct_image_mode: bool
+    execution_plan: list[str]
+    active_execution_step: str
 
 
 class SearchRouteDecision(BaseModel):
@@ -316,6 +318,10 @@ class SearchRouteDecision(BaseModel):
 
 class ImageRouteDecision(BaseModel):
     needs_image: bool = False
+
+
+EXECUTION_STEP_DRAFT_CONTENT = "draft_content"
+EXECUTION_STEP_GENERATE_IMAGE = "generate_image"
 
 
 def create_langgraph_inner_provider() -> BaseLLMProvider:
@@ -566,6 +572,8 @@ class LangGraphProvider(BaseLLMProvider):
             "image_generation_prompt": "",
             "generated_images": [],
             "direct_image_mode": False,
+            "execution_plan": [],
+            "active_execution_step": "",
         }
 
     def _build_graph(self):
@@ -620,12 +628,18 @@ class LangGraphProvider(BaseLLMProvider):
             self._route_after_review,
             {
                 "generate_draft_node": "generate_draft_node",
-                "generate_image_node": "generate_image_node",
                 "format_artifact_node": "format_artifact_node",
             },
         )
         graph.add_edge("generate_image_node", "format_artifact_node")
-        graph.add_edge("format_artifact_node", END)
+        graph.add_conditional_edges(
+            "format_artifact_node",
+            self._route_after_format_artifact,
+            {
+                "generate_image_node": "generate_image_node",
+                "end": END,
+            },
+        )
 
         return graph.compile()
 
@@ -655,12 +669,14 @@ class LangGraphProvider(BaseLLMProvider):
             routing_resolution=routing_resolution,
         ):
             resolved_image_backend = self.image_service.resolve_backend(user_role=user_role)
+            execution_plan = [EXECUTION_STEP_GENERATE_IMAGE]
             logger.info(
-                "langgraph router bypass thread_id=%s next=%s reason=direct_image_request user_role=%s image_backend=%s",
+                "langgraph router bypass thread_id=%s next=%s reason=direct_image_request user_role=%s image_backend=%s execution_plan=%s",
                 request.thread_id,
                 "parse_materials_node",
                 user_role or "user",
                 resolved_image_backend,
+                execution_plan,
             )
             return {
                 **state_updates,
@@ -668,15 +684,28 @@ class LangGraphProvider(BaseLLMProvider):
                 "search_query": "",
                 "needs_image": True,
                 "direct_image_mode": True,
+                "execution_plan": execution_plan,
+                "active_execution_step": EXECUTION_STEP_GENERATE_IMAGE,
                 "next_route": "parse_materials_node",
                 "current_step": "router:direct_image_bypass",
             }
         decision = await self._decide_search_route(request)
+        execution_plan = _build_router_execution_plan(request)
+        active_execution_step = execution_plan[0] if execution_plan else ""
+        logger.info(
+            "langgraph router planned thread_id=%s execution_plan=%s needs_search=%s",
+            request.thread_id,
+            execution_plan,
+            decision.needs_search,
+        )
         return {
             **state_updates,
             "needs_search": decision.needs_search,
             "search_query": decision.search_query,
+            "needs_image": EXECUTION_STEP_GENERATE_IMAGE in execution_plan,
             "direct_image_mode": False,
+            "execution_plan": execution_plan,
+            "active_execution_step": active_execution_step,
             "next_route": "parse_materials_node",
             "current_step": "router:completed",
         }
@@ -937,12 +966,13 @@ class LangGraphProvider(BaseLLMProvider):
                 state.get("needs_search"),
             )
             return "ocr_node"
-        if state.get("direct_image_mode"):
+        current_execution_step = _get_current_execution_step(state)
+        if current_execution_step == EXECUTION_STEP_GENERATE_IMAGE:
             logger.info(
-                "langgraph route=after_parse thread_id=%s next=%s direct_image_mode=%s",
+                "langgraph route=after_parse thread_id=%s next=%s execution_step=%s",
                 state["request"].thread_id,
                 "generate_image_node",
-                True,
+                current_execution_step,
             )
             return "generate_image_node"
         if state.get("needs_search"):
@@ -961,12 +991,13 @@ class LangGraphProvider(BaseLLMProvider):
         return "generate_draft_node"
 
     def _route_after_ocr(self, state: GraphState) -> str:
-        if state.get("direct_image_mode"):
+        current_execution_step = _get_current_execution_step(state)
+        if current_execution_step == EXECUTION_STEP_GENERATE_IMAGE:
             logger.info(
-                "langgraph route=after_ocr thread_id=%s next=%s direct_image_mode=%s",
+                "langgraph route=after_ocr thread_id=%s next=%s execution_step=%s",
                 state["request"].thread_id,
                 "generate_image_node",
-                True,
+                current_execution_step,
             )
             return "generate_image_node"
         if state.get("needs_search"):
@@ -1336,11 +1367,7 @@ class LangGraphProvider(BaseLLMProvider):
                 message=f"\u6b63\u5728\u8c03\u7528\u4e1a\u52a1\u5de5\u5177: {tool_name}...",
             )
             try:
-                result = await asyncio.to_thread(
-                    execute_business_tool,
-                    tool_name,
-                    tool_args,
-                )
+                result = await execute_business_tool_async(tool_name, tool_args)
                 formatted_result = _format_business_tool_result(tool_name, result)
                 tool_results.append(formatted_result)
                 messages.append(
@@ -1547,34 +1574,72 @@ class LangGraphProvider(BaseLLMProvider):
         updates["next_route"] = next_route
         updates["current_step"] = current_step
         if next_route == "format_artifact_node":
-            updates["needs_image"] = (await self._decide_image_route(state)).needs_image
+            remaining_plan = _pop_execution_step(
+                state.get("execution_plan"),
+                expected_step=EXECUTION_STEP_DRAFT_CONTENT,
+            )
+            should_append_image_step = EXECUTION_STEP_GENERATE_IMAGE not in remaining_plan
+            if should_append_image_step and (await self._decide_image_route(state)).needs_image:
+                remaining_plan.append(EXECUTION_STEP_GENERATE_IMAGE)
+            updates["execution_plan"] = remaining_plan
+            updates["active_execution_step"] = remaining_plan[0] if remaining_plan else ""
+            updates["needs_image"] = bool(state.get("needs_image", False)) or (
+                EXECUTION_STEP_GENERATE_IMAGE in remaining_plan
+            )
         else:
-            updates["needs_image"] = False
+            updates["needs_image"] = bool(state.get("needs_image", False))
         return updates
 
     def _route_after_review(self, state: GraphState) -> str:
         next_route = state.get("next_route", "format_artifact_node")
-        resolved_route = next_route
-        if next_route == "format_artifact_node" and state.get("needs_image", False):
-            resolved_route = "generate_image_node"
         logger.info(
-            "langgraph route=after_review thread_id=%s next=%s needs_image=%s",
+            "langgraph route=after_review thread_id=%s next=%s execution_plan=%s needs_image=%s",
             state["request"].thread_id,
-            resolved_route,
+            next_route,
+            state.get("execution_plan", []),
             state.get("needs_image", False),
         )
-        return resolved_route
+        return next_route
+
+    def _route_after_format_artifact(self, state: GraphState) -> str:
+        next_execution_step = _get_current_execution_step(state)
+        if next_execution_step == EXECUTION_STEP_GENERATE_IMAGE:
+            logger.info(
+                "langgraph route=after_format_artifact thread_id=%s next=%s execution_plan=%s",
+                state["request"].thread_id,
+                "generate_image_node",
+                state.get("execution_plan", []),
+            )
+            return "generate_image_node"
+
+        logger.info(
+            "langgraph route=after_format_artifact thread_id=%s next=%s execution_plan=%s",
+            state["request"].thread_id,
+            "end",
+            state.get("execution_plan", []),
+        )
+        return "end"
 
     async def _generate_image_node(self, state: GraphState) -> GraphState:
         request = state["request"]
         user_role = str((state.get("user_context") or {}).get("role") or "user").strip().lower()
         direct_image_mode = bool(state.get("direct_image_mode"))
+        image_step_updates = _complete_execution_step_updates(
+            state,
+            expected_step=EXECUTION_STEP_GENERATE_IMAGE,
+        )
         if not state.get("needs_image", False) or not _is_image_generation_eligible(state):
-            return {"current_step": "generate_image:ineligible"}
+            return {
+                "current_step": "generate_image:ineligible",
+                **image_step_updates,
+            }
 
         writer = get_stream_writer()
         if not self._is_image_generation_available(user_role=user_role):
-            return {"current_step": "generate_image:disabled"}
+            return {
+                "current_step": "generate_image:disabled",
+                **image_step_updates,
+            }
 
         if self.image_generator is not None:
             logger.info(
@@ -1596,7 +1661,10 @@ class LangGraphProvider(BaseLLMProvider):
         if not draft_text:
             draft_text = _resolve_image_prompt_seed_text(state)
         if not draft_text:
-            return {"current_step": "generate_image:no_draft"}
+            return {
+                "current_step": "generate_image:no_draft",
+                **image_step_updates,
+            }
 
         _emit_tool_call(
             writer,
@@ -1629,7 +1697,10 @@ class LangGraphProvider(BaseLLMProvider):
                     else f"配图提示词生成失败，已跳过配图：{exc}"
                 ),
             )
-            return {"current_step": "generate_image:prompt_failed"}
+            return {
+                "current_step": "generate_image:prompt_failed",
+                **image_step_updates,
+            }
 
         if not prompt.strip():
             _emit_tool_call(
@@ -1642,7 +1713,10 @@ class LangGraphProvider(BaseLLMProvider):
                     else "未生成有效的配图提示词，已继续交付正文。"
                 ),
             )
-            return {"current_step": "generate_image:prompt_skipped"}
+            return {
+                "current_step": "generate_image:prompt_skipped",
+                **image_step_updates,
+            }
 
         _emit_tool_call(
             writer,
@@ -1744,6 +1818,7 @@ class LangGraphProvider(BaseLLMProvider):
                 "image_generation_prompt": prompt,
                 "generated_images": [],
                 "current_step": "generate_image:failed",
+                **image_step_updates,
             }
 
         if not generated_images:
@@ -1761,6 +1836,7 @@ class LangGraphProvider(BaseLLMProvider):
                 "image_generation_prompt": prompt,
                 "generated_images": [],
                 "current_step": "generate_image:empty",
+                **image_step_updates,
             }
 
         _emit_tool_call(
@@ -1773,6 +1849,7 @@ class LangGraphProvider(BaseLLMProvider):
             "image_generation_prompt": prompt,
             "generated_images": generated_images,
             "current_step": "generate_image:completed",
+            **image_step_updates,
         }
 
     def _is_image_generation_available(self, *, user_role: str | None = None) -> bool:
@@ -3350,6 +3427,71 @@ def _resolve_image_prompt_seed_text(state: GraphState) -> str:
 
     joined_clues = "\n".join(f"- {clue}" for clue in ocr_clues[:3])
     return f"{base_message}\n参考素材线索：\n{joined_clues}".strip()
+
+
+def _normalize_execution_plan(raw_plan: object) -> list[str]:
+    normalized_plan: list[str] = []
+    for item in raw_plan if isinstance(raw_plan, list) else []:
+        normalized = str(item or "").strip()
+        if normalized:
+            normalized_plan.append(normalized)
+    return normalized_plan
+
+
+def _get_current_execution_step(state: GraphState) -> str:
+    active_step = str(state.get("active_execution_step", "") or "").strip()
+    if active_step:
+        return active_step
+
+    execution_plan = _normalize_execution_plan(state.get("execution_plan"))
+    return execution_plan[0] if execution_plan else ""
+
+
+def _pop_execution_step(
+    raw_plan: object,
+    *,
+    expected_step: str | None = None,
+) -> list[str]:
+    execution_plan = _normalize_execution_plan(raw_plan)
+    if not execution_plan:
+        return []
+
+    if expected_step and execution_plan[0] != expected_step:
+        return execution_plan
+
+    return execution_plan[1:]
+
+
+def _complete_execution_step_updates(
+    state: GraphState,
+    *,
+    expected_step: str,
+) -> GraphState:
+    remaining_plan = _pop_execution_step(
+        state.get("execution_plan"),
+        expected_step=expected_step,
+    )
+    return {
+        "execution_plan": remaining_plan,
+        "active_execution_step": remaining_plan[0] if remaining_plan else "",
+    }
+
+
+def _build_router_execution_plan(request: MediaChatRequest) -> list[str]:
+    if request.task_type == TaskType.IMAGE_GENERATION:
+        return [EXECUTION_STEP_GENERATE_IMAGE]
+
+    execution_plan = [EXECUTION_STEP_DRAFT_CONTENT]
+    preview_state: GraphState = {
+        "request": request,
+        "current_draft": request.message,
+        "generated_images": [],
+        "artifact_candidate": None,
+        "direct_image_mode": False,
+    }
+    if _build_heuristic_image_route_decision(preview_state).needs_image:
+        execution_plan.append(EXECUTION_STEP_GENERATE_IMAGE)
+    return execution_plan
 
 
 def _is_image_generation_eligible(state: GraphState) -> bool:

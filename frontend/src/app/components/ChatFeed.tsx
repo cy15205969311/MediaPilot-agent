@@ -23,6 +23,7 @@ import type {
 } from "../types";
 import type { StreamingUiState } from "../streamingUi";
 import { CitationAuditPanel } from "./CitationAuditPanel";
+import { CollapsibleText } from "./CollapsibleText";
 import { CopyButton } from "./CopyButton";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 import { buildAbsoluteUrl, formatChatTimestamp, getDisplayName } from "../utils";
@@ -545,7 +546,14 @@ export function ChatFeed({
                 )}
                 {item.title}
               </div>
-              <div className="text-sm leading-6 text-muted-foreground">{item.content}</div>
+              <CollapsibleText
+                className="text-sm leading-6 text-muted-foreground"
+                collapseKey={`${item.id}:${item.content}`}
+                contentClassName="whitespace-pre-wrap break-words"
+                maxLines={5}
+              >
+                {item.content}
+              </CollapsibleText>
               {timestamp ? (
                 <div className="mt-2 text-[11px] text-muted-foreground/80">{timestamp}</div>
               ) : null}
@@ -602,13 +610,18 @@ export function ChatFeed({
                 } min-w-0 overflow-hidden`}
               >
                 {renderMessageMaterials(item, openImagePreview)}
-                <div className="whitespace-pre-wrap text-sm leading-7">
+                <div className="text-sm leading-7">
                   {item.content ? (
-                    item.role === "assistant" ? (
-                      renderTextWithCitations(item.content)
-                    ) : (
-                      item.content
-                    )
+                    <CollapsibleText
+                      className="text-inherit"
+                      collapseKey={`${item.id}:${item.content}`}
+                      contentClassName="whitespace-pre-wrap break-words"
+                      maxLines={item.role === "assistant" ? 8 : 10}
+                    >
+                      {item.role === "assistant"
+                        ? renderTextWithCitations(item.content)
+                        : item.content}
+                    </CollapsibleText>
                   ) : (
                     <span className="inline-flex gap-1">
                       <span className="h-2 w-2 animate-bounce rounded-full bg-brand" />

@@ -9,6 +9,7 @@ import {
 
 import type { ImageGenerationArtifactPayload } from "../../types";
 import { ArtifactSection } from "../ArtifactSection";
+import { CollapsibleText } from "../CollapsibleText";
 import { CopyButton } from "../CopyButton";
 import { ImagePreviewModal } from "../ImagePreviewModal";
 
@@ -40,7 +41,8 @@ export function ImageGenerationArtifact({
   const revisedPrompt = normalizePromptValue(artifact?.revised_prompt);
   const promptText = normalizePromptValue(artifact?.prompt);
   const progressMessage =
-    normalizePromptValue(artifact?.progress_message) || "云端 GPU 正在分配算力，马上开始渲染首版画面。";
+    normalizePromptValue(artifact?.progress_message) ||
+    "云端 GPU 正在分配算力，马上开始渲染首版画面。";
   const progressPercent = normalizeProgressPercent(artifact?.progress_percent);
   const isProcessing = artifact?.status === "processing";
   const shouldRenderProcessingSkeleton = isProcessing && generatedImages.length === 0;
@@ -68,9 +70,15 @@ export function ImageGenerationArtifact({
           title={artifact.title}
         >
           <div className="space-y-3">
-            <div className="rounded-2xl border border-border bg-muted p-4 text-sm leading-7 text-card-foreground">
+            <CollapsibleText
+              className="rounded-2xl border border-border bg-muted p-4 text-sm leading-7 text-card-foreground"
+              collapseKey={`${artifact.title}:${promptText}`}
+              contentClassName="whitespace-pre-wrap break-words"
+              maxLines={6}
+            >
               {promptText}
-            </div>
+            </CollapsibleText>
+
             {revisedPrompt && revisedPrompt !== originalPrompt ? (
               <div className="rounded-2xl border border-sky-100 bg-sky-50/80 p-4 text-sm leading-6 text-sky-950">
                 <div className="mb-2 flex items-center gap-2 font-medium">
@@ -82,17 +90,27 @@ export function ImageGenerationArtifact({
                     <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-sky-700/80">
                       原始版本
                     </div>
-                    <div className="rounded-xl bg-white/80 p-3 text-slate-600">
+                    <CollapsibleText
+                      className="rounded-xl bg-white/80 p-3 text-slate-600"
+                      collapseKey={`image-original:${originalPrompt}`}
+                      contentClassName="whitespace-pre-wrap break-words"
+                      maxLines={4}
+                    >
                       {originalPrompt}
-                    </div>
+                    </CollapsibleText>
                   </div>
                   <div>
                     <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-sky-700/80">
                       优化后
                     </div>
-                    <div className="rounded-xl bg-white/90 p-3 text-slate-700">
+                    <CollapsibleText
+                      className="rounded-xl bg-white/90 p-3 text-slate-700"
+                      collapseKey={`image-revised:${revisedPrompt}`}
+                      contentClassName="whitespace-pre-wrap break-words"
+                      maxLines={6}
+                    >
                       {revisedPrompt}
-                    </div>
+                    </CollapsibleText>
                   </div>
                 </div>
               </div>
@@ -103,10 +121,7 @@ export function ImageGenerationArtifact({
         <ArtifactSection
           action={
             generatedImages.length > 0 ? (
-            <CopyButton
-              ariaLabel="复制全部图片链接"
-              text={generatedImages.join("\n")}
-            />
+              <CopyButton ariaLabel="复制全部图片链接" text={generatedImages.join("\n")} />
             ) : null
           }
           title="生成图片"
@@ -116,7 +131,7 @@ export function ImageGenerationArtifact({
               <div className="overflow-hidden rounded-[28px] border border-border/80 bg-[linear-gradient(145deg,rgba(255,248,240,0.96),rgba(255,255,255,0.98)_52%,rgba(255,244,214,0.96))] p-4 shadow-sm">
                 <div className="relative overflow-hidden rounded-[24px] border border-white/70 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.95),rgba(255,241,220,0.9)_42%,rgba(255,224,188,0.92))]">
                   <div className="aspect-square w-full" />
-                  <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.18),rgba(255,255,255,0.02)_40%,rgba(255,214,153,0.18))] animate-pulse" />
+                  <div className="pointer-events-none absolute inset-0 animate-pulse bg-[linear-gradient(135deg,rgba(255,255,255,0.18),rgba(255,255,255,0.02)_40%,rgba(255,214,153,0.18))]" />
                   <div className="absolute inset-5 flex flex-col justify-between">
                     <div className="inline-flex w-fit items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-xs font-medium text-brand shadow-sm">
                       <Sparkles className="h-3.5 w-3.5" />
@@ -161,7 +176,7 @@ export function ImageGenerationArtifact({
                   <div>
                     <div className="text-sm font-semibold text-foreground">图片画廊</div>
                     <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                      已生成 {generatedImages.length} 张图片，可直接放大预览或在新标签中查看。
+                      已生成 {generatedImages.length} 张图片，可直接放大预览或在新标签页中查看。
                     </div>
                   </div>
                   <div className="rounded-full bg-white/80 px-3 py-1 text-xs font-medium text-brand shadow-sm">
@@ -207,10 +222,7 @@ export function ImageGenerationArtifact({
                         <ExternalLink className="h-3.5 w-3.5" />
                         新标签打开
                       </button>
-                      <CopyButton
-                        ariaLabel={`复制图片 ${index + 1} 链接`}
-                        text={imageUrl}
-                      />
+                      <CopyButton ariaLabel={`复制图片 ${index + 1} 链接`} text={imageUrl} />
                     </div>
                   </div>
                 ))}
@@ -225,17 +237,17 @@ export function ImageGenerationArtifact({
 
         {artifact.platform_cta ? (
           <ArtifactSection
-            action={
-              <CopyButton
-                ariaLabel="复制下一步建议"
-                text={artifact.platform_cta}
-              />
-            }
+            action={<CopyButton ariaLabel="复制下一步建议" text={artifact.platform_cta} />}
             title="下一步建议"
           >
-            <div className="rounded-2xl bg-brand-soft p-4 text-sm leading-7 text-brand-soft-foreground">
+            <CollapsibleText
+              className="rounded-2xl bg-brand-soft p-4 text-sm leading-7 text-brand-soft-foreground"
+              collapseKey={`image-cta:${artifact.platform_cta}`}
+              contentClassName="whitespace-pre-wrap break-words"
+              maxLines={5}
+            >
               {artifact.platform_cta}
-            </div>
+            </CollapsibleText>
           </ArtifactSection>
         ) : null}
       </div>

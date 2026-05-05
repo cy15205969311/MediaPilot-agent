@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import suppress
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -41,6 +42,15 @@ async def _cancel_stream_producer(task: asyncio.Task[None]) -> None:
         pass
 
 
+async def _close_workflow_stream(workflow_stream: AsyncGenerator[str, None]) -> None:
+    try:
+        await workflow_stream.aclose()
+    except (RuntimeError, StopAsyncIteration, GeneratorExit):
+        pass
+    except Exception:
+        logger.debug("workflow stream close skipped due to cleanup error", exc_info=True)
+
+
 async def _forward_stream_with_disconnect_cancellation(
     *,
     workflow_stream: AsyncGenerator[str, None],
@@ -74,13 +84,13 @@ async def _forward_stream_with_disconnect_cancellation(
     try:
         while True:
             if await disconnect_checker():
-                logger.info(
-                    "客户端已主动取消流式请求 thread_id=%s user_id=%s",
+                logger.warning(
+                    "客户端已断开连接，准备强制取消 LangGraph 工作流 thread_id=%s user_id=%s",
                     thread_id,
                     user_id,
                 )
                 await _cancel_stream_producer(producer_task)
-                break
+                raise asyncio.CancelledError("Client disconnected")
 
             try:
                 item = await asyncio.wait_for(
@@ -98,8 +108,8 @@ async def _forward_stream_with_disconnect_cancellation(
             yield str(item)
             await asyncio.sleep(0)
     except asyncio.CancelledError:
-        logger.info(
-            "客户端已主动取消流式请求 thread_id=%s user_id=%s",
+        logger.warning(
+            "流式响应已显式取消，准备销毁后端执行链路 thread_id=%s user_id=%s",
             thread_id,
             user_id,
         )
@@ -107,6 +117,8 @@ async def _forward_stream_with_disconnect_cancellation(
         raise
     finally:
         await _cancel_stream_producer(producer_task)
+        with suppress(asyncio.CancelledError):
+            await _close_workflow_stream(workflow_stream)
 
 
 def persist_chat_request(

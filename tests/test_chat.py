@@ -1271,6 +1271,7 @@ def test_stream_disconnect_forwarder_cancels_workflow_task(
     started = asyncio.Event()
     cancelled = asyncio.Event()
     disconnect_checks = 0
+    chunks: list[str] = []
 
     async def fake_workflow_stream():
         started.set()
@@ -1296,7 +1297,6 @@ def test_stream_disconnect_forwarder_cancels_workflow_task(
     )
 
     async def collect_chunks() -> list[str]:
-        chunks: list[str] = []
         async for chunk in chat_api_module._forward_stream_with_disconnect_cancellation(
             workflow_stream=fake_workflow_stream(),
             disconnect_checker=fake_disconnect_checker,
@@ -1306,7 +1306,8 @@ def test_stream_disconnect_forwarder_cancels_workflow_task(
             chunks.append(chunk)
         return chunks
 
-    chunks = asyncio.run(collect_chunks())
+    with pytest.raises(asyncio.CancelledError, match="Client disconnected"):
+        asyncio.run(collect_chunks())
 
     assert chunks == []
     assert started.is_set()
@@ -1320,6 +1321,7 @@ def test_stream_disconnect_forwarder_cancels_after_emitting_a_chunk(
     started = asyncio.Event()
     cancelled = asyncio.Event()
     disconnect_checks = 0
+    chunks: list[str] = []
 
     async def fake_workflow_stream():
         yield "chunk-1"
@@ -1345,7 +1347,6 @@ def test_stream_disconnect_forwarder_cancels_after_emitting_a_chunk(
     )
 
     async def collect_chunks() -> list[str]:
-        chunks: list[str] = []
         async for chunk in chat_api_module._forward_stream_with_disconnect_cancellation(
             workflow_stream=fake_workflow_stream(),
             disconnect_checker=fake_disconnect_checker,
@@ -1355,7 +1356,8 @@ def test_stream_disconnect_forwarder_cancels_after_emitting_a_chunk(
             chunks.append(chunk)
         return chunks
 
-    chunks = asyncio.run(collect_chunks())
+    with pytest.raises(asyncio.CancelledError, match="Client disconnected"):
+        asyncio.run(collect_chunks())
 
     assert chunks == ["chunk-1"]
     assert started.is_set()

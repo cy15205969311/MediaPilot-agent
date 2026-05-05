@@ -593,6 +593,28 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 前端点击停止或浏览器断开连接时，后端会主动取消生产任务，避免死连接继续在后台白白推流
 - `CancelledError` 必须沿取消链路显式透传，不能被误吞成普通异常再触发通用兜底
 
+### 7.28 全异步可取消工作流基线
+
+- `app/services/graph/provider.py` 中的工具执行节点已切换为 `execute_business_tool_async(...)`，不再依赖 `asyncio.to_thread(...)` 包裹同步业务工具
+- `app/services/tools.py` 已为 Tavily 搜索、提示词技能提取与 OpenAI 兼容调用补齐异步版本，断连取消可以继续向下游传播
+- 对于搜索、生图、外部 API 访问这类耗时节点，优先使用异步 HTTP 与异步 SDK，避免同步阻塞吞掉 `CancelledError`
+- 停止按钮、浏览器断连与后端流式取消现在属于同一条取消链路，不能在中途被当成普通异常改走兜底逻辑
+
+### 7.29 LangGraph 图文串联执行基线
+
+- `GraphState` 当前新增 `execution_plan` 与 `active_execution_step`
+- 路由节点可以把“先写正文、再生成配图”这类复合请求拆成有序计划，例如 `["draft_content", "generate_image"]`
+- 纯生图请求仍然保持单步计划，直接进入出图链路
+- 审稿节点、结构化产物节点与生图节点都需要正确弹出已完成步骤，避免回路重复触发高成本节点
+- 当前图文串联的前端表现是渐进式产物更新：正文可先出现，配图随后补齐
+
+### 7.30 创作者长文本折叠展示基线
+
+- `frontend/src/app/components/CollapsibleText.tsx` 是统一的长文本折叠组件
+- 聊天气泡中的 `tool / note / error` 消息以及普通对话正文，超过阈值后会自动折叠并提供展开入口
+- `ContentGenerationArtifact` 与 `ImageGenerationArtifact` 会对长提示词、优化后提示词、正文草稿和平台引导语做同样的折叠处理
+- 折叠展示必须保留原始换行与复制行为，不能为了缩短 UI 而破坏提示词原文结构
+
 ## 8. 后端边界与分层规则
 
 ### 8.1 路由分组
