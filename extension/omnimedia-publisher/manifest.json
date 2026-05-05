@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OmniMedia Publisher",
-  "description": "将 OmniMedia 工作台生成的图文内容带到小红书创作者中心，提供安全的一键复制辅助。",
-  "version": "0.1.0",
+  "description": "Bring OmniMedia drafts into Xiaohongshu Creator Center with a safe copy-assist flow.",
+  "version": "0.1.1",
   "permissions": ["tabs", "scripting", "storage", "clipboardWrite"],
   "host_permissions": [
     "http://localhost:5173/*",

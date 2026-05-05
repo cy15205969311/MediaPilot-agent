@@ -5,6 +5,7 @@ const PUBLISH_STATUS_TYPE = "OMNIMEDIA_PUBLISH_STATUS";
 const TASKS_STORAGE_KEY = "omnimedia_publish_tasks";
 const READY_TABS_STORAGE_KEY = "omnimedia_ready_tabs";
 const XIAOHONGSHU_PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish";
+const BRIDGE_SCRIPT_FILE = "bridge.js";
 const WORKSPACE_URL_PREFIXES = [
   "http://localhost:5173/",
   "http://127.0.0.1:5173/",
@@ -85,6 +86,15 @@ async function findTaskByTabId(tabId) {
   return null;
 }
 
+async function findTaskById(taskId) {
+  if (typeof taskId !== "string" || !taskId.trim()) {
+    return null;
+  }
+
+  const tasks = await getStoredTasks();
+  return tasks[taskId] ?? null;
+}
+
 function normalizePayload(payload) {
   const title = typeof payload?.title === "string" ? payload.title.trim() : "";
   const content = typeof payload?.content === "string" ? payload.content.trim() : "";
@@ -121,8 +131,46 @@ async function findWorkspaceTab() {
   return allTabs.find((tab) => tab.active && isWorkspaceTab(tab)) ?? allTabs.find(isWorkspaceTab) ?? null;
 }
 
+async function injectBridgeIntoTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [BRIDGE_SCRIPT_FILE],
+    });
+  } catch (error) {
+    console.warn("[OmniMedia Publisher] Failed to inject bridge script into workspace tab", {
+      tabId,
+      error,
+    });
+  }
+}
+
+async function injectBridgeIntoOpenWorkspaceTabs() {
+  const tabs = await chrome.tabs.query({});
+  const workspaceTabs = tabs.filter((tab) => typeof tab.id === "number" && isWorkspaceTab(tab));
+
+  await Promise.all(workspaceTabs.map((tab) => injectBridgeIntoTab(tab.id)));
+}
+
 async function forwardPublishStatus(message) {
-  const workspaceTab = await findWorkspaceTab();
+  const relatedTask = await findTaskById(message.taskId);
+  let workspaceTab = null;
+
+  if (typeof relatedTask?.workspaceTabId === "number") {
+    try {
+      workspaceTab = await chrome.tabs.get(relatedTask.workspaceTabId);
+    } catch (error) {
+      console.warn("[OmniMedia Publisher] Original workspace tab is no longer available", {
+        taskId: message.taskId,
+        workspaceTabId: relatedTask.workspaceTabId,
+        error,
+      });
+    }
+  }
+
+  if (!workspaceTab?.id) {
+    workspaceTab = await findWorkspaceTab();
+  }
 
   if (!workspaceTab?.id) {
     console.warn("[OmniMedia Publisher] Workspace tab not found for publish status", message);
@@ -205,7 +253,7 @@ async function dispatchTaskToTab(tabId) {
   }
 }
 
-async function queuePublishTask(payload) {
+async function queuePublishTask(payload, workspaceTabId = null) {
   const normalizedPayload = normalizePayload(payload);
 
   if (
@@ -224,6 +272,7 @@ async function queuePublishTask(payload) {
   const task = {
     id: crypto.randomUUID(),
     tabId: tab.id,
+    workspaceTabId: typeof workspaceTabId === "number" ? workspaceTabId : null,
     payload: normalizedPayload,
     status: "pending",
     createdAt: Date.now(),
@@ -241,9 +290,17 @@ async function queuePublishTask(payload) {
   };
 }
 
+chrome.runtime.onInstalled.addListener(() => {
+  void injectBridgeIntoOpenWorkspaceTabs();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void injectBridgeIntoOpenWorkspaceTabs();
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.action === PUBLISH_ACTION) {
-    void queuePublishTask(message.payload)
+    void queuePublishTask(message.payload, sender.tab?.id)
       .then((result) => {
         sendResponse(
           createResponse(true, "发布辅助任务已入队，正在打开小红书发布页。", result),

@@ -1,4 +1,14 @@
 (function bridgePublisher() {
+  const BRIDGE_READY_FLAG = "__OMNIMEDIA_PUBLISHER_BRIDGE_READY__";
+
+  if (typeof window !== "undefined" && window[BRIDGE_READY_FLAG]) {
+    return;
+  }
+
+  if (typeof window !== "undefined") {
+    window[BRIDGE_READY_FLAG] = true;
+  }
+
   const PUBLISH_ACTION = "OMNIMEDIA_PUBLISH";
   const PUBLISH_TASK_TYPE = "@@OMNIMEDIA/PUBLISH_TASK";
   const PUBLISH_STATUS_TYPE = "OMNIMEDIA_PUBLISH_STATUS";
@@ -159,6 +169,7 @@
   }
 
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    console.log("[OmniMedia Bridge] Bridge script attached to current workspace page.");
     window.addEventListener("message", (event) => {
       try {
         handleWorkspacePublishTask(event);

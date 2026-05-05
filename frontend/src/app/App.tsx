@@ -192,6 +192,7 @@ type MaterialCaptureSource = "picker" | "paste" | "drop";
 const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
 const LEGACY_QWEN_MODEL_STORAGE_KEY = "omnimedia_qwen_model_override";
 const XIAOHONGSHU_CREATOR_URL = "https://creator.xiaohongshu.com/publish/publish";
+const PUBLISH_EXTENSION_RESPONSE_TIMEOUT_MS = 2500;
 const MAX_IMAGE_MATERIALS = 9;
 const MAX_FILES_PER_CAPTURE = 12;
 const IMAGE_LIMIT_WARNING_MESSAGE =
@@ -1386,6 +1387,7 @@ function App() {
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const textInputRef = useRef<HTMLInputElement | null>(null);
   const streamingStartedAtRef = useRef<number | null>(null);
+  const publishResponseTimeoutRef = useRef<number | null>(null);
 
   const requestActiveStreamStop = () => {
     const activeStreamingThreadId = streamingThreadIdRef.current?.trim();
@@ -1455,6 +1457,15 @@ function App() {
     },
     [],
   );
+
+  const clearPublishResponseTimeout = useCallback(() => {
+    if (publishResponseTimeoutRef.current === null) {
+      return;
+    }
+
+    window.clearTimeout(publishResponseTimeoutRef.current);
+    publishResponseTimeoutRef.current = null;
+  }, []);
 
   const handlePremiumUpgradePrompt = useCallback(
     (messageText = PREMIUM_MODEL_ACCESS_DENIED_MESSAGE) => {
@@ -1626,6 +1637,8 @@ function App() {
         return;
       }
 
+      clearPublishResponseTimeout();
+
       const status =
         typeof publishEvent.payload.status === "string" ? publishEvent.payload.status : "";
       const messageText =
@@ -1670,7 +1683,9 @@ function App() {
 
     window.addEventListener("message", handlePublisherMessage);
     return () => window.removeEventListener("message", handlePublisherMessage);
-  }, []);
+  }, [clearPublishResponseTimeout]);
+
+  useEffect(() => () => clearPublishResponseTimeout(), [clearPublishResponseTimeout]);
 
   useEffect(() => {
     if (!publishToast || publishToast.error === "NEED_LOGIN") {
@@ -3808,6 +3823,9 @@ function App() {
       return;
     }
 
+    clearPublishResponseTimeout();
+    setPublishToast(null);
+
     window.postMessage(
       {
         type: "@@OMNIMEDIA/PUBLISH_TASK",
@@ -3821,9 +3839,14 @@ function App() {
       window.location.origin,
     );
 
-    setStatusText(
-      "已向 OmniMedia Publisher 插件发送发布指令；若浏览器未自动打开小红书，请确认扩展已加载。",
-    );
+    setStatusText("正在唤起 OmniMedia Publisher 插件...");
+    publishResponseTimeoutRef.current = window.setTimeout(() => {
+      publishResponseTimeoutRef.current = null;
+      const timeoutMessage =
+        "未检测到 OmniMedia Publisher 响应。若刚加载或更新扩展，请刷新当前工作台页面，并确认当前地址已被扩展允许。";
+      setStatusText(timeoutMessage);
+      pushGlobalToast("warning", "发布插件未响应", timeoutMessage);
+    }, PUBLISH_EXTENSION_RESPONSE_TIMEOUT_MS);
   };
 
   const artifactActions: ArtifactAction[] = useMemo(() => {
