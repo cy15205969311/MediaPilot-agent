@@ -52,6 +52,7 @@ import {
   getStoredToken,
   getStoredUser,
   isInsufficientTokensError,
+  isAbortLikeError,
   isUnauthorizedError,
   login,
   logoutAPI,
@@ -1406,6 +1407,18 @@ function App() {
       requestActiveStreamStop();
     }
     cancelActiveStream();
+  };
+
+  const shouldTreatStreamTerminationAsAbort = (error: unknown) => {
+    if (isAbortLikeError(error)) {
+      return true;
+    }
+
+    return (
+      stopRequestedRef.current &&
+      error instanceof APIError &&
+      (error.code === "STREAM_INCOMPLETE" || error.code === "STREAM_BROKEN")
+    );
   };
 
   const isAuthenticated = Boolean(
@@ -4152,7 +4165,9 @@ function App() {
       await loadThreads(nextThreadId, true, activeTopicId);
       await refreshCurrentUserProfile({ silent: true });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
+      const shouldTreatAsStopped = shouldTreatStreamTerminationAsAbort(error);
+
+      if (shouldTreatAsStopped) {
         finalizeStreamingUiAfterAbort({
           manual: stopRequestedRef.current,
           appendNotice: false,
@@ -4192,7 +4207,7 @@ function App() {
           createdAt: new Date().toISOString(),
         });
       }
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
+      if (!shouldTreatAsStopped) {
         setIsStreaming(false);
         assistantMessageIdRef.current = null;
       }

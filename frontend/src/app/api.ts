@@ -227,6 +227,24 @@ export function consumeFrozenAccountNotice(): string | null {
   }
 }
 
+function createAbortError(): DOMException | Error {
+  try {
+    return new DOMException("The operation was aborted.", "AbortError");
+  } catch {
+    const error = new Error("The operation was aborted.");
+    error.name = "AbortError";
+    return error;
+  }
+}
+
+export function isAbortLikeError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError") ||
+    (error instanceof APIError && error.code === "REQUEST_ABORTED")
+  );
+}
+
 export function getFrozenAccountReason(): string {
   return ACCOUNT_FROZEN_REASON;
 }
@@ -1464,6 +1482,10 @@ export async function createChatStream(
   }
 
   if (!receivedDoneEvent) {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+
     throw new APIError("流式传输提前结束，请稍后重试。", {
       status: 0,
       code: "STREAM_INCOMPLETE",
