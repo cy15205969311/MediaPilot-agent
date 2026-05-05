@@ -13,10 +13,12 @@ import type {
   UiPlatform,
   UiTaskType,
 } from "../types";
+import type { StreamingUiState } from "../streamingUi";
 import { CommentReplyArtifact } from "./artifacts/CommentReplyArtifact";
 import { CitationAuditPanel } from "./CitationAuditPanel";
 import { ContentGenerationArtifact } from "./artifacts/ContentGenerationArtifact";
 import { HotPostAnalysisArtifact } from "./artifacts/HotPostAnalysisArtifact";
+import { ImageGenerationArtifact } from "./artifacts/ImageGenerationArtifact";
 import { TopicPlanningArtifact } from "./artifacts/TopicPlanningArtifact";
 
 type ArtifactTaskEntry = {
@@ -34,6 +36,7 @@ type RightPanelProps = {
   artifactEntries: ArtifactTaskEntry[];
   artifactActions: ArtifactAction[];
   isStreaming: boolean;
+  streamingUiState?: StreamingUiState | null;
   onSelectArtifactTaskType: (taskType: UiTaskType) => void;
   onRequestArtifactHandoff: (taskType: UiTaskType) => void;
   onClose: () => void;
@@ -57,6 +60,12 @@ function renderArtifactPanel(
       return (
         <HotPostAnalysisArtifact
           artifact={artifact?.artifact_type === "hot_post_analysis" ? artifact : null}
+        />
+      );
+    case "image_generation":
+      return (
+        <ImageGenerationArtifact
+          artifact={artifact?.artifact_type === "image_result" ? artifact : null}
         />
       );
     case "comment_reply":
@@ -84,6 +93,10 @@ function getPlatformLabel(platform: UiPlatform) {
 }
 
 function getArtifactTabLabel(taskType: UiTaskType) {
+  if (taskType === "image_generation") {
+    return "图片结果";
+  }
+
   switch (taskType) {
     case "topic_planning":
       return "选题方案";
@@ -137,6 +150,7 @@ export function RightPanel({
   artifactEntries,
   artifactActions,
   isStreaming,
+  streamingUiState,
   onSelectArtifactTaskType,
   onRequestArtifactHandoff,
   onClose,
@@ -151,23 +165,26 @@ export function RightPanel({
     selectedArtifactTaskType === "comment_reply" &&
     !selectedArtifact &&
     Boolean(contentArtifact);
+  const imageStreamingUiState =
+    isStreaming &&
+    selectedArtifactTaskType === "image_generation" &&
+    streamingUiState?.variant === "image"
+      ? streamingUiState
+      : null;
 
   return (
     <>
       <aside
-        className={`fixed inset-y-16 right-0 z-40 w-full max-w-md border-l border-border bg-card shadow-sm transition-transform duration-300 xl:static xl:shrink-0 xl:translate-x-0 xl:transition-[width,border-color] xl:duration-300 ${
-          open ? "translate-x-0" : "translate-x-full"
-        } ${
-          isDesktopCollapsed
+        className={`fixed inset-y-16 right-0 z-40 w-full max-w-md border-l border-border bg-card shadow-sm transition-transform duration-300 xl:static xl:shrink-0 xl:translate-x-0 xl:transition-[width,border-color] xl:duration-300 ${open ? "translate-x-0" : "translate-x-full"
+          } ${isDesktopCollapsed
             ? "xl:w-0 xl:max-w-none xl:border-l-transparent"
             : "xl:w-[28rem] xl:max-w-[28rem]"
-        }`}
+          }`}
         data-testid="right-panel"
       >
         <div
-          className={`flex h-full flex-col overflow-hidden transition-opacity duration-200 ${
-            isDesktopCollapsed ? "xl:pointer-events-none xl:opacity-0" : "opacity-100"
-          }`}
+          className={`flex h-full flex-col overflow-hidden transition-opacity duration-200 ${isDesktopCollapsed ? "xl:pointer-events-none xl:opacity-0" : "opacity-100"
+            }`}
         >
           <div className="flex items-start justify-between border-b border-border px-5 py-5">
             <div className="min-w-0">
@@ -213,10 +230,42 @@ export function RightPanel({
               </div>
             </div>
 
+            {imageStreamingUiState ? (
+              <div className="mb-4 rounded-[28px] border border-brand/15 bg-[linear-gradient(135deg,rgba(255,247,237,0.96),rgba(255,255,255,0.98)_62%,rgba(255,244,214,0.96))] p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[11px] font-medium text-brand shadow-sm">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      {imageStreamingUiState.auxiliaryLabel}
+                    </div>
+                    <div className="mt-3 text-base font-semibold text-foreground">
+                      {imageStreamingUiState.headline}
+                    </div>
+                    <div className="mt-1 text-sm leading-6 text-muted-foreground">
+                      {imageStreamingUiState.detail}
+                    </div>
+                  </div>
+                  <div className="rounded-full bg-white/85 px-3 py-1 text-[11px] font-medium text-brand shadow-sm">
+                    {imageStreamingUiState.elapsedLabel}
+                  </div>
+                </div>
+                <div className="mt-4 flex items-center justify-between gap-3 text-[11px] font-medium text-muted-foreground">
+                  <span>{imageStreamingUiState.phaseLabel}</span>
+                  <span>{imageStreamingUiState.progressPercent}%</span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/70">
+                  <div
+                    className="h-full rounded-full bg-[var(--brand-gradient)] transition-[width] duration-500"
+                    style={{ width: `${imageStreamingUiState.progressPercent}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
+
             {artifactEntries.length > 0 ? (
               <div className="mb-4">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                  Thread Asset Matrix
+                  会话资产导航
                 </div>
                 <div className="flex flex-wrap gap-2 rounded-[24px] bg-muted p-2">
                   {artifactEntries.map((entry) => {
@@ -224,11 +273,10 @@ export function RightPanel({
                     return (
                       <button
                         key={entry.taskType}
-                        className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
-                          isActive
-                            ? "bg-card text-foreground shadow-sm"
-                            : "text-muted-foreground hover:text-foreground"
-                        }`}
+                        className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${isActive
+                          ? "bg-card text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                          }`}
                         onClick={() => onSelectArtifactTaskType(entry.taskType)}
                         type="button"
                       >
@@ -265,7 +313,7 @@ export function RightPanel({
                   资产包状态
                 </div>
                 <div className="text-sm leading-6 text-muted-foreground">
-                  当前会话里的结构化产物会保留在此处。你可以在本地 Tab 之间切换查看不同阶段的结果，再决定继续改写、导出或发起下一棒接力任务。
+                  当前会话中的结构化产物会保留在这里。你可以在不同标签间切换查看各阶段结果，再决定继续改写、导出，或发起下一棒接力任务。
                 </div>
               </div>
             ) : null}
@@ -277,11 +325,10 @@ export function RightPanel({
                 {artifactActions.map((action) => (
                   <button
                     key={action.id}
-                    className={`rounded-2xl px-4 py-3 text-sm font-medium transition ${
-                      action.variant === "primary"
-                        ? "bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
-                        : "border border-border bg-card text-card-foreground hover:bg-muted"
-                    }`}
+                    className={`rounded-2xl px-4 py-3 text-sm font-medium transition ${action.variant === "primary"
+                      ? "bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
+                      : "border border-border bg-card text-card-foreground hover:bg-muted"
+                      }`}
                     data-testid={`artifact-action-${action.id}`}
                     onClick={action.onClick}
                     type="button"

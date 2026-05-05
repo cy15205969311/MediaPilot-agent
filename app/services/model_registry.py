@@ -49,6 +49,9 @@ MODEL_PRIORITY = {
     "deepseek-reasoner": 1,
     "gpt-5.4": 0,
     "gpt-5.4-mini": 1,
+    "gpt-5.3-codex": 2,
+    "gpt-5.3-codex-spark": 3,
+    "gpt-5.2": 4,
     "qwen-max": 0,
     "qwen-plus": 1,
     "qwen-turbo": 2,
@@ -78,7 +81,8 @@ STATUS_UNCONFIGURED_LABEL = "\u9700\u8981\u914d\u7f6e"
 DASHSCOPE_PROVIDER_LABEL = "\u963f\u91cc\u767e\u70bc (DashScope)"
 MIMO_PROVIDER_LABEL = "\u5c0f\u7c73 MiMo (Compatible API)"
 DEEPSEEK_PROVIDER_LABEL = "DeepSeek"
-PROXY_GPT_PROVIDER_LABEL = "GPT-5.4 Proxy"
+PROXY_GPT_PROVIDER_LABEL = "OpenAI Proxy"
+PROXY_GPT_EXCLUDED_MODELS = frozenset({"gpt-5.5"})
 
 _MIMO_MODEL_SPECS = (
     {
@@ -98,6 +102,39 @@ _MIMO_MODEL_SPECS = (
         "name": "MiMo V2 Omni",
         "group": OMNI_MODEL_GROUP,
         "tags": (TAG_MULTIMODAL, TAG_VISION),
+    },
+)
+
+_PROXY_GPT_MODEL_SPECS = (
+    {
+        "model": "gpt-5.4",
+        "name": "GPT 5.4",
+        "group": TEXT_MODEL_GROUP,
+        "tags": (TAG_FLAGSHIP, TAG_PRODUCTIVITY),
+    },
+    {
+        "model": "gpt-5.4-mini",
+        "name": "GPT 5.4 Mini",
+        "group": TEXT_MODEL_GROUP,
+        "tags": (TAG_FAST, TAG_PRODUCTIVITY),
+    },
+    {
+        "model": "gpt-5.3-codex",
+        "name": "GPT 5.3 Codex",
+        "group": TEXT_MODEL_GROUP,
+        "tags": ("代码", "推理", TAG_PRODUCTIVITY),
+    },
+    {
+        "model": "gpt-5.3-codex-spark",
+        "name": "GPT 5.3 Codex Spark",
+        "group": TEXT_MODEL_GROUP,
+        "tags": ("代码", "推理", "逻辑"),
+    },
+    {
+        "model": "gpt-5.2",
+        "name": "GPT 5.2",
+        "group": TEXT_MODEL_GROUP,
+        "tags": ("日常", "均衡", TAG_PRODUCTIVITY),
     },
 )
 
@@ -393,10 +430,13 @@ def _format_model_display_name(model_name: str) -> str:
         "mt": "MT",
         "omni": "Omni",
         "coder": "Coder",
+        "codex": "Codex",
         "math": "Math",
+        "mini": "Mini",
         "flash": "Flash",
         "plus": "Plus",
         "max": "Max",
+        "spark": "Spark",
         "turbo": "Turbo",
         "preview": "Preview",
         "thinking": "Thinking",
@@ -485,9 +525,9 @@ def _infer_model_tags(model_name: str) -> tuple[str, ...]:
     group = _infer_model_group(model_name)
     tags.append(group)
 
-    if "coder" in lowered:
+    if "coder" in lowered or "codex" in lowered:
         tags.append("代码")
-    if "math" in lowered or "thinking" in lowered:
+    if "math" in lowered or "thinking" in lowered or "spark" in lowered:
         tags.append("推理")
     if "mt" in lowered or "translate" in lowered:
         tags.append("翻译")
@@ -502,7 +542,7 @@ def _infer_model_tags(model_name: str) -> tuple[str, ...]:
         tags.append("旗舰")
     elif "plus" in lowered:
         tags.append("均衡")
-    elif "flash" in lowered or "turbo" in lowered or "lite" in lowered:
+    elif "flash" in lowered or "turbo" in lowered or "lite" in lowered or "mini" in lowered:
         tags.append("高速")
 
     if "preview" in lowered:
@@ -604,13 +644,7 @@ def _compatible_is_configured() -> bool:
         return False
     if _is_dashscope_compatible_base_url(llm_base_url):
         return False
-
-    provider_name = os.getenv("OMNIMEDIA_LLM_PROVIDER", "").strip().lower()
-    if provider_name in {"compatible", "xiaomi", "auto"}:
-        return True
-    if provider_name in {"langgraph", "graph"}:
-        return _resolve_langgraph_inner_provider_key() in {"compatible", "xiaomi"}
-    return False
+    return True
 
 
 def _deepseek_is_configured() -> bool:
@@ -781,6 +815,19 @@ def _build_configurable_provider(
     )
 
 
+def _merge_model_specs(*spec_groups: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ...]:
+    merged_specs: list[dict[str, object]] = []
+    seen_models: set[str] = set()
+    for spec_group in spec_groups:
+        for spec in spec_group:
+            model_name = str(spec.get("model", "")).strip()
+            if not model_name or model_name in seen_models:
+                continue
+            seen_models.add(model_name)
+            merged_specs.append(dict(spec))
+    return tuple(merged_specs)
+
+
 def _build_deepseek_provider() -> RegisteredProvider:
     default_model = _resolve_deepseek_default_model()
     available_models = get_deepseek_available_models()
@@ -801,10 +848,17 @@ def _build_deepseek_provider() -> RegisteredProvider:
 def _build_proxy_gpt_provider() -> RegisteredProvider:
     default_model = _resolve_proxy_gpt_default_model()
     available_models = get_proxy_gpt_available_models()
-    specs = _build_env_model_specs(
-        default_model,
-        *available_models,
-        os.getenv("PROXY_GPT_ARTIFACT_MODEL", "").strip(),
+    specs = tuple(
+        spec
+        for spec in _merge_model_specs(
+            _PROXY_GPT_MODEL_SPECS,
+            _build_env_model_specs(
+                default_model,
+                *available_models,
+                os.getenv("PROXY_GPT_ARTIFACT_MODEL", "").strip(),
+            ),
+        )
+        if str(spec.get("model", "")).strip() not in PROXY_GPT_EXCLUDED_MODELS
     )
     return _build_configurable_provider(
         provider_key="proxy_gpt",

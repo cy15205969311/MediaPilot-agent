@@ -17,9 +17,11 @@ import type {
   ArtifactPayload,
   AuthenticatedUser,
   ConversationMessage,
+  ImageGenerationArtifactPayload,
   MediaChatMaterialPayload,
   ToolCallTraceItem,
 } from "../types";
+import type { StreamingUiState } from "../streamingUi";
 import { CitationAuditPanel } from "./CitationAuditPanel";
 import { CopyButton } from "./CopyButton";
 import { ImagePreviewModal } from "./ImagePreviewModal";
@@ -31,6 +33,7 @@ type ChatFeedProps = {
   artifact: ArtifactPayload | null;
   toolCallTimeline: ToolCallTraceItem[];
   isStreaming: boolean;
+  streamingUiState?: StreamingUiState | null;
   isLoadingHistory?: boolean;
   endRef: RefObject<HTMLDivElement>;
   onSaveArtifactAsTemplate?: () => void;
@@ -40,6 +43,9 @@ const TOOL_LABEL_MAP: Record<string, string> = {
   parse_materials: "整理附件素材",
   parse_document: "解析文档内容",
   video_transcription: "转写视频语音",
+  audio_transcription: "转写音频语音",
+  video_validation: "校验视频素材",
+  audio_validation: "校验音频素材",
   ocr: "识别图片文字",
   web_search: "检索全网信息",
   retrieve_knowledge_base: "检索知识库",
@@ -47,6 +53,8 @@ const TOOL_LABEL_MAP: Record<string, string> = {
   generate_content_outline: "生成内容大纲",
   generate_draft: "生成正文草稿",
   review_draft: "审查草稿质量",
+  build_image_prompt: "提炼配图提示词",
+  generate_cover_images: "生成内容配图",
   format_artifact: "整理结构化产物",
 };
 
@@ -248,10 +256,80 @@ function renderMessageMaterials(
 }
 
 function getArtifactGeneratedImages(artifact: ArtifactPayload | null): string[] {
-  if (!artifact || artifact.artifact_type !== "content_draft") {
+  if (!artifact) {
     return [];
   }
-  return artifact.generated_images ?? [];
+
+  if (artifact.artifact_type === "content_draft" || artifact.artifact_type === "image_result") {
+    return artifact.generated_images ?? [];
+  }
+
+  return [];
+}
+
+function getProcessingImageArtifact(
+  artifact: ArtifactPayload | null,
+): ImageGenerationArtifactPayload | null {
+  if (!artifact || artifact.artifact_type !== "image_result") {
+    return null;
+  }
+  if (artifact.status !== "processing") {
+    return null;
+  }
+  return artifact;
+}
+
+function getProcessingImageProgressPercent(
+  artifact: ImageGenerationArtifactPayload | null,
+): number {
+  if (typeof artifact?.progress_percent !== "number" || Number.isNaN(artifact.progress_percent)) {
+    return 18;
+  }
+  return Math.min(100, Math.max(0, Math.round(artifact.progress_percent)));
+}
+
+function ProcessingImagePreview(props: { artifact: ImageGenerationArtifactPayload }) {
+  const { artifact } = props;
+  const progressMessage =
+    artifact.progress_message?.trim() || "云端 GPU 正在分配算力，马上开始渲染首版画面。";
+  const progressPercent = getProcessingImageProgressPercent(artifact);
+
+  return (
+    <div
+      className="mt-4 max-w-md overflow-hidden rounded-[24px] border border-border/70 bg-[linear-gradient(140deg,rgba(255,248,240,0.96),rgba(255,255,255,0.98)_58%,rgba(255,241,220,0.96))] p-3 shadow-sm"
+      data-testid="chat-processing-image-skeleton"
+    >
+      <div className="relative overflow-hidden rounded-[20px] border border-white/80 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.96),rgba(255,241,220,0.9)_46%,rgba(255,224,188,0.92))]">
+        <div className="aspect-square w-full" />
+        <div className="pointer-events-none absolute inset-0 animate-pulse bg-[linear-gradient(135deg,rgba(255,255,255,0.16),rgba(255,255,255,0.03)_42%,rgba(255,214,153,0.18))]" />
+        <div className="absolute inset-4 flex flex-col justify-between">
+          <div className="inline-flex w-fit items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[11px] font-medium text-brand shadow-sm">
+            <Sparkles className="h-3.5 w-3.5" />
+            正在云端精绘
+          </div>
+          <div className="space-y-2">
+            <div className="h-2.5 w-24 rounded-full bg-white/85" />
+            <div className="h-2.5 w-3/4 rounded-full bg-white/70" />
+            <div className="h-2.5 w-2/3 rounded-full bg-white/55" />
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center justify-between gap-3 text-xs">
+        <div className="font-medium text-foreground">图片结果将在这里自动出现</div>
+        <div className="rounded-full bg-white/85 px-2.5 py-1 font-medium text-brand shadow-sm">
+          {progressPercent}%
+        </div>
+      </div>
+      <div className="mt-1 text-xs leading-5 text-muted-foreground">{progressMessage}</div>
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/80">
+        <div
+          className="h-full rounded-full bg-[var(--brand-gradient)] transition-[width] duration-500"
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 function ThinkingPanel({
@@ -390,6 +468,7 @@ export function ChatFeed({
   artifact,
   toolCallTimeline,
   isStreaming,
+  streamingUiState,
   isLoadingHistory = false,
   endRef,
   onSaveArtifactAsTemplate,
@@ -409,6 +488,8 @@ export function ChatFeed({
 
   const userDisplayName = getDisplayName(currentUser) || "User";
   const showUserAvatar = Boolean(resolvedUserAvatarUrl) && !hasUserAvatarError;
+  const imageStreamingUiState =
+    streamingUiState?.variant === "image" ? streamingUiState : null;
   const latestAssistantMessageId = [...messages]
     .reverse()
     .find((item) => item.role === "assistant")?.id;
@@ -483,6 +564,8 @@ export function ChatFeed({
           Boolean(artifact) &&
           Boolean(onSaveArtifactAsTemplate) &&
           item.id === latestAssistantMessageId;
+        const processingImageArtifact =
+          item.role === "assistant" ? getProcessingImageArtifact(item.artifact ?? null) : null;
         const artifactGeneratedImages =
           item.role === "assistant" ? getArtifactGeneratedImages(item.artifact ?? null) : [];
         const shouldRenderAssistantActions =
@@ -540,6 +623,9 @@ export function ChatFeed({
                     </span>
                   )}
                 </div>
+                {processingImageArtifact && artifactGeneratedImages.length === 0 ? (
+                  <ProcessingImagePreview artifact={processingImageArtifact} />
+                ) : null}
                 {artifactGeneratedImages.length > 0 ? (
                   <div className="mt-4">
                     <div
@@ -644,7 +730,13 @@ export function ChatFeed({
       })}
 
       {isStreaming ? (
-        <div className="flex items-center gap-3 text-sm text-muted-foreground">
+        <div
+          className={`flex items-start gap-3 rounded-2xl px-4 py-3 text-sm ${
+            imageStreamingUiState
+              ? "border border-brand/15 bg-[linear-gradient(135deg,rgba(255,247,237,0.92),rgba(255,255,255,0.96)_62%,rgba(255,244,214,0.92))] text-foreground"
+              : "text-muted-foreground"
+          }`}
+        >
           <div className="flex gap-1">
             <div className="h-2 w-2 animate-bounce rounded-full bg-brand" />
             <div
@@ -656,7 +748,23 @@ export function ChatFeed({
               style={{ animationDelay: "240ms" }}
             />
           </div>
-          <span>Agent 正在生成内容和结构化结果...</span>
+          {imageStreamingUiState ? (
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-foreground">
+                  {imageStreamingUiState.headline}
+                </span>
+                <span className="rounded-full bg-white/85 px-2 py-1 text-[11px] font-medium text-brand shadow-sm">
+                  {imageStreamingUiState.elapsedLabel}
+                </span>
+              </div>
+              <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                {imageStreamingUiState.detail}
+              </div>
+            </div>
+          ) : (
+            <span>{streamingUiState?.footerText ?? "Agent 正在生成内容和结构化结果..."}</span>
+          )}
         </div>
       ) : null}
 

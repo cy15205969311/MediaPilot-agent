@@ -142,6 +142,7 @@ import {
   PREMIUM_MODEL_ACCESS_DENIED_MESSAGE,
   PREMIUM_MODEL_FALLBACK_NOTICE,
 } from "./modelAccess";
+import { buildStreamingUiState } from "./streamingUi";
 import { cleanForPublishing } from "./utils/textUtils";
 
 type AuthMode =
@@ -265,6 +266,8 @@ function getTaskTypeLabel(taskType: UiTaskType): string {
   switch (taskType) {
     case "topic_planning":
       return "选题策划";
+    case "image_generation":
+      return "图片生成";
     case "hot_post_analysis":
       return "爆款拆解";
     case "comment_reply":
@@ -279,6 +282,8 @@ function getTaskTypeFromArtifact(artifact: ArtifactPayload): UiTaskType {
   switch (artifact.artifact_type) {
     case "topic_list":
       return "topic_planning";
+    case "image_result":
+      return "image_generation";
     case "hot_post_analysis":
       return "hot_post_analysis";
     case "comment_reply":
@@ -289,8 +294,22 @@ function getTaskTypeFromArtifact(artifact: ArtifactPayload): UiTaskType {
   }
 }
 
+function getArtifactStreamStatusText(artifact: ArtifactPayload): string {
+  if (artifact.artifact_type === "image_result") {
+    if (artifact.status === "processing") {
+      return (
+        artifact.progress_message?.trim() || "图片方案已同步，正在云端渲染最终画面"
+      );
+    }
+    return "图片结果已更新，可在右侧查看高清图与提示词";
+  }
+
+  return "结构化结果已更新，可在右侧继续编辑或导出";
+}
+
 const ARTIFACT_TASK_DISPLAY_ORDER: UiTaskType[] = [
   "content_generation",
+  "image_generation",
   "comment_reply",
   "topic_planning",
   "hot_post_analysis",
@@ -935,6 +954,10 @@ function summarizeArtifactForTemplate(artifact: ArtifactPayload): string {
     return artifact.body.trim().slice(0, 180);
   }
 
+  if (artifact.artifact_type === "image_result") {
+    return artifact.prompt.trim().slice(0, 180);
+  }
+
   if (artifact.artifact_type === "topic_list") {
     return artifact.topics
       .slice(0, 3)
@@ -1268,6 +1291,7 @@ function App() {
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
   const [toolCallTimeline, setToolCallTimeline] = useState<ToolCallTraceItem[]>([]);
   const [statusText, setStatusText] = useState("等待新的内容任务");
+  const [streamingElapsedSeconds, setStreamingElapsedSeconds] = useState(0);
   const [publishToast, setPublishToast] = useState<PublishToastState | null>(null);
   const [activeThreadTitle, setActiveThreadTitle] = useState("New thread");
   const [activeThreadId, setActiveThreadId] = useState("thread-new");
@@ -1336,6 +1360,7 @@ function App() {
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const textInputRef = useRef<HTMLInputElement | null>(null);
+  const streamingStartedAtRef = useRef<number | null>(null);
 
   const cancelActiveStream = () => {
     if (!abortRef.current) {
@@ -1388,6 +1413,15 @@ function App() {
     setStatusText(PREMIUM_MODEL_FALLBACK_NOTICE);
     pushGlobalToast("warning", "已切换默认模型", PREMIUM_MODEL_FALLBACK_NOTICE);
   }, [pushGlobalToast]);
+
+  const handleUnavailableModelFallbackNotice = useCallback(
+    (modelId: string) => {
+      const messageText = `${modelId} 当前模型通道未配置，已切换回可用默认模型。`;
+      setStatusText(messageText);
+      pushGlobalToast("warning", "模型通道未配置", messageText);
+    },
+    [pushGlobalToast],
+  );
 
   const handleAuthModeChange = (mode: AuthMode) => {
     setAuthMode(mode);
@@ -1465,6 +1499,9 @@ function App() {
       currentUser.role,
     );
     const normalizedCurrentModel = modelOverride.trim();
+    const selectedModel = normalizedCurrentModel
+      ? findModelSelection(availableModelProviders, normalizedCurrentModel)
+      : null;
 
     if (resolvedModel.modelId === normalizedCurrentModel) {
       return;
@@ -1476,12 +1513,22 @@ function App() {
 
     setModelOverride(resolvedModel.modelId);
 
+    if (
+      normalizedCurrentModel &&
+      selectedModel &&
+      selectedModel.provider.status !== "configured"
+    ) {
+      handleUnavailableModelFallbackNotice(selectedModel.model.id);
+      return;
+    }
+
     if (normalizedCurrentModel && resolvedModel.downgradedFromPremium) {
       handlePremiumFallbackNotice();
     }
   }, [
     availableModelProviders,
     currentUser,
+    handleUnavailableModelFallbackNotice,
     handlePremiumFallbackNotice,
     isAuthenticated,
     modelOverride,
@@ -1588,6 +1635,30 @@ function App() {
   }, [messages, isStreaming, isLoadingThreadHistory, toolCallTimeline]);
 
   useEffect(() => {
+    if (!isStreaming) {
+      streamingStartedAtRef.current = null;
+      setStreamingElapsedSeconds(0);
+      return;
+    }
+
+    const startedAt = streamingStartedAtRef.current ?? Date.now();
+    streamingStartedAtRef.current = startedAt;
+    setStreamingElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+
+    const timerId = window.setInterval(() => {
+      if (streamingStartedAtRef.current === null) {
+        return;
+      }
+
+      setStreamingElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - streamingStartedAtRef.current) / 1000)),
+      );
+    }, 1000);
+
+    return () => window.clearInterval(timerId);
+  }, [isStreaming]);
+
+  useEffect(() => {
     uploadedMaterialsRef.current = uploadedMaterials;
   }, [uploadedMaterials]);
 
@@ -1655,6 +1726,19 @@ function App() {
       null,
     [activeArtifactTaskType, artifactTaskEntries],
   );
+  const streamingUiState = useMemo(
+    () =>
+      buildStreamingUiState({
+        isStreaming,
+        taskType,
+        statusText,
+        toolCallTimeline,
+        elapsedSeconds: streamingElapsedSeconds,
+      }),
+    [isStreaming, statusText, streamingElapsedSeconds, taskType, toolCallTimeline],
+  );
+  const imageStreamingUiState =
+    streamingUiState?.variant === "image" ? streamingUiState : null;
 
   const isDraftThread = activeThreadId === "thread-new";
 
@@ -1980,6 +2064,11 @@ function App() {
 
       setMessages(chatMessages);
       setArtifact(latestArtifact);
+      if (latestArtifact) {
+        const restoredTaskType = getTaskTypeFromArtifact(latestArtifact);
+        setTaskType(restoredTaskType);
+        setActiveArtifactTaskType(restoredTaskType);
+      }
       replaceUploadedMaterials([]);
       setActiveThreadTitle(payload.title || thread.title);
       setActiveSystemPrompt(payload.system_prompt || "");
@@ -3343,8 +3432,9 @@ function App() {
         break;
       case "artifact":
         setArtifact(event.artifact);
+        setActiveArtifactTaskType(getTaskTypeFromArtifact(event.artifact));
         attachArtifactToLatestAssistantMessage(event.artifact);
-        setStatusText("结构化结果已更新，可在右侧继续编辑或导出");
+        setStatusText(getArtifactStreamStatusText(event.artifact));
         break;
       case "error":
         {
@@ -3729,6 +3819,8 @@ function App() {
     abortRef.current.abort();
     abortRef.current = null;
     removeAssistantPlaceholderIfEmpty();
+    streamingStartedAtRef.current = null;
+    setStreamingElapsedSeconds(0);
     setIsStreaming(false);
     assistantMessageIdRef.current = null;
     setStatusText("已停止生成，当前已输出内容已保留");
@@ -3890,6 +3982,8 @@ function App() {
     setActiveThreadId(nextThreadId);
     setActiveThreadTitle(nextThreadTitle);
     setStatusText("任务已提交，正在建立 Agent 流...");
+    streamingStartedAtRef.current = Date.now();
+    setStreamingElapsedSeconds(0);
     setIsStreaming(true);
     setRightPanelOpen(true);
     upsertThreadInList({
@@ -4442,6 +4536,7 @@ function App() {
           }}
           onPlatformChange={setPlatform}
           onPremiumUpgradePrompt={handlePremiumUpgradePrompt}
+          onUnavailableProviderPrompt={handleUnavailableModelFallbackNotice}
           onReloadModelProviders={() => {
             void loadAvailableModels();
           }}
@@ -4526,10 +4621,13 @@ function App() {
 
                     <div className="ml-auto flex items-center gap-3">
                       <div
-                        className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${isStreaming
-                          ? "bg-warning-surface text-warning-foreground"
-                          : "bg-success-surface text-success-foreground"
-                          }`}
+                        className={`hidden items-center gap-2 rounded-full px-3 py-2 text-sm font-medium sm:inline-flex ${
+                          isStreaming
+                            ? imageStreamingUiState
+                              ? "bg-brand-soft text-brand"
+                              : "bg-warning-surface text-warning-foreground"
+                            : "bg-success-surface text-success-foreground"
+                        }`}
                         data-testid="workspace-status"
                       >
                         {isStreaming ? (
@@ -4537,7 +4635,7 @@ function App() {
                         ) : (
                           <CheckCircle2 className="h-4 w-4" />
                         )}
-                        {statusText}
+                        {streamingUiState?.compactLabel ?? statusText}
                       </div>
 
                       <button
@@ -4567,6 +4665,38 @@ function App() {
                         当前任务：{activeTaskLabel} · 线程：{activeThreadTitle} · ID：
                         {activeThreadId}
                       </div>
+
+                      {isStreaming && imageStreamingUiState ? (
+                        <div className="mb-4 rounded-[28px] border border-brand/15 bg-[linear-gradient(135deg,rgba(255,247,237,0.96),rgba(255,255,255,0.98)_62%,rgba(255,244,214,0.96))] p-4 shadow-sm">
+                          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                            <div className="min-w-0 flex-1">
+                              <div className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[11px] font-medium text-brand shadow-sm">
+                                <Sparkles className="h-3.5 w-3.5" />
+                                {imageStreamingUiState.auxiliaryLabel}
+                              </div>
+                              <div className="mt-3 text-lg font-semibold text-foreground">
+                                {imageStreamingUiState.headline}
+                              </div>
+                              <div className="mt-1 text-sm leading-6 text-muted-foreground">
+                                {imageStreamingUiState.detail}
+                              </div>
+                            </div>
+
+                            <div className="min-w-0 lg:w-72">
+                              <div className="flex items-center justify-between gap-3 text-xs font-medium text-muted-foreground">
+                                <span>{imageStreamingUiState.phaseLabel}</span>
+                                <span>{imageStreamingUiState.elapsedLabel}</span>
+                              </div>
+                              <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/70">
+                                <div
+                                  className="h-full rounded-full bg-[var(--brand-gradient)] transition-[width] duration-500"
+                                  style={{ width: `${imageStreamingUiState.progressPercent}%` }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
 
                       <div className="mb-4 flex flex-wrap items-center gap-2">
                         <div className="inline-flex max-w-3xl items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
@@ -4614,6 +4744,7 @@ function App() {
                       isLoadingHistory={isLoadingThreadHistory}
                       isStreaming={isStreaming}
                       messages={messages}
+                      streamingUiState={streamingUiState}
                       toolCallTimeline={toolCallTimeline}
                       onSaveArtifactAsTemplate={
                         artifact ? handleSaveArtifactAsTemplate : undefined
@@ -4626,6 +4757,7 @@ function App() {
                       imageInputRef={imageInputRef}
                       audioInputRef={audioInputRef}
                       isStreaming={isStreaming}
+                      streamingUiState={streamingUiState}
                       isUploading={isUploading}
                       onFilesCaptured={handleCapturedFiles}
                       message={message}
@@ -4744,6 +4876,7 @@ function App() {
               platform={platform}
               selectedArtifact={displayedArtifact}
               selectedArtifactTaskType={activeArtifactTaskType}
+              streamingUiState={streamingUiState}
             />
           ) : null}
         </div>

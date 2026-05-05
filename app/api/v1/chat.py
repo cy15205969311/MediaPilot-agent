@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import AsyncGenerator, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -12,6 +13,7 @@ from app.db.models import Material, Message, Thread, User
 from app.models.schemas import MediaChatRequest
 from app.services.agent import media_agent_workflow
 from app.services.auth import get_current_user
+from app.services.intent_routing import normalize_media_chat_request
 from app.services.knowledge_base import normalize_knowledge_base_scope
 from app.services.model_access import ensure_model_access
 from app.services.persistence import (
@@ -24,6 +26,87 @@ router = APIRouter(prefix="/api/v1/media", tags=["media-chat"])
 logger = logging.getLogger(__name__)
 INSUFFICIENT_TOKENS_DETAIL = "INSUFFICIENT_TOKENS"
 TOKEN_BYPASS_ROLES = {"super_admin", "admin"}
+STREAM_DISCONNECT_POLL_INTERVAL_SECONDS = 0.1
+_STREAM_FORWARDER_END = object()
+
+
+async def _cancel_stream_producer(task: asyncio.Task[None]) -> None:
+    if task.done():
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def _forward_stream_with_disconnect_cancellation(
+    *,
+    workflow_stream: AsyncGenerator[str, None],
+    disconnect_checker: Callable[[], Awaitable[bool]],
+    thread_id: str,
+    user_id: str,
+) -> AsyncGenerator[str, None]:
+    queue: asyncio.Queue[object] = asyncio.Queue()
+
+    async def produce() -> None:
+        try:
+            async for chunk in workflow_stream:
+                queue.put_nowait(chunk)
+        except asyncio.CancelledError:
+            logger.info(
+                "流式生产任务已取消 thread_id=%s user_id=%s",
+                thread_id,
+                user_id,
+            )
+            raise
+        except BaseException as exc:
+            queue.put_nowait(exc)
+        finally:
+            queue.put_nowait(_STREAM_FORWARDER_END)
+
+    producer_task = asyncio.create_task(
+        produce(),
+        name=f"media-chat-stream-producer:{thread_id}",
+    )
+
+    try:
+        while True:
+            if await disconnect_checker():
+                logger.info(
+                    "客户端已主动取消流式请求 thread_id=%s user_id=%s",
+                    thread_id,
+                    user_id,
+                )
+                await _cancel_stream_producer(producer_task)
+                break
+
+            try:
+                item = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=STREAM_DISCONNECT_POLL_INTERVAL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            if item is _STREAM_FORWARDER_END:
+                break
+            if isinstance(item, BaseException):
+                raise item
+
+            yield str(item)
+            await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        logger.info(
+            "客户端已主动取消流式请求 thread_id=%s user_id=%s",
+            thread_id,
+            user_id,
+        )
+        await _cancel_stream_producer(producer_task)
+        raise
+    finally:
+        await _cancel_stream_producer(producer_task)
 
 
 def persist_chat_request(
@@ -130,6 +213,17 @@ async def stream_media_chat(
     if current_user.role not in TOKEN_BYPASS_ROLES and int(current_user.token_balance or 0) <= 0:
         raise HTTPException(status_code=402, detail=INSUFFICIENT_TOKENS_DETAIL)
 
+    request, routing_resolution = normalize_media_chat_request(request)
+    if routing_resolution.overridden:
+        logger.info(
+            "smart_router override thread_id=%s user_id=%s requested=%s resolved=%s reason=%s",
+            request.thread_id,
+            current_user.id,
+            routing_resolution.requested_task_type.value,
+            routing_resolution.resolved_task_type.value,
+            routing_resolution.reason,
+        )
+
     requested_provider_key, requested_model_name = media_agent_workflow.resolve_requested_model_target(
         request.model_override,
     )
@@ -165,29 +259,18 @@ async def stream_media_chat(
     logger.info("chat.stream returning StreamingResponse thread_id=%s", request.thread_id)
 
     async def stream_events():
-        try:
-            async for chunk in media_agent_workflow.stream(
+        async for chunk in _forward_stream_with_disconnect_cancellation(
+            workflow_stream=media_agent_workflow.stream(
                 request,
                 db=db,
                 thread=thread,
                 user_id=current_user_id,
-            ):
-                if await http_request.is_disconnected():
-                    logger.info(
-                        "客户端已主动取消流式请求 thread_id=%s user_id=%s",
-                        request.thread_id,
-                        current_user_id,
-                    )
-                    break
-                yield chunk
-                await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            logger.info(
-                "客户端已主动取消流式请求 thread_id=%s user_id=%s",
-                request.thread_id,
-                current_user_id,
-            )
-            raise
+            ),
+            disconnect_checker=http_request.is_disconnected,
+            thread_id=request.thread_id,
+            user_id=current_user_id,
+        ):
+            yield chunk
 
     return StreamingResponse(
         stream_events(),

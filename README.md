@@ -1,6 +1,6 @@
 # MediaPilot Agent 中文开发说明
 
-更新时间：`2026-05-04`
+更新时间：`2026-05-05`
 
 `MediaPilot-agent` 是当前仓库名。运行时标题、接口描述或部分历史代码中仍可能出现 `OmniMedia Agent` 命名；两者指向同一套系统：一个面向内容团队的 AI 创作工作台与后台管理中台一体化工程。
 
@@ -573,6 +573,26 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - `app/main.py` 挂载的 `/uploads` 静态目录属于本地落盘链路的一部分，排障时不要误删
 - 若 OpenAI 兼容链路失败，现有 DashScope 兜底逻辑仍然保留，用于保障可用性
 
+### 7.26 模型注册表与选择器可用性基线
+
+- `GET /api/v1/models/available` 当前返回的是带 provider 作用域的模型 id，格式固定为 `<provider_key>:<model_name>`，例如 `compatible:mimo-v2.5-pro`、`proxy_gpt:gpt-5.4`
+- 前端模型选择器必须以 provider 的 `status` / `status_label` 作为“可选或不可选”的唯一事实来源，不能只看当前默认模型或当前激活的 LangGraph provider
+- 兼容型 MiMo provider 的“已配置”判断，当前以 `LLM_API_KEY + 非 DashScope 的 LLM_BASE_URL` 为准
+- 这意味着即使 `LANGGRAPH_INNER_PROVIDER=proxy_gpt`，只要 MiMo 的兼容配置还在，`compatible` provider 也必须继续出现在可选列表中，不能被误判成未配置
+- 内置 OpenAI Proxy 文本模型矩阵当前包含：`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex`、`gpt-5.3-codex-spark`、`gpt-5.2`
+- `gpt-5.5` 仍然明确排除在当前可选列表之外
+- 用户点击未配置 provider 时，前端应该立即给出提示，而不是先接受选择、再悄悄把状态回弹到上一个模型
+
+### 7.27 智能意图归一化与流式断连刹车基线
+
+- `app/services/intent_routing.py` 会在真正持久化会话和启动工作流之前，对 `MediaChatRequest` 做一次后端侧意图归一化
+- 当用户明明在写“只要图片/生成海报/出图”这类强生图意图时，后端可以覆盖错误的前端下拉框，把任务强制归一到 `image_generation`
+- 当用户写的是“只要文案/分析图片/根据图片写文案”等文本或图像理解意图时，后端也可以把误选的 `image_generation` 拉回 `content_generation`
+- `POST /api/v1/media/chat/stream` 会记录 override 日志，并以归一化后的任务类型进入后续持久化与 LangGraph 执行链路
+- `app/api/v1/chat.py` 当前通过 `_forward_stream_with_disconnect_cancellation(...)` 包装 SSE 转发
+- 前端点击停止或浏览器断开连接时，后端会主动取消生产任务，避免死连接继续在后台白白推流
+- `CancelledError` 必须沿取消链路显式透传，不能被误吞成普通异常再触发通用兜底
+
 ## 8. 后端边界与分层规则
 
 ### 8.1 路由分组
@@ -703,6 +723,7 @@ C 端本地模板中心也同步补齐了生命周期能力：
 - 若改动数据库写路径：重点检查 `SQLite` 事务释放与只读接口响应
 - 若改动 ORM 或 Alembic 迁移：发布前必须执行 `alembic upgrade head`
 - 若改动 OpenAI 兼容生图链路：至少执行 `python -m pytest tests/test_image_generation.py`
+- 若改动模型注册表、provider 可用性判断或模型选择器回退逻辑：执行 `python -m pytest tests/test_chat.py -q -k "mimo_registry or proxy_gpt_matrix or keeps_mimo_default"`
 - 历史迁移修补必须保持幂等，不要假设旧表、旧列或旧索引一定存在
 - 推荐迁移冒烟命令：
 

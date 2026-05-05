@@ -53,6 +53,36 @@ function buildContentGenerationMarkdown(artifact: ArtifactPayload): string {
   ]);
 }
 
+function buildImageGenerationMarkdown(artifact: ArtifactPayload): string {
+  if (artifact.artifact_type !== "image_result") {
+    return "";
+  }
+
+  const generatedImages = artifact.generated_images ?? [];
+  const imageSection =
+    generatedImages.length > 0
+      ? joinSections([
+          "## 生成图片",
+          generatedImages
+            .map((url, index) => `![AI 图片 ${index + 1}](${url})`)
+            .join("\n\n"),
+        ]).trim()
+      : "";
+
+  return joinSections([
+    `# ${cleanMarkdownField(artifact.title)}`,
+    imageSection,
+    "## 出图提示词",
+    cleanMarkdownField(artifact.prompt),
+    artifact.platform_cta
+      ? joinSections([
+          "## 下一步建议",
+          cleanMarkdownField(artifact.platform_cta),
+        ]).trim()
+      : "",
+  ]);
+}
+
 function buildTopicPlanningMarkdown(artifact: ArtifactPayload): string {
   if (artifact.artifact_type !== "topic_list") {
     return "";
@@ -138,6 +168,8 @@ export function buildArtifactMarkdown(
   const artifactSection =
     artifact.artifact_type === "content_draft"
       ? buildContentGenerationMarkdown(artifact)
+      : artifact.artifact_type === "image_result"
+        ? buildImageGenerationMarkdown(artifact)
       : artifact.artifact_type === "topic_list"
         ? buildTopicPlanningMarkdown(artifact)
         : artifact.artifact_type === "hot_post_analysis"

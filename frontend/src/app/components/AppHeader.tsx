@@ -35,6 +35,7 @@ type AppHeaderProps = {
   onOpenRightPanel: () => void;
   onReloadModelProviders: () => void;
   onPremiumUpgradePrompt?: (message: string) => void;
+  onUnavailableProviderPrompt?: (message: string) => void;
 };
 
 const platformOptions: Array<{ id: UiPlatform; label: string }> = [
@@ -68,6 +69,7 @@ export function AppHeader({
   onOpenRightPanel,
   onReloadModelProviders,
   onPremiumUpgradePrompt,
+  onUnavailableProviderPrompt,
 }: AppHeaderProps) {
   const { theme, toggleTheme } = useTheme();
   const isLightTheme = theme === "light";
@@ -143,6 +145,7 @@ export function AppHeader({
         modelProviders={modelProviders}
         onChange={onModelOverrideChange}
         onPremiumUpgradePrompt={onPremiumUpgradePrompt}
+        onUnavailableProviderPrompt={onUnavailableProviderPrompt}
         onReloadModels={onReloadModelProviders}
         value={modelOverride}
       />

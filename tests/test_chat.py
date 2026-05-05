@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
+import app.api.v1.chat as chat_api_module
 import app.services.agent as agent_module
 import app.api.v1.knowledge as knowledge_api_module
 import app.services.knowledge_base as knowledge_base_module
@@ -33,6 +34,7 @@ from app.models.schemas import (
     CommentReplyArtifactPayload,
     ContentGenerationArtifactPayload,
     HotPostAnalysisArtifactPayload,
+    ImageGenerationArtifactPayload,
     TemplateCategory,
     TemplatePlatform,
     TopicPlanningArtifactPayload,
@@ -150,16 +152,11 @@ def collect_stream_events(
 
     events = parse_sse_events(raw_stream)
     event_names = [str(event["event"]) for event in events]
-    message_count = event_names.count("message")
-
-    assert message_count >= 1
-    assert event_names == [
-        "start",
-        *(["message"] * message_count),
-        "tool_call",
-        "artifact",
-        "done",
-    ]
+    assert event_names
+    assert event_names[0] == "start"
+    assert event_names[-1] == "done"
+    assert "message" in event_names
+    assert "error" not in event_names
 
     return events
 
@@ -1268,6 +1265,104 @@ def test_media_chat_stream_logs_request_lifecycle(
     )
 
 
+def test_stream_disconnect_forwarder_cancels_workflow_task(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    disconnect_checks = 0
+
+    async def fake_workflow_stream():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        yield "unreachable"
+
+    async def fake_disconnect_checker() -> bool:
+        nonlocal disconnect_checks
+        disconnect_checks += 1
+        if disconnect_checks == 1:
+            await started.wait()
+            return False
+        return True
+
+    monkeypatch.setattr(
+        chat_api_module,
+        "STREAM_DISCONNECT_POLL_INTERVAL_SECONDS",
+        0.001,
+    )
+
+    async def collect_chunks() -> list[str]:
+        chunks: list[str] = []
+        async for chunk in chat_api_module._forward_stream_with_disconnect_cancellation(
+            workflow_stream=fake_workflow_stream(),
+            disconnect_checker=fake_disconnect_checker,
+            thread_id="thread-disconnect-cancel",
+            user_id="user-disconnect-cancel",
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert chunks == []
+    assert started.is_set()
+    assert cancelled.is_set()
+    assert disconnect_checks >= 2
+
+
+def test_stream_disconnect_forwarder_cancels_after_emitting_a_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    disconnect_checks = 0
+
+    async def fake_workflow_stream():
+        yield "chunk-1"
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def fake_disconnect_checker() -> bool:
+        nonlocal disconnect_checks
+        disconnect_checks += 1
+        if disconnect_checks <= 2:
+            return False
+        await started.wait()
+        return True
+
+    monkeypatch.setattr(
+        chat_api_module,
+        "STREAM_DISCONNECT_POLL_INTERVAL_SECONDS",
+        0.001,
+    )
+
+    async def collect_chunks() -> list[str]:
+        chunks: list[str] = []
+        async for chunk in chat_api_module._forward_stream_with_disconnect_cancellation(
+            workflow_stream=fake_workflow_stream(),
+            disconnect_checker=fake_disconnect_checker,
+            thread_id="thread-disconnect-after-chunk",
+            user_id="user-disconnect-after-chunk",
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert chunks == ["chunk-1"]
+    assert started.is_set()
+    assert cancelled.is_set()
+    assert disconnect_checks >= 2
+
+
 def test_providers_create_clients_with_strict_http_timeouts(monkeypatch: pytest.MonkeyPatch):
     captured_kwargs: list[dict[str, object]] = []
 
@@ -1336,6 +1431,199 @@ def test_media_chat_stream_emits_content_generation_artifact(client: TestClient)
 
     assert len(artifact.title_candidates) == 3
     assert "年度复盘" in artifact.body
+
+
+def test_media_chat_stream_normalizes_task_type_before_persist_and_stream(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    headers = register_user(client, username="alice-smart-router-api")
+    captured: dict[str, str] = {}
+
+    def fake_persist_chat_request(db, request, current_user):
+        captured["persist_task_type"] = request.task_type.value
+        return Thread(
+            id=request.thread_id,
+            user_id=current_user.id,
+            title="smart-router-thread",
+        )
+
+    async def fake_stream(request, *, db, thread, user_id):
+        captured["stream_task_type"] = request.task_type.value
+        yield (
+            'event: start\ndata: '
+            f'{{"thread_id":"{request.thread_id}","platform":"{request.platform.value}",'
+            f'"task_type":"{request.task_type.value}","materials_count":{len(request.materials)}}}\n\n'
+        )
+        yield f'event: done\ndata: {{"thread_id":"{request.thread_id}"}}\n\n'
+
+    monkeypatch.setattr(chat_api_module, "persist_chat_request", fake_persist_chat_request)
+    monkeypatch.setattr(chat_api_module.media_agent_workflow, "stream", fake_stream)
+
+    payload = {
+        "thread_id": "thread-smart-router-api",
+        "platform": "xiaohongshu",
+        "task_type": "content_generation",
+        "message": "Generate a poster only for a summer fruit tea launch. Image only, no copy.",
+        "materials": [],
+    }
+
+    events = collect_raw_stream_events(client, payload, headers=headers)
+
+    assert captured["persist_task_type"] == "image_generation"
+    assert captured["stream_task_type"] == "image_generation"
+    assert events[0]["task_type"] == "image_generation"
+
+
+def test_media_chat_stream_emits_image_generation_artifact_and_persists_history(
+    client: TestClient,
+):
+    headers = register_user(client, username="alice-image-generation")
+    thread_id = "thread-image-generation"
+    payload = {
+        "thread_id": thread_id,
+        "platform": "xiaohongshu",
+        "task_type": "image_generation",
+        "message": "Create a bright summer drinks poster for Xiaohongshu.",
+        "materials": [],
+    }
+
+    events = collect_stream_events(client, payload, headers=headers)
+    artifact_events = [event for event in events if event["event"] == "artifact"]
+    artifact = ImageGenerationArtifactPayload.model_validate(artifact_events[-1]["artifact"])
+
+    assert artifact.artifact_type == "image_result"
+    assert artifact.status == "completed"
+    assert artifact.prompt
+    assert len(artifact.generated_images) >= 1
+    if len(artifact_events) > 1:
+        processing_artifact = ImageGenerationArtifactPayload.model_validate(
+            artifact_events[0]["artifact"]
+        )
+        assert processing_artifact.status == "processing"
+        assert processing_artifact.generated_images == []
+        assert processing_artifact.progress_message
+
+    history_response = client.get(
+        f"/api/v1/media/threads/{thread_id}/messages",
+        headers=headers,
+    )
+    assert history_response.status_code == 200
+    history_payload = history_response.json()
+    history_artifact_message = next(
+        item for item in history_payload["messages"] if item["message_type"] == "artifact"
+    )
+    assert history_artifact_message["artifact"]["artifact_type"] == "image_result"
+
+    artifacts_response = client.get("/api/v1/media/artifacts", headers=headers)
+    assert artifacts_response.status_code == 200
+    artifact_list_item = next(
+        item
+        for item in artifacts_response.json()["items"]
+        if item["thread_id"] == thread_id
+    )
+    assert artifact_list_item["artifact"]["artifact_type"] == "image_result"
+
+
+def test_media_chat_stream_routes_image_generation_by_user_role(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    standard_headers = register_user(client, username="alice-image-standard")
+    privileged_headers = register_admin_user(
+        client,
+        username="alice-image-super-admin",
+        role="super_admin",
+    )
+
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "test-dashscope-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+    monkeypatch.setenv("IMAGE_GENERATION_MODEL", "wanx-v1")
+
+    original_provider = agent_module.media_agent_workflow.provider
+
+    async def fake_prompt_builder(*, request, draft, artifact_candidate):
+        return "A polished beverage launch poster with strong contrast and clean typography."
+
+    async def fake_openai(*, request, prompt: str):
+        return ["https://example.com/openai-premium-cover.png"]
+
+    async def fake_dashscope(*, request, prompt: str):
+        return ["https://example.com/dashscope-standard-cover.png"]
+
+    async def fake_persist_generated_images(*, urls, user_id, thread_id):
+        return urls
+
+    provider = LangGraphProvider(
+        inner_provider=providers_module.MockLLMProvider(chunk_size=24),
+        image_prompt_builder=fake_prompt_builder,
+    )
+    monkeypatch.setattr(
+        provider.image_service,
+        "_generate_images_with_openai_with_fallback",
+        fake_openai,
+    )
+    monkeypatch.setattr(
+        provider.image_service,
+        "_generate_images_with_dashscope",
+        fake_dashscope,
+    )
+    monkeypatch.setattr(
+        provider.image_service,
+        "_persist_generated_images",
+        fake_persist_generated_images,
+    )
+    agent_module.media_agent_workflow.provider = provider
+
+    try:
+        standard_events = collect_raw_stream_events(
+            client,
+            {
+                "thread_id": "thread-image-standard-user",
+                "platform": "xiaohongshu",
+                "task_type": "image_generation",
+                "message": "Create a bright summer fruit tea poster.",
+                "materials": [],
+            },
+            headers=standard_headers,
+        )
+        privileged_events = collect_raw_stream_events(
+            client,
+            {
+                "thread_id": "thread-image-super-admin",
+                "platform": "xiaohongshu",
+                "task_type": "image_generation",
+                "message": "Create a bright summer fruit tea poster.",
+                "materials": [],
+            },
+            headers=privileged_headers,
+        )
+    finally:
+        agent_module.media_agent_workflow.provider = original_provider
+
+    standard_artifact_events = [
+        event for event in standard_events if event["event"] == "artifact"
+    ]
+    privileged_artifact_events = [
+        event for event in privileged_events if event["event"] == "artifact"
+    ]
+    standard_artifact = ImageGenerationArtifactPayload.model_validate(
+        standard_artifact_events[-1]["artifact"]
+    )
+    privileged_artifact = ImageGenerationArtifactPayload.model_validate(
+        privileged_artifact_events[-1]["artifact"]
+    )
+
+    assert standard_artifact.generated_images == [
+        "https://example.com/dashscope-standard-cover.png"
+    ]
+    assert privileged_artifact.generated_images == [
+        "https://example.com/openai-premium-cover.png"
+    ]
 
 
 def test_media_chat_stream_emits_topic_planning_artifact(client: TestClient):
@@ -3119,6 +3407,78 @@ def test_available_models_endpoint_returns_mimo_registry_for_compatible_provider
     assert compatible_provider["models"][2]["group"] == "全模态"
 
 
+def test_available_models_endpoint_marks_mimo_configured_when_langgraph_defaults_to_proxy_gpt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OMNIMEDIA_LLM_PROVIDER", "langgraph")
+    monkeypatch.setenv("LANGGRAPH_INNER_PROVIDER", "proxy_gpt")
+    monkeypatch.setenv("LLM_API_KEY", "mimo-test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "mimo-v2.5-pro")
+    monkeypatch.setenv("PROXY_GPT_API_KEY", "proxy-gpt-test-key")
+    monkeypatch.setenv("PROXY_GPT_BASE_URL", "https://proxy.example.com/v1")
+    monkeypatch.setenv("PROXY_GPT_MODEL", "gpt-5.4")
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    headers = register_user(client, username="alice-mimo-proxy-gpt-registry")
+
+    response = client.get("/api/v1/models/available", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    compatible_provider = next(
+        item for item in payload["items"] if item["provider_key"] == "compatible"
+    )
+    proxy_provider = next(
+        item for item in payload["items"] if item["provider_key"] == "proxy_gpt"
+    )
+
+    assert compatible_provider["status"] == "configured"
+    assert proxy_provider["status"] == "configured"
+    assert compatible_provider["models"][0]["id"] == "compatible:mimo-v2.5-pro"
+
+
+def test_available_models_endpoint_returns_builtin_proxy_gpt_matrix(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("PROXY_GPT_API_KEY", "proxy-gpt-test-key")
+    monkeypatch.setenv("PROXY_GPT_BASE_URL", "https://proxy.example.com/v1")
+    monkeypatch.setenv("PROXY_GPT_MODEL", "gpt-5.4")
+    monkeypatch.delenv("PROXY_GPT_AVAILABLE_MODELS", raising=False)
+    monkeypatch.delenv("PROXY_GPT_ARTIFACT_MODEL", raising=False)
+    headers = register_user(client, username="alice-openai-proxy-registry")
+
+    response = client.get("/api/v1/models/available", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    proxy_provider = next(
+        item for item in payload["items"] if item["provider_key"] == "proxy_gpt"
+    )
+    models_by_name = {
+        model["model"]: model
+        for model in proxy_provider["models"]
+    }
+
+    assert proxy_provider["provider"] == "OpenAI Proxy"
+    assert proxy_provider["status"] == "configured"
+    assert {
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2",
+    }.issubset(models_by_name)
+    assert "gpt-5.5" not in models_by_name
+    assert models_by_name["gpt-5.4"]["is_default"] is True
+    assert models_by_name["gpt-5.4-mini"]["tags"] == ["大语言模型", "高速", "生产力"]
+    assert "代码" in models_by_name["gpt-5.3-codex"]["tags"]
+    assert "推理" in models_by_name["gpt-5.3-codex-spark"]["tags"]
+    assert "逻辑" in models_by_name["gpt-5.3-codex-spark"]["tags"]
+    assert "日常" in models_by_name["gpt-5.2"]["tags"]
+
+
 def test_available_models_endpoint_returns_multi_model_gateway_registry(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3135,7 +3495,7 @@ def test_available_models_endpoint_returns_multi_model_gateway_registry(
     monkeypatch.setenv("PROXY_GPT_MODEL", "gpt-5.4-pro")
     monkeypatch.setenv(
         "PROXY_GPT_AVAILABLE_MODELS",
-        "gpt-5.4,gpt-5.4-flash,gpt-5.4-pro",
+        "gpt-5.4,gpt-5.4-flash,gpt-5.4-pro,gpt-5.5",
     )
     monkeypatch.setenv("PROXY_GPT_ARTIFACT_MODEL", "")
     headers = register_user(client, username="alice-multi-model-registry")
@@ -3166,10 +3526,15 @@ def test_available_models_endpoint_returns_multi_model_gateway_registry(
 
     assert proxy_provider["status"] == "configured"
     assert {model["model"] for model in proxy_provider["models"]} == {
+        "gpt-5.2",
         "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
         "gpt-5.4-flash",
         "gpt-5.4-pro",
     }
+    assert not any(model["model"] == "gpt-5.5" for model in proxy_provider["models"])
     assert all(model["requires_premium"] is True for model in proxy_provider["models"])
     assert sum(1 for model in proxy_provider["models"] if model["is_default"]) == 1
     assert next(

@@ -8,10 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.text_normalization import repair_possible_mojibake
 from app.db.database import SessionLocal
 from app.db.models import Thread, TokenTransaction, User
 from app.models.schemas import ArtifactPayloadModel, MediaChatRequest
 from app.services.graph import LangGraphProvider
+from app.services.intent_routing import normalize_media_chat_request
 from app.services.persistence import ARTIFACT_TYPE_ADAPTER, persist_assistant_output
 from app.services.providers import (
     BaseLLMProvider,
@@ -46,6 +48,7 @@ class MediaAgentWorkflow:
         thread: Thread | None = None,
         user_id: str | None = None,
     ) -> AsyncGenerator[dict[str, object], None]:
+        request, _ = normalize_media_chat_request(request)
         effective_provider = self._resolve_effective_provider(request.model_override)
 
         async for event in self._run_with_provider(
@@ -113,6 +116,7 @@ class MediaAgentWorkflow:
         thread: Thread | None = None,
         user_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
+        request, _ = normalize_media_chat_request(request)
         latest_artifact: ArtifactPayloadModel | None = None
         had_provider_error = False
         accumulated_text = ""
@@ -151,11 +155,17 @@ class MediaAgentWorkflow:
                 event_name = str(event.get("event", "message"))
 
                 if event_name == "message":
-                    accumulated_text += str(event.get("delta", ""))
+                    normalized_delta = repair_possible_mojibake(str(event.get("delta", "")))
+                    event = {**event, "delta": normalized_delta}
+                    accumulated_text += normalized_delta
                 elif event_name == "artifact":
                     artifact_payload = event.get("artifact")
-                    if isinstance(artifact_payload, dict):
+                    if artifact_payload is not None:
                         latest_artifact = ARTIFACT_TYPE_ADAPTER.validate_python(artifact_payload)
+                        event = {
+                            **event,
+                            "artifact": latest_artifact.model_dump(mode="json"),
+                        }
                 elif event_name == "error":
                     had_provider_error = True
                     logger.warning(

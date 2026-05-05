@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from app.models.schemas import MediaChatRequest
 from app.services import image_generation as image_generation_module
@@ -26,6 +27,28 @@ def test_image_generation_service_auto_falls_back_to_openai_backend(monkeypatch)
     assert service.resolve_backend() == "openai"
     assert service.resolve_model() == "gpt-image-2"
     assert service.is_enabled() is True
+
+
+def test_image_generation_service_routes_standard_user_to_dashscope_backend(
+    monkeypatch,
+):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "test-dashscope-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+    monkeypatch.setenv("IMAGE_GENERATION_MODEL", "wanx-v1")
+
+    service = ImageGenerationService()
+
+    assert service.resolve_backend(user_role="user") == "dashscope"
+    assert service.resolve_model(user_role="user") == "wanx-v1"
+    assert service.is_enabled(user_role="user") is True
+
+    assert service.resolve_backend(user_role="super_admin") == "openai"
+    assert service.resolve_model(user_role="super_admin") == "gpt-image-2"
+    assert service.is_enabled(user_role="super_admin") is True
 
 
 def test_image_generation_service_uses_openai_compatible_backend(monkeypatch):
@@ -92,7 +115,8 @@ def test_image_generation_service_uses_openai_compatible_backend(monkeypatch):
         "prompt": "make a lifestyle cover image",
         "n": 1,
         "size": "1024x1024",
-        "response_format": "b64_json",
+        "response_format": "url",
+        "timeout": 120.0,
     }
     assert captured_persist_kwargs == {
         "urls": [
@@ -106,6 +130,54 @@ def test_image_generation_service_uses_openai_compatible_backend(monkeypatch):
     ]
 
 
+def test_generate_images_does_not_fallback_when_openai_generation_is_cancelled(
+    monkeypatch,
+):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "test-dashscope-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+    monkeypatch.setenv("IMAGE_GENERATION_MODEL", "wanx-v1")
+
+    service = ImageGenerationService()
+
+    class FakeImagesAPI:
+        async def generate(self, **kwargs):
+            raise asyncio.CancelledError()
+
+    class FakeOpenAIClient:
+        images = FakeImagesAPI()
+
+    async def unexpected_dashscope(*, request, prompt: str):
+        raise AssertionError("cancelled image generation must not trigger DashScope fallback")
+
+    monkeypatch.setattr(service, "_get_image_client", lambda: FakeOpenAIClient())
+    monkeypatch.setattr(service, "_generate_images_with_dashscope", unexpected_dashscope)
+
+    request = MediaChatRequest.model_validate(
+        {
+            "thread_id": "thread-openai-cancelled",
+            "platform": "xiaohongshu",
+            "task_type": "content_generation",
+            "message": "generate a cover image",
+            "materials": [],
+        }
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            service.generate_images(
+                request=request,
+                prompt="make a cover image but cancel it",
+                user_id="user-123",
+                user_role="super_admin",
+                thread_id=request.thread_id,
+            )
+        )
+
+
 def test_openai_non_gpt_image_2_still_uses_images_generate_sdk(monkeypatch):
     monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
     monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
@@ -114,6 +186,7 @@ def test_openai_non_gpt_image_2_still_uses_images_generate_sdk(monkeypatch):
 
     service = ImageGenerationService()
     captured_request_kwargs: dict[str, object] = {}
+    captured_persist_kwargs: dict[str, object] = {}
 
     class FakeResponse:
         def model_dump(self, mode="python"):
@@ -131,7 +204,18 @@ def test_openai_non_gpt_image_2_still_uses_images_generate_sdk(monkeypatch):
     class FakeOpenAIClient:
         images = FakeImagesAPI()
 
+    async def fake_persist_generated_images(*, urls, user_id, thread_id):
+        captured_persist_kwargs.update(
+            {
+                "urls": urls,
+                "user_id": user_id,
+                "thread_id": thread_id,
+            }
+        )
+        return [f"persisted::{url}" for url in urls]
+
     monkeypatch.setattr(service, "_get_image_client", lambda: FakeOpenAIClient())
+    monkeypatch.setattr(service, "_persist_generated_images", fake_persist_generated_images)
 
     request = MediaChatRequest.model_validate(
         {
@@ -152,13 +236,19 @@ def test_openai_non_gpt_image_2_still_uses_images_generate_sdk(monkeypatch):
         )
     )
 
-    assert result == ["https://upstream.example/cover-2.png"]
+    assert result == ["persisted::https://upstream.example/cover-2.png"]
     assert captured_request_kwargs == {
         "model": "custom-image-model",
         "prompt": "make a lifestyle cover image",
         "n": 1,
         "size": "1024x1024",
-        "response_format": "b64_json",
+        "response_format": "url",
+        "timeout": 120.0,
+    }
+    assert captured_persist_kwargs == {
+        "urls": ["https://upstream.example/cover-2.png"],
+        "user_id": None,
+        "thread_id": "thread-openai-standard-image",
     }
 
 
@@ -288,15 +378,55 @@ def test_openai_text_model_still_uses_images_generate_sdk(monkeypatch):
 
     assert captured_request_kwargs["model"] == "gpt-5.4"
     assert captured_request_kwargs["prompt"] == "make a campaign cover image"
-    assert captured_request_kwargs["response_format"] == "b64_json"
+    assert captured_request_kwargs["response_format"] == "url"
     assert captured_request_kwargs["n"] == 1
     assert captured_request_kwargs["size"] == "1024x1024"
+    assert captured_request_kwargs["timeout"] == 120.0
     assert captured_persist_kwargs == {
         "urls": ["data:image/png;base64,aGVsbG8="],
         "user_id": "user-456",
         "thread_id": "thread-openai-responses-image",
     }
     assert result == ["persisted::response-image"]
+
+
+def test_openai_image_generation_uses_configurable_per_request_timeout(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    monkeypatch.setenv("OPENAI_IMAGE_GENERATE_TIMEOUT_SECONDS", "12.5")
+
+    service = ImageGenerationService()
+    captured_request_kwargs: dict[str, object] = {}
+
+    class FakeResponse:
+        def model_dump(self, mode="python"):
+            return {
+                "data": [
+                    {"url": "https://upstream.example/timeout-override.png"},
+                ],
+            }
+
+    class FakeImagesAPI:
+        async def generate(self, **kwargs):
+            captured_request_kwargs.update(kwargs)
+            return FakeResponse()
+
+    class FakeOpenAIClient:
+        images = FakeImagesAPI()
+
+    monkeypatch.setattr(service, "_get_image_client", lambda: FakeOpenAIClient())
+
+    result = asyncio.run(
+        service._generate_images_with_openai_images_api(
+            prompt="make a timeout override cover image",
+        )
+    )
+
+    assert result == ["https://upstream.example/timeout-override.png"]
+    assert captured_request_kwargs["timeout"] == 12.5
+    assert captured_request_kwargs["response_format"] == "url"
 
 
 def test_openai_image_generation_redacts_base64_payloads_in_logs(monkeypatch, caplog):
@@ -463,6 +593,86 @@ def test_persist_generated_images_decodes_data_urls_without_user_id(monkeypatch)
     assert result == [f"delivery::{captured_upload['filename']}"]
 
 
+def test_persist_generated_images_downloads_remote_urls_with_dedicated_timeout(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
+    monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "https://www.onetopai.asia/v1")
+    monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+
+    service = ImageGenerationService()
+    captured_upload: dict[str, object] = {}
+    captured_client_kwargs: dict[str, object] = {}
+    captured_download: dict[str, object] = {}
+
+    class FakeStorageClient:
+        async def upload_file(self, *, user_id, filename, content_type, data):
+            captured_upload.update(
+                {
+                    "user_id": user_id,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "data": data,
+                }
+            )
+
+            class StoredUpload:
+                backend_name = "local"
+                object_key = filename
+
+            return StoredUpload()
+
+    class FakeResponse:
+        headers = {"content-type": "image/png"}
+        content = b"remote-image-bytes"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured_client_kwargs.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def get(self, url):
+            captured_download["url"] = url
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        image_generation_module,
+        "create_storage_client",
+        lambda preferred_backend=None: FakeStorageClient(),
+    )
+    monkeypatch.setattr(
+        image_generation_module,
+        "build_delivery_url_from_stored_path",
+        lambda stored_path: f"delivery::{stored_path}",
+    )
+    monkeypatch.setattr(image_generation_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        service._persist_generated_images(
+            urls=["https://upstream.example/generated-cover.png"],
+            user_id=None,
+            thread_id="thread-openai-url-storage-anon",
+        )
+    )
+
+    assert captured_download["url"] == "https://upstream.example/generated-cover.png"
+    assert captured_upload["user_id"] == "system-generated"
+    assert captured_upload["content_type"] == "image/png"
+    assert captured_upload["data"] == b"remote-image-bytes"
+    assert captured_client_kwargs["follow_redirects"] is True
+    assert isinstance(captured_client_kwargs["timeout"], httpx.Timeout)
+    assert captured_client_kwargs["timeout"].read == 30.0
+    assert captured_client_kwargs["timeout"].connect == 10.0
+    assert result == [f"delivery::{captured_upload['filename']}"]
+
+
 def test_generate_images_falls_back_to_dashscope_when_openai_returns_no_images(monkeypatch, caplog):
     monkeypatch.setenv("IMAGE_GENERATION_BACKEND", "openai")
     monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "test-image-key")
@@ -559,6 +769,8 @@ def test_generate_images_logs_root_timeout_before_dashscope_fallback(monkeypatch
     assert result == ["https://dashscope.example/fallback-timeout-cover.png"]
     assert "ReadTimeout" in caplog.text
     assert "upstream image generation timed out" in caplog.text
+    assert "timed out after 120.0s" in caplog.text
+    assert "Potential async billing leak" in caplog.text
 
 
 def test_openai_image_generation_request_failure_returns_empty_list(monkeypatch, caplog):

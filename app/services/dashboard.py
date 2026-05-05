@@ -106,6 +106,11 @@ def _estimate_payload_words(payload: Any, fallback_content: str) -> int:
     artifact_type = str(payload.get("artifact_type", ""))
     if artifact_type == "content_draft":
         return len(str(payload.get("body", "")).strip())
+    if artifact_type == "image_result":
+        return (
+            len(str(payload.get("prompt", "")).strip())
+            + len(str(payload.get("platform_cta", "")).strip())
+        )
     if artifact_type == "topic_list":
         topics = payload.get("topics")
         if isinstance(topics, list):

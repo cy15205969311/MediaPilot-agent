@@ -28,6 +28,7 @@ type ModelSelectorProps = {
   onChange: (modelId: string) => void;
   onReloadModels?: () => void;
   onPremiumUpgradePrompt?: (message: string) => void;
+  onUnavailableProviderPrompt?: (message: string) => void;
 };
 
 type ProviderBadge = {
@@ -108,6 +109,10 @@ function getStatusDotClass(hasModels: boolean): string {
   return hasModels ? "bg-emerald-500" : "bg-muted-foreground/35";
 }
 
+function isProviderConfigured(provider: ModelProvider): boolean {
+  return provider.status === "configured";
+}
+
 function getProviderDisplayName(provider: ModelProvider): string {
   return PROVIDER_NAMES[provider.provider_key] ?? provider.provider;
 }
@@ -182,6 +187,7 @@ export function ModelSelector({
   onChange,
   onReloadModels,
   onPremiumUpgradePrompt,
+  onUnavailableProviderPrompt,
 }: ModelSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -295,7 +301,8 @@ export function ModelSelector({
   }, [expandedProviders, filteredProviders, providerModelCountMap, searchQuery]);
 
   const selectedProviderHasModels = selectedModel
-    ? (providerModelCountMap.get(selectedModel.provider.provider_key) ?? 0) > 0
+    ? isProviderConfigured(selectedModel.provider) &&
+      (providerModelCountMap.get(selectedModel.provider.provider_key) ?? 0) > 0
     : false;
   const buttonTitle = selectedModel?.model.name ?? "选择模型";
   const buttonSubtitle = isLoading
@@ -318,6 +325,13 @@ export function ModelSelector({
 
   const handleModelClick = (provider: ModelProvider, model: ModelDetail) => {
     if ((providerModelCountMap.get(provider.provider_key) ?? 0) === 0) {
+      return;
+    }
+
+    if (!isProviderConfigured(provider)) {
+      onUnavailableProviderPrompt?.(
+        `${getProviderDisplayName(provider)} 当前${provider.status_label}，请先检查后端凭证与 Provider 配置。`,
+      );
       return;
     }
 
@@ -422,7 +436,8 @@ export function ModelSelector({
               ? filteredProviders.map((provider) => {
                 const totalModelCount =
                   providerModelCountMap.get(provider.provider_key) ?? 0;
-                const hasModels = totalModelCount > 0;
+                const providerConfigured = isProviderConfigured(provider);
+                const hasModels = totalModelCount > 0 && providerConfigured;
                 const groupedModels = groupProviderModels(provider.models);
                 const isExpanded =
                   hasModels && expandedProviderSet.has(provider.provider_key);
@@ -460,11 +475,11 @@ export function ModelSelector({
 
                       <div className="flex shrink-0 items-center gap-3">
                         <div
-                          className={`inline-flex items-center gap-2 rounded-full bg-background px-3 py-1 text-xs ${hasModels ? "text-emerald-600" : "text-gray-400"
+                          className={`inline-flex items-center gap-2 rounded-full bg-background px-3 py-1 text-xs ${providerConfigured ? "text-emerald-600" : "text-gray-400"
                             }`}
                         >
                           <span
-                            className={`h-2.5 w-2.5 rounded-full ${getStatusDotClass(hasModels)}`}
+                            className={`h-2.5 w-2.5 rounded-full ${getStatusDotClass(providerConfigured)}`}
                           />
                           {hasModels ? "已配置" : "需要配置"}
                         </div>

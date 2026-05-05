@@ -37,12 +37,20 @@ const platformFilters: Array<{ id: DraftPlatformFilter; label: string }> = [
   { id: "both", label: "双平台" },
 ];
 
-const artifactTypeLabels: Record<ArtifactPayload["artifact_type"], string> = {
+const artifactTypeLabels: Partial<Record<ArtifactPayload["artifact_type"], string>> = {
   content_draft: "内容草稿",
   topic_list: "选题策划",
   hot_post_analysis: "爆款分析",
   comment_reply: "评论回复",
 };
+
+function getArtifactTypeLabel(artifactType: ArtifactPayload["artifact_type"]): string {
+  if (artifactType === "image_result") {
+    return "图片结果";
+  }
+
+  return artifactTypeLabels[artifactType] ?? artifactType;
+}
 
 function getPlatformLabel(platform?: UiPlatform | null): string {
   if (platform === "douyin") {
@@ -129,6 +137,55 @@ function renderArtifactDetail(artifact: ArtifactPayload) {
             {artifact.platform_cta}
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (artifact.artifact_type === "image_result") {
+    return (
+      <div className="space-y-4">
+        {artifact.generated_images && artifact.generated_images.length > 0 ? (
+          <div className="space-y-2">
+            <div className="text-sm font-medium text-foreground">AI Images</div>
+            <div
+              className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3"
+              data-testid="draft-detail-image-gallery"
+            >
+              {artifact.generated_images.map((imageUrl, index) => (
+                <a
+                  key={`${imageUrl}-${index}`}
+                  className="group overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-md"
+                  href={imageUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  <img
+                    alt={`${artifact.title} image ${index + 1}`}
+                    className="aspect-[3/4] w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+                    loading="lazy"
+                    src={imageUrl}
+                  />
+                </a>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div>
+          <div className="mb-2 text-sm font-medium text-foreground">出图提示词</div>
+          <div className="whitespace-pre-wrap rounded-2xl border border-border bg-muted/60 p-4 text-sm leading-7 text-card-foreground">
+            {artifact.prompt}
+          </div>
+        </div>
+
+        {artifact.platform_cta ? (
+          <div>
+            <div className="mb-2 text-sm font-medium text-foreground">下一步建议</div>
+            <div className="rounded-2xl border border-border bg-card p-4 text-sm leading-6 text-muted-foreground">
+              {artifact.platform_cta}
+            </div>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -533,7 +590,7 @@ export function DraftsView(props: DraftsViewProps) {
 
                     <div className="flex items-center gap-2">
                       <span className="shrink-0 rounded-full bg-brand-soft px-2.5 py-1 text-[11px] font-medium text-brand">
-                        {artifactTypeLabels[draft.artifact_type]}
+                        {getArtifactTypeLabel(draft.artifact_type)}
                       </span>
                       <button
                         aria-label={`删除草稿 ${draft.title}`}
@@ -604,7 +661,7 @@ export function DraftsView(props: DraftsViewProps) {
                       {getPlatformLabel(selectedDraft.platform)}
                     </span>
                     <span className="rounded-full bg-brand-soft px-3 py-1 text-xs font-medium text-brand">
-                      {artifactTypeLabels[selectedDraft.artifact_type]}
+                      {getArtifactTypeLabel(selectedDraft.artifact_type)}
                     </span>
                   </div>
                   <h3 className="mt-4 text-2xl font-semibold text-foreground">

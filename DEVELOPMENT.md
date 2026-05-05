@@ -1,6 +1,6 @@
 # MediaPilot Agent Development Guide
 
-Last updated: `2026-05-04`
+Last updated: `2026-05-05`
 
 `MediaPilot-agent` is the repository name. Runtime labels, API descriptions, and some legacy code paths may still reference `OmniMedia Agent`. Both names refer to the same product: a shared AI content platform that combines a creator workspace and an admin console.
 
@@ -588,6 +588,30 @@ The OpenAI-compatible image pipeline currently follows a compatibility-first bas
 - the `/uploads` static mount in `app/main.py` is part of the local persistence path and must remain available during troubleshooting
 - the existing DashScope fallback path remains active when the OpenAI-compatible branch fails, preserving availability over protocol novelty
 
+### 7.27 Model registry and selector availability baseline
+
+The model-registry contract is now a first-class runtime baseline for both backend routing and frontend selection:
+
+- `GET /api/v1/models/available` returns provider-scoped model ids in the form `<provider_key>:<model_name>`, for example `compatible:mimo-v2.5-pro` and `proxy_gpt:gpt-5.4`
+- provider `status` and `status_label` are authoritative for selector availability; the creator workspace should not infer availability only from the currently active provider or default model
+- the compatible MiMo provider is considered configured whenever `LLM_API_KEY` and a non-DashScope `LLM_BASE_URL` are present
+- MiMo availability is intentionally independent from `LANGGRAPH_INNER_PROVIDER`; a `proxy_gpt` default does not make the compatible provider unavailable
+- the built-in OpenAI proxy text matrix currently includes `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.2`
+- `gpt-5.5` remains intentionally excluded from the proxy registry
+- when a user clicks a provider that is still unconfigured, the frontend should surface a warning or setup prompt instead of silently accepting and later rolling the selection back
+
+### 7.28 Smart intent normalization and disconnect-aware streaming
+
+The media chat entrypoint now includes a stricter smart-routing and cancellation baseline:
+
+- `app/services/intent_routing.py` normalizes `MediaChatRequest` before persistence and workflow execution
+- image-only prompts can override a mistaken `content_generation` dropdown choice and route into image generation
+- explicit text-only requests and image-analysis requests with uploaded image materials can override a mistaken `image_generation` choice and route back to content generation
+- `POST /api/v1/media/chat/stream` logs the override reason and persists the normalized task type instead of the stale frontend hint
+- stream forwarding in `app/api/v1/chat.py` is now wrapped by `_forward_stream_with_disconnect_cancellation(...)`
+- client disconnects and explicit stop actions cancel the producer task so the backend does not keep forwarding a dead SSE stream in the background
+- cancellation handling belongs in the route-layer stream bridge as well as in downstream workflow nodes; do not collapse `CancelledError` into a generic fallback path
+
 ## 8. Backend Boundaries
 
 ### 8.1 Route groups
@@ -720,6 +744,7 @@ Validate the parts you actually changed before you push.
 - if database write paths changed: verify `SQLite` lock release and read-endpoint responsiveness
 - if ORM models or Alembic revisions changed: run `alembic upgrade head` before release
 - if the OpenAI-compatible image pipeline changed: run at least `python -m pytest tests/test_image_generation.py`
+- if the model registry, provider availability, or selector normalization changed: run `python -m pytest tests/test_chat.py -q -k "mimo_registry or proxy_gpt_matrix or keeps_mimo_default"`
 - historical migration patches must stay idempotent; do not assume a legacy table or column already exists when hardening an old revision
 - recommended migration smoke test:
 

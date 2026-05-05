@@ -3,6 +3,7 @@ export type UiPlatform = "xiaohongshu" | "douyin" | "both";
 export type UiTaskType =
   | "topic_planning"
   | "content_generation"
+  | "image_generation"
   | "hot_post_analysis"
   | "comment_reply";
 
@@ -19,6 +20,7 @@ export type BackendPlatform = "xiaohongshu" | "douyin";
 export type BackendTaskType =
   | "topic_planning"
   | "content_generation"
+  | "image_generation"
   | "hot_post_analysis"
   | "comment_reply";
 
@@ -430,6 +432,18 @@ export type ContentGenerationArtifactPayload = ArtifactPayloadBase & {
   revised_prompt?: string;
 };
 
+export type ImageGenerationArtifactPayload = ArtifactPayloadBase & {
+  artifact_type: "image_result";
+  prompt: string;
+  generated_images?: string[];
+  original_prompt?: string;
+  revised_prompt?: string;
+  platform_cta?: string | null;
+  status?: "processing" | "completed";
+  progress_message?: string | null;
+  progress_percent?: number | null;
+};
+
 export type HotPostAnalysisDimension = {
   dimension: string;
   insight: string;
@@ -456,6 +470,7 @@ export type CommentReplyArtifactPayload = ArtifactPayloadBase & {
 export type ArtifactPayload =
   | TopicPlanningArtifactPayload
   | ContentGenerationArtifactPayload
+  | ImageGenerationArtifactPayload
   | HotPostAnalysisArtifactPayload
   | CommentReplyArtifactPayload;
 

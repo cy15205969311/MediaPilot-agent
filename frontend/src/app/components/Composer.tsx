@@ -5,6 +5,7 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   Send,
+  Sparkles,
   StopCircle,
   Video,
   Volume2,
@@ -24,6 +25,7 @@ import type {
   UploadedMaterial,
   UploadedMaterialKind,
 } from "../types";
+import type { StreamingUiState } from "../streamingUi";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 
 type ComposerProps = {
@@ -34,6 +36,7 @@ type ComposerProps = {
   audioInputRef: RefObject<HTMLInputElement>;
   textInputRef: RefObject<HTMLInputElement>;
   isStreaming: boolean;
+  streamingUiState?: StreamingUiState | null;
   isUploading: boolean;
   onMessageChange: (message: string) => void;
   onSubmit: (payload: ComposerSubmitPayload) => void;
@@ -97,6 +100,7 @@ export function Composer({
   audioInputRef,
   textInputRef,
   isStreaming,
+  streamingUiState,
   isUploading,
   onMessageChange,
   onSubmit,
@@ -114,6 +118,8 @@ export function Composer({
   const dragDepthRef = useRef(0);
 
   const isLoading = isStreaming || isUploading;
+  const imageStreamingUiState =
+    streamingUiState?.variant === "image" ? streamingUiState : null;
   const canSubmit = message.trim().length > 0 && !isLoading;
   const imageMaterials = useMemo(
     () => uploadedMaterials.filter((item) => item.kind === "image"),
@@ -366,23 +372,62 @@ export function Composer({
         ) : null}
 
         {isStreaming ? (
-          <div className="mb-3 flex items-center justify-between gap-3 rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
-            <div className="min-w-0">
-              <div className="font-semibold">正在生成内容</div>
-              <div className="mt-1 text-xs leading-5">
-                如果发现提示词写错了或方向偏了，可以立刻停止，已输出内容会保留在当前对话中。
+          imageStreamingUiState ? (
+            <div className="mb-3 rounded-[24px] border border-brand/15 bg-[linear-gradient(135deg,rgba(255,247,237,0.96),rgba(255,255,255,0.98)_62%,rgba(255,244,214,0.96))] px-4 py-4 text-sm text-foreground shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[11px] font-medium text-brand shadow-sm">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    {imageStreamingUiState.auxiliaryLabel}
+                  </div>
+                  <div className="mt-3 font-semibold text-foreground">
+                    {imageStreamingUiState.headline}
+                  </div>
+                  <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {imageStreamingUiState.detail}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between gap-3 text-[11px] font-medium text-muted-foreground">
+                    <span>{imageStreamingUiState.phaseLabel}</span>
+                    <span>{imageStreamingUiState.elapsedLabel}</span>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/70">
+                    <div
+                      className="h-full rounded-full bg-[var(--brand-gradient)] transition-[width] duration-500"
+                      style={{ width: `${imageStreamingUiState.progressPercent}%` }}
+                    />
+                  </div>
+                </div>
+
+                <button
+                  className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-border bg-white/90 px-3 py-2 text-xs font-semibold text-foreground transition hover:border-brand/40 hover:text-brand"
+                  data-testid="composer-stop-button"
+                  onClick={onStopStreaming}
+                  type="button"
+                >
+                  <StopCircle className="h-4 w-4" />
+                  停止生成
+                </button>
               </div>
             </div>
-            <button
-              className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-danger-foreground px-3 py-2 text-xs font-semibold text-danger-surface transition hover:opacity-90"
-              data-testid="composer-stop-button"
-              onClick={onStopStreaming}
-              type="button"
-            >
-              <StopCircle className="h-4 w-4" />
-              停止生成
-            </button>
-          </div>
+          ) : (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-2xl border border-danger-foreground/20 bg-danger-surface px-4 py-3 text-sm text-danger-foreground">
+              <div className="min-w-0">
+                <div className="font-semibold">正在生成内容</div>
+                <div className="mt-1 text-xs leading-5">
+                  如果发现提示词写错了或方向偏了，可以立刻停止，已输出内容会保留在当前对话中。
+                </div>
+              </div>
+              <button
+                className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-danger-foreground px-3 py-2 text-xs font-semibold text-danger-surface transition hover:opacity-90"
+                data-testid="composer-stop-button"
+                onClick={onStopStreaming}
+                type="button"
+              >
+                <StopCircle className="h-4 w-4" />
+                停止生成
+              </button>
+            </div>
+          )
         ) : null}
 
         <div

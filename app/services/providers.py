@@ -36,6 +36,7 @@ from app.models.schemas import (
     ContentGenerationArtifactPayload,
     HotPostAnalysisArtifactPayload,
     HotPostAnalysisDimension,
+    ImageGenerationArtifactPayload,
     MaterialInput,
     MaterialType,
     MediaChatRequest,
@@ -72,6 +73,7 @@ DEFAULT_TRANSIENT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 ArtifactSchemaType = (
     type[TopicPlanningArtifactPayload]
     | type[ContentGenerationArtifactPayload]
+    | type[ImageGenerationArtifactPayload]
     | type[HotPostAnalysisArtifactPayload]
     | type[CommentReplyArtifactPayload]
 )
@@ -465,6 +467,11 @@ class MockLLMProvider(BaseLLMProvider):
                 "已收到内容生成任务，正在将当前需求整理为可直接继续编辑的中文草稿，"
                 "会同步补充标题候选与平台收口动作，方便你快速进入发布流程。"
             )
+        if request.task_type == TaskType.IMAGE_GENERATION:
+            return (
+                "已收到图片生成任务，正在围绕主题、风格、画面构图和发布场景整理可直接执行的出图方案，"
+                "会同步返回可用于继续迭代的提示词和画面方向。"
+            )
         if request.task_type == TaskType.HOT_POST_ANALYSIS:
             return (
                 "已收到爆款拆解任务，正在从标题钩子、情绪触发、信任建立和表达模板几个维度整理结构化分析结果。"
@@ -514,6 +521,19 @@ class MockLLMProvider(BaseLLMProvider):
                     "这样写出来的复盘会更像一份对他人有启发的行动笔记，而不是只属于自己的日记。"
                 ),
                 platform_cta="如果你愿意，我可以继续把这份草稿改写成小红书图文版或抖音口播版。",
+            )
+
+        if request.task_type == TaskType.IMAGE_GENERATION:
+            return ImageGenerationArtifactPayload(
+                title="图片生成结果",
+                prompt="生成一张明亮、干净、适合社交媒体发布的品牌主视觉海报，保留高级留白和清晰的主体聚焦。",
+                generated_images=[
+                    "https://placehold.co/768x1024/png?text=MediaPilot+Mock+Image+1",
+                    "https://placehold.co/768x1024/png?text=MediaPilot+Mock+Image+2",
+                ],
+                original_prompt="帮我出一张适合小红书发布的品牌海报。",
+                revised_prompt="生成一张明亮、干净、适合社交媒体发布的品牌主视觉海报，保留高级留白和清晰的主体聚焦。",
+                platform_cta="如果你愿意，我可以继续为这组图片补写发布文案，或者换一种更强烈的视觉风格。",
             )
 
         if request.task_type == TaskType.HOT_POST_ANALYSIS:
@@ -2217,6 +2237,11 @@ def _build_task_instruction(request: MediaChatRequest) -> str:
             f"当前任务是内容生成，目标平台是 {request.platform.value}。"
             "请输出完整、可编辑、结构清晰的中文草稿。"
         )
+    if request.task_type == TaskType.IMAGE_GENERATION:
+        return (
+            f"当前任务是图片生成，目标平台是 {request.platform.value}。"
+            "请输出可用于直接出图或继续迭代的视觉方案和提示词。"
+        )
     if request.task_type == TaskType.HOT_POST_ANALYSIS:
         return (
             f"当前任务是爆款分析，目标平台是 {request.platform.value}。"
@@ -2258,6 +2283,8 @@ def _resolve_artifact_schema(task_type: TaskType) -> ArtifactSchemaType:
         return TopicPlanningArtifactPayload
     if task_type == TaskType.CONTENT_GENERATION:
         return ContentGenerationArtifactPayload
+    if task_type == TaskType.IMAGE_GENERATION:
+        return ImageGenerationArtifactPayload
     if task_type == TaskType.HOT_POST_ANALYSIS:
         return HotPostAnalysisArtifactPayload
     return CommentReplyArtifactPayload
@@ -2288,6 +2315,21 @@ def _artifact_schema_prompt(task_type: TaskType) -> str:
                 "title": "string",
                 "title_candidates": ["string", "string", "string"],
                 "body": "string",
+                "platform_cta": "string",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    if task_type == TaskType.IMAGE_GENERATION:
+        return json.dumps(
+            {
+                "artifact_type": "image_result",
+                "title": "string",
+                "prompt": "string",
+                "generated_images": ["string", "string"],
+                "original_prompt": "string",
+                "revised_prompt": "string",
                 "platform_cta": "string",
             },
             ensure_ascii=False,

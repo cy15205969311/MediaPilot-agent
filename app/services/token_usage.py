@@ -140,6 +140,14 @@ def _estimate_payload_text_size(payload: Any) -> int:
             + len(str(cta or "").strip())
         )
 
+    if artifact_type == "image_result":
+        return (
+            len(str(payload.get("prompt", "")).strip())
+            + len(str(payload.get("platform_cta", "")).strip())
+            + len(str(payload.get("original_prompt", "")).strip())
+            + len(str(payload.get("revised_prompt", "")).strip())
+        )
+
     if artifact_type == "topic_list":
         topics = payload.get("topics")
         if isinstance(topics, list):

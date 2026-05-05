@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import AliasChoices, BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer
+
+from app.core.text_normalization import repair_possible_mojibake
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -17,6 +19,10 @@ def serialize_datetime(value: datetime) -> str:
 
 class SchemaModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+NormalizedText = Annotated[str, BeforeValidator(repair_possible_mojibake)]
+NormalizedOptionalText = Annotated[str | None, BeforeValidator(repair_possible_mojibake)]
 
 
 UTCDateTime = Annotated[
@@ -78,6 +84,7 @@ class TopicStatus(str, Enum):
 class TaskType(str, Enum):
     TOPIC_PLANNING = "topic_planning"
     CONTENT_GENERATION = "content_generation"
+    IMAGE_GENERATION = "image_generation"
     HOT_POST_ANALYSIS = "hot_post_analysis"
     COMMENT_REPLY = "comment_reply"
 
@@ -99,6 +106,7 @@ class UserAccountStatus(str, Enum):
 class ArtifactType(str, Enum):
     TOPIC_LIST = "topic_list"
     CONTENT_DRAFT = "content_draft"
+    IMAGE_RESULT = "image_result"
     HOT_POST_ANALYSIS = "hot_post_analysis"
     COMMENT_REPLY = "comment_reply"
 
@@ -199,8 +207,8 @@ class UploadRetentionSummary(SchemaModel):
 
 class CitationAuditItem(SchemaModel):
     citation_index: int = Field(..., ge=1, description="Citation source number shown in text.")
-    source: str = Field(..., description="Source filename.")
-    snippet: str = Field(..., description="Retrieved chunk preview.")
+    source: NormalizedText = Field(..., description="Source filename.")
+    snippet: NormalizedText = Field(..., description="Retrieved chunk preview.")
     relevance_score: float = Field(
         ...,
         ge=0,
@@ -214,7 +222,7 @@ class CitationAuditItem(SchemaModel):
 
 class ArtifactPayload(SchemaModel):
     artifact_type: ArtifactType = Field(..., description="Artifact discriminator.")
-    title: str = Field(..., description="Artifact title.")
+    title: NormalizedText = Field(..., description="Artifact title.")
     citation_audit: list[CitationAuditItem] = Field(
         default_factory=list,
         description="Knowledge retrieval audit entries attached by the backend.",
@@ -222,9 +230,9 @@ class ArtifactPayload(SchemaModel):
 
 
 class TopicPlanningItem(SchemaModel):
-    title: str = Field(..., description="Topic title.")
-    angle: str = Field(..., description="Editorial angle.")
-    goal: str = Field(..., description="Expected goal.")
+    title: NormalizedText = Field(..., description="Topic title.")
+    angle: NormalizedText = Field(..., description="Editorial angle.")
+    goal: NormalizedText = Field(..., description="Expected goal.")
 
 
 class TopicPlanningArtifactPayload(ArtifactPayload):
@@ -237,21 +245,64 @@ class TopicPlanningArtifactPayload(ArtifactPayload):
 
 class ContentGenerationArtifactPayload(ArtifactPayload):
     artifact_type: Literal["content_draft"] = "content_draft"
-    title_candidates: list[str] = Field(
+    title_candidates: list[NormalizedText] = Field(
         default_factory=list,
         description="Candidate titles.",
     )
-    body: str = Field(..., description="Draft body.")
-    platform_cta: str = Field(..., description="Platform-specific CTA.")
+    body: NormalizedText = Field(..., description="Draft body.")
+    platform_cta: NormalizedText = Field(..., description="Platform-specific CTA.")
     generated_images: list[str] = Field(
         default_factory=list,
         description="Backend-generated cover or supporting image URLs. Models should leave this empty.",
     )
+    original_prompt: NormalizedOptionalText = Field(
+        default=None,
+        description="Optional pre-optimization seed text used for image generation.",
+    )
+    revised_prompt: NormalizedOptionalText = Field(
+        default=None,
+        description="Optional optimized prompt used for image generation.",
+    )
+
+
+class ImageGenerationArtifactPayload(ArtifactPayload):
+    artifact_type: Literal["image_result"] = "image_result"
+    prompt: NormalizedText = Field(..., description="Final prompt used to generate the images.")
+    generated_images: list[str] = Field(
+        default_factory=list,
+        description="Generated image URLs returned by the image backend.",
+    )
+    original_prompt: NormalizedOptionalText = Field(
+        default=None,
+        description="Optional original prompt or seed text before optimization.",
+    )
+    revised_prompt: NormalizedOptionalText = Field(
+        default=None,
+        description="Optional optimized prompt used by the final image request.",
+    )
+    platform_cta: NormalizedOptionalText = Field(
+        default=None,
+        description="Optional next-step guidance for using the generated visuals.",
+    )
+    status: Literal["processing", "completed"] = Field(
+        default="completed",
+        description="Whether the image artifact is still processing or already completed.",
+    )
+    progress_message: NormalizedOptionalText = Field(
+        default=None,
+        description="Optional progress text shown while image generation is still processing.",
+    )
+    progress_percent: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Optional coarse-grained image generation progress percent.",
+    )
 
 
 class HotPostAnalysisDimension(SchemaModel):
-    dimension: str = Field(..., description="Analysis dimension.")
-    insight: str = Field(..., description="Insight for the dimension.")
+    dimension: NormalizedText = Field(..., description="Analysis dimension.")
+    insight: NormalizedText = Field(..., description="Insight for the dimension.")
 
 
 class HotPostAnalysisArtifactPayload(ArtifactPayload):
@@ -260,17 +311,17 @@ class HotPostAnalysisArtifactPayload(ArtifactPayload):
         default_factory=list,
         description="Structured analysis dimensions.",
     )
-    reusable_templates: list[str] = Field(
+    reusable_templates: list[NormalizedText] = Field(
         default_factory=list,
         description="Reusable expression templates.",
     )
 
 
 class CommentReplySuggestion(SchemaModel):
-    comment_type: str = Field(..., description="Comment category.")
-    scenario: str = Field(..., description="Comment scenario.")
-    reply: str = Field(..., description="Suggested reply.")
-    compliance_note: str = Field(default="", description="Compliance reminder.")
+    comment_type: NormalizedText = Field(..., description="Comment category.")
+    scenario: NormalizedText = Field(..., description="Comment scenario.")
+    reply: NormalizedText = Field(..., description="Suggested reply.")
+    compliance_note: NormalizedText = Field(default="", description="Compliance reminder.")
 
 
 class CommentReplyArtifactPayload(ArtifactPayload):
@@ -284,6 +335,7 @@ class CommentReplyArtifactPayload(ArtifactPayload):
 ArtifactPayloadModel = (
     TopicPlanningArtifactPayload
     | ContentGenerationArtifactPayload
+    | ImageGenerationArtifactPayload
     | HotPostAnalysisArtifactPayload
     | CommentReplyArtifactPayload
 )
@@ -677,8 +729,8 @@ class AdminAuditLogListResponse(SchemaModel):
 
 class ThreadSummaryItem(SchemaModel):
     id: str = Field(..., description="Thread ID.")
-    title: str = Field(default="", description="Thread title.")
-    latest_message_excerpt: str = Field(default="", description="Latest message excerpt.")
+    title: NormalizedText = Field(default="", description="Thread title.")
+    latest_message_excerpt: NormalizedText = Field(default="", description="Latest message excerpt.")
     is_archived: bool = Field(default=False, description="Archive flag.")
     model_override: str | None = Field(
         default=None,
@@ -722,7 +774,7 @@ class MessageHistoryItem(SchemaModel):
     thread_id: str = Field(..., description="Thread ID.")
     role: str = Field(..., description="Message role.")
     message_type: PersistedMessageType = Field(..., description="Message kind.")
-    content: str = Field(..., description="Message content or artifact title.")
+    content: NormalizedText = Field(..., description="Message content or artifact title.")
     created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
     artifact: ArtifactPayloadModel | None = Field(
         default=None,
@@ -740,14 +792,14 @@ class MaterialHistoryItem(SchemaModel):
     message_id: str | None = Field(default=None, description="Owning message ID.")
     type: MaterialType = Field(..., description="Material type.")
     url: str | None = Field(default=None, description="Material URL.")
-    text: str = Field(default="", description="Supplementary text.")
+    text: NormalizedText = Field(default="", description="Supplementary text.")
     created_at: UTCDateTime = Field(..., description="Creation time in UTC.")
 
 
 class ThreadMessagesResponse(SchemaModel):
     thread_id: str = Field(..., description="Thread ID.")
-    title: str = Field(default="", description="Thread title.")
-    system_prompt: str = Field(default="", description="Persisted system prompt.")
+    title: NormalizedText = Field(default="", description="Thread title.")
+    system_prompt: NormalizedText = Field(default="", description="Persisted system prompt.")
     model_override: str | None = Field(
         default=None,
         description="Persisted runtime model override for the thread.",
@@ -769,11 +821,11 @@ class ThreadMessagesResponse(SchemaModel):
 class ArtifactListItem(SchemaModel):
     id: str = Field(..., description="Artifact record ID.")
     thread_id: str = Field(..., description="Owning thread ID.")
-    thread_title: str = Field(default="", description="Owning thread title.")
+    thread_title: NormalizedText = Field(default="", description="Owning thread title.")
     message_id: str = Field(..., description="Assistant message ID linked to the artifact.")
     artifact_type: ArtifactType = Field(..., description="Artifact discriminator.")
-    title: str = Field(default="", description="Artifact title.")
-    excerpt: str = Field(default="", description="Short preview excerpt for card rendering.")
+    title: NormalizedText = Field(default="", description="Artifact title.")
+    excerpt: NormalizedText = Field(default="", description="Short preview excerpt for card rendering.")
     platform: Literal["xiaohongshu", "douyin", "both"] | None = Field(
         default=None,
         description="Best-effort inferred target platform.",

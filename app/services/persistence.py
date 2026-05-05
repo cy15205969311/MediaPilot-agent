@@ -61,7 +61,7 @@ def _remap_content_artifact_generated_images(
     *,
     mapper: Callable[[str], str | None],
 ) -> ArtifactPayloadModel:
-    if artifact.artifact_type != "content_draft":
+    if artifact.artifact_type not in {"content_draft", "image_result"}:
         return artifact
 
     remapped_images: list[str] = []

@@ -102,6 +102,9 @@ def _build_artifact_excerpt(artifact: ArtifactPayloadModel) -> str:
     if artifact.artifact_type == "content_draft":
         return _compact_text(artifact.body)
 
+    if artifact.artifact_type == "image_result":
+        return _compact_text(artifact.prompt or artifact.platform_cta or artifact.title)
+
     if artifact.artifact_type == "topic_list":
         return _compact_text(
             "；".join(f"{topic.title}：{topic.angle}" for topic in artifact.topics),

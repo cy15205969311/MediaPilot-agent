@@ -654,12 +654,12 @@ export function UserProfileModal({
                         </div>
 
                         {/* <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                          <span>绯荤粺锛?{os}</span>
-                          <span>IP锛?{ip}</span>
-                          <span>鏈€杩戞椿璺冿細{getSessionActivityLabel(session)}</span>
+                          <span>系统：{os}</span>
+                          <span>IP：{ip}</span>
+                          <span>最近活跃：{getSessionActivityLabel(session)}</span>
                           <span>
-                            杩囨湡鏃堕棿锛?
-                            {formatSessionTimestamp(session.expires_at) || "鏈煡"}
+                            过期时间：
+                            {formatSessionTimestamp(session.expires_at) || "未知"}
                           </span>
                         </div> */}
 

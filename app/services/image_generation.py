@@ -11,10 +11,12 @@ import re
 import uuid
 
 import httpx
+from openai import APITimeoutError
 from openai import AsyncOpenAI
 
 from app.config import get_openai_image_settings, load_environment
 from app.models.schemas import MediaChatRequest, Platform
+from app.services.model_access import role_has_premium_model_access
 from app.services.oss_client import (
     build_delivery_url_from_stored_path,
     build_stored_file_path,
@@ -29,12 +31,14 @@ DEFAULT_DASHSCOPE_API_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 DEFAULT_DASHSCOPE_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_DASHSCOPE_IMAGE_MODEL = "qwen-image-2.0"
 DEFAULT_IMAGE_PROMPT_MODEL = "qwen-turbo"
-DEFAULT_IMAGE_GENERATION_COUNT = 3
+DEFAULT_IMAGE_GENERATION_COUNT = 1
 DEFAULT_IMAGE_GENERATION_TIMEOUT_SECONDS = 120.0
 DEFAULT_IMAGE_GENERATION_POLL_INTERVAL_SECONDS = 2.0
 OPENAI_COMPATIBLE_IMAGE_SIZE = "1024x1024"
+DEFAULT_OPENAI_IMAGE_GENERATE_TIMEOUT_SECONDS = 120.0
+DEFAULT_GENERATED_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 DEFAULT_OPENAI_COMPATIBLE_IMAGE_REQUEST_TIMEOUT_SECONDS = 180.0
-MAX_IMAGE_GENERATION_COUNT = 4
+MAX_IMAGE_GENERATION_COUNT = 3
 DEFAULT_DASHSCOPE_DOUYIN_IMAGE_SIZE = "928*1664"
 DEFAULT_DASHSCOPE_XIAOHONGSHU_IMAGE_SIZE = "1104*1472"
 WANX_V1_DOUYIN_IMAGE_SIZE = "720*1280"
@@ -564,6 +568,16 @@ class ImageGenerationService:
                 ),
             ),
         )
+        self.openai_generate_timeout_seconds = _read_positive_float_env(
+            "OPENAI_IMAGE_GENERATE_TIMEOUT_SECONDS",
+            DEFAULT_OPENAI_IMAGE_GENERATE_TIMEOUT_SECONDS,
+        )
+        self.generated_image_download_timeout = _build_http_timeout(
+            _read_positive_float_env(
+                "GENERATED_IMAGE_DOWNLOAD_TIMEOUT_SECONDS",
+                DEFAULT_GENERATED_IMAGE_DOWNLOAD_TIMEOUT_SECONDS,
+            ),
+        )
         self.persist_results = _is_enabled_env(
             "IMAGE_GENERATION_PERSIST_RESULTS",
             default=True,
@@ -583,7 +597,7 @@ class ImageGenerationService:
         self._image_client: AsyncOpenAI | None = None
         self._prompt_client: AsyncOpenAI | None = None
 
-    def resolve_backend(self) -> str:
+    def _resolve_configured_backend(self) -> str:
         requested_backend = self.backend
         if requested_backend == "disabled":
             return "disabled"
@@ -599,16 +613,31 @@ class ImageGenerationService:
             return "disabled"
         return "disabled"
 
-    def resolve_model(self) -> str:
-        backend = self.resolve_backend()
+    def resolve_backend(self, *, user_role: str | None = None) -> str:
+        configured_backend = self._resolve_configured_backend()
+        if configured_backend in {"disabled", "dashscope"}:
+            return configured_backend
+
+        if user_role is None:
+            return configured_backend
+
+        if role_has_premium_model_access(user_role):
+            return configured_backend
+
+        if self._has_dashscope_config():
+            return "dashscope"
+        return "disabled"
+
+    def resolve_model(self, *, user_role: str | None = None) -> str:
+        backend = self.resolve_backend(user_role=user_role)
         if backend == "openai":
             return self.openai_settings.model
         if backend == "dashscope":
             return self.dashscope_model
         return ""
 
-    def is_enabled(self) -> bool:
-        return self.resolve_backend() != "disabled"
+    def is_enabled(self, *, user_role: str | None = None) -> bool:
+        return self.resolve_backend(user_role=user_role) != "disabled"
 
     async def build_prompt(
         self,
@@ -653,6 +682,8 @@ class ImageGenerationService:
             content = str(response.choices[0].message.content or "").strip()
             if content:
                 return content
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # pragma: no cover - graceful fallback
             logger.warning("Image prompt builder fallback triggered: %s", exc)
 
@@ -664,18 +695,26 @@ class ImageGenerationService:
         request: MediaChatRequest,
         prompt: str,
         user_id: str | None,
+        user_role: str | None = None,
         thread_id: str,
     ) -> list[str]:
-        active_backend = self.resolve_backend()
+        active_backend = self.resolve_backend(user_role=user_role)
         if active_backend == "disabled":
+            logger.info(
+                "image_generation skipped thread_id=%s role=%s backend=disabled requested_backend=%s",
+                thread_id,
+                (user_role or "").strip() or "<unknown>",
+                self.backend,
+            )
             return []
 
         requested_count = 1 if active_backend == "openai" else self.count
         logger.info(
-            "image_generation start thread_id=%s backend=%s model=%s count=%s",
+            "image_generation start thread_id=%s role=%s backend=%s model=%s count=%s",
             thread_id,
+            (user_role or "").strip() or "<unknown>",
             active_backend,
-            self.resolve_model() or "<unset>",
+            self.resolve_model(user_role=user_role) or "<unset>",
             requested_count,
         )
 
@@ -712,6 +751,9 @@ class ImageGenerationService:
             raise RuntimeError(
                 "OpenAI-compatible image generation returned no usable image references.",
             )
+        except asyncio.CancelledError:
+            logger.info("Image generation cancelled before fallback could start.")
+            raise
         except Exception as exc:
             if not self._has_dashscope_config():
                 logger.warning(
@@ -887,6 +929,8 @@ class ImageGenerationService:
                 )
                 _read_response_text(response)
                 response.raise_for_status()
+        except asyncio.CancelledError:
+            raise
         except httpx.HTTPStatusError as exc:
             response_text = _sanitize_log_string(_read_response_text(exc.response))
             raise RuntimeError(
@@ -919,21 +963,53 @@ class ImageGenerationService:
             response = await self._get_image_client().images.generate(
                 model=self.openai_settings.model,
                 prompt=prompt,
-                response_format="b64_json",
+                response_format="url",
                 n=1,
                 size=OPENAI_COMPATIBLE_IMAGE_SIZE,
+                timeout=self.openai_generate_timeout_seconds,
             )
+        except asyncio.CancelledError:
+            raise
+        except httpx.ReadTimeout as exc:
+            logger.error(
+                "OpenAI-compatible image generation timed out after %.1fs. "
+                "Potential async billing leak avoided only via explicit fallback; "
+                "please verify proxy stability, upstream queue latency, or user balance. error=%s",
+                self.openai_generate_timeout_seconds,
+                exc,
+            )
+            raise RuntimeError(
+                f"OpenAI-compatible image generation request timed out after "
+                f"{self.openai_generate_timeout_seconds:.1f}s: {exc}",
+            ) from exc
+        except APITimeoutError as exc:
+            logger.error(
+                "OpenAI-compatible image generation SDK timeout after %.1fs. "
+                "Potential async billing leak avoided only via explicit fallback; "
+                "please verify proxy stability, upstream queue latency, or user balance. error=%s",
+                self.openai_generate_timeout_seconds,
+                exc,
+            )
+            raise RuntimeError(
+                f"OpenAI-compatible image generation request timed out after "
+                f"{self.openai_generate_timeout_seconds:.1f}s: {exc}",
+            ) from exc
         except Exception as exc:
             raise RuntimeError(
                 f"OpenAI-compatible image generation request failed: {exc}",
             ) from exc
 
         data = _serialize_openai_response_payload(response)
-        sanitized_data = sanitize_image_response_for_log(response)
-        logger.info("OpenAI-compatible image generation raw response: %s", sanitized_data)
+        logger.info(
+            "OpenAI-compatible image generation raw response: %s",
+            sanitize_image_response_for_log(response),
+        )
 
         if isinstance(data.get("error"), dict):
-            logger.error("OpenAI-compatible image generation error response: %s", sanitized_data)
+            logger.error(
+                "OpenAI-compatible image generation error response: %s",
+                sanitize_image_response_for_log(response),
+            )
             error = data["error"]
             raise RuntimeError(
                 str(error.get("message") or error.get("code") or "OpenAI-compatible image generation failed."),
@@ -945,7 +1021,7 @@ class ImageGenerationService:
 
         logger.error(
             "OpenAI-compatible image generation returned no usable image references: %s",
-            sanitized_data,
+            sanitize_image_response_for_log(response),
         )
         return []
 
@@ -959,8 +1035,6 @@ class ImageGenerationService:
         has_data_image_urls = any(url.startswith("data:image/") for url in urls)
         if not self.persist_results and not has_data_image_urls:
             return urls
-        if not user_id and not has_data_image_urls:
-            return urls
 
         try:
             storage_client = create_storage_client()
@@ -973,7 +1047,7 @@ class ImageGenerationService:
         storage_user_id = _resolve_generated_image_storage_user_id(user_id)
         persisted_urls: list[str] = []
         async with httpx.AsyncClient(
-            timeout=self.request_timeout,
+            timeout=self.generated_image_download_timeout,
             follow_redirects=True,
         ) as client:
             for index, url in enumerate(urls, start=1):
@@ -1005,6 +1079,8 @@ class ImageGenerationService:
                             image_bytes=image_bytes,
                         )
                     )
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:  # pragma: no cover - network/storage fallback
                     logger.warning(
                         "Generated image persistence failed for %s: %s",
