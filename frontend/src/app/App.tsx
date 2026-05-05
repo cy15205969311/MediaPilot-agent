@@ -170,6 +170,13 @@ type PublishResultPayload = {
   taskId?: string;
 };
 
+type PublishBridgeStatusPayload = {
+  status?: string;
+  message?: string;
+  error?: string;
+  version?: string;
+};
+
 type PublishToastState = {
   id: number;
   tone: "success" | "error" | "warning";
@@ -192,6 +199,7 @@ type MaterialCaptureSource = "picker" | "paste" | "drop";
 const MODEL_OVERRIDE_STORAGE_KEY = "omnimedia_model_override";
 const LEGACY_QWEN_MODEL_STORAGE_KEY = "omnimedia_qwen_model_override";
 const XIAOHONGSHU_CREATOR_URL = "https://creator.xiaohongshu.com/publish/publish";
+const PUBLISH_BRIDGE_PROBE_TIMEOUT_MS = 1200;
 const PUBLISH_EXTENSION_RESPONSE_TIMEOUT_MS = 2500;
 const MAX_IMAGE_MATERIALS = 9;
 const MAX_FILES_PER_CAPTURE = 12;
@@ -1465,6 +1473,98 @@ function App() {
 
     window.clearTimeout(publishResponseTimeoutRef.current);
     publishResponseTimeoutRef.current = null;
+  }, []);
+
+  const probePublisherBridge = useCallback(() => {
+    return new Promise<{
+      ok: boolean;
+      error?: string;
+      message?: string;
+      version?: string;
+    }>((resolve) => {
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        window.removeEventListener("message", handleProbeMessage);
+      };
+
+      const handleProbeMessage = (event: MessageEvent) => {
+        if (event.source !== window || event.origin !== window.location.origin) {
+          return;
+        }
+
+        const data = event.data;
+        if (!data || typeof data !== "object") {
+          return;
+        }
+
+        const bridgeEvent = data as {
+          source?: string;
+          action?: string;
+          payload?: PublishBridgeStatusPayload;
+        };
+
+        if (
+          bridgeEvent.source !== "omnimedia-publisher" ||
+          bridgeEvent.action !== "PUBLISH_BRIDGE_STATUS" ||
+          !bridgeEvent.payload
+        ) {
+          return;
+        }
+
+        const status =
+          typeof bridgeEvent.payload.status === "string" ? bridgeEvent.payload.status : "";
+        if (status === "bridge_ready") {
+          return;
+        }
+
+        cleanup();
+
+        if (status === "pong") {
+          resolve({
+            ok: true,
+            message:
+              typeof bridgeEvent.payload.message === "string"
+                ? bridgeEvent.payload.message
+                : "PONG",
+            version:
+              typeof bridgeEvent.payload.version === "string"
+                ? bridgeEvent.payload.version
+                : undefined,
+          });
+          return;
+        }
+
+        resolve({
+          ok: false,
+          error:
+            typeof bridgeEvent.payload.error === "string"
+              ? bridgeEvent.payload.error
+              : "PUBLISHER_UNAVAILABLE",
+          message:
+            typeof bridgeEvent.payload.message === "string"
+              ? bridgeEvent.payload.message
+              : "发布插件当前不可用，请稍后重试。",
+        });
+      };
+
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        resolve({
+          ok: false,
+          error: "BRIDGE_NOT_INJECTED",
+          message:
+            "未检测到发布插件桥接脚本，请刷新当前工作台页面，并确认 OmniMedia Publisher 已允许访问此站点。",
+        });
+      }, PUBLISH_BRIDGE_PROBE_TIMEOUT_MS);
+
+      window.addEventListener("message", handleProbeMessage);
+      window.postMessage(
+        {
+          type: "@@OMNIMEDIA/PUBLISH_PING",
+        },
+        window.location.origin,
+      );
+    });
   }, []);
 
   const handlePremiumUpgradePrompt = useCallback(
@@ -3801,7 +3901,7 @@ function App() {
     setStatusText(`Markdown 已导出：${downloadedFilename}`);
   };
 
-  const handlePublishToXiaohongshu = (
+  const handlePublishToXiaohongshu = async (
     targetArtifact: ArtifactPayload | null = artifact,
   ) => {
     if (!targetArtifact || targetArtifact.artifact_type !== "content_draft") {
@@ -3825,6 +3925,21 @@ function App() {
 
     clearPublishResponseTimeout();
     setPublishToast(null);
+
+    const probeResult = await probePublisherBridge();
+    if (!probeResult.ok) {
+      const unavailableMessage =
+        probeResult.error === "BRIDGE_NOT_INJECTED"
+          ? "未检测到发布插件桥接脚本，请刷新当前工作台页面，并确认扩展已允许访问当前站点。"
+          : probeResult.error === "BACKGROUND_UNAVAILABLE" ||
+              probeResult.error === "EXTENSION_CONTEXT_INVALIDATED" ||
+              probeResult.error === "BRIDGE_UNAVAILABLE"
+            ? "OmniMedia Publisher 后台未运行，请在 chrome://extensions 中重新加载扩展，并检查 Service Worker 状态。"
+            : probeResult.message || "发布插件暂时不可用，请稍后重试。";
+      setStatusText(unavailableMessage);
+      pushGlobalToast("warning", "发布插件未就绪", unavailableMessage, probeResult.error);
+      return;
+    }
 
     window.postMessage(
       {
@@ -3898,7 +4013,9 @@ function App() {
       actions.push({
         id: "publish-xiaohongshu",
         label: "去小红书发布",
-        onClick: () => handlePublishToXiaohongshu(displayedArtifact),
+        onClick: () => {
+          void handlePublishToXiaohongshu(displayedArtifact);
+        },
       });
     }
 

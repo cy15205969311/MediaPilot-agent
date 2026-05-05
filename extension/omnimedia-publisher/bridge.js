@@ -10,8 +10,10 @@
   }
 
   const PUBLISH_ACTION = "OMNIMEDIA_PUBLISH";
+  const PUBLISH_PING_TYPE = "@@OMNIMEDIA/PUBLISH_PING";
   const PUBLISH_TASK_TYPE = "@@OMNIMEDIA/PUBLISH_TASK";
   const PUBLISH_STATUS_TYPE = "OMNIMEDIA_PUBLISH_STATUS";
+  const PUBLISH_BRIDGE_STATUS_ACTION = "PUBLISH_BRIDGE_STATUS";
   const PUBLISH_RESULT_ACTION = "PUBLISH_RESULT";
   const BRIDGE_SOURCE = "omnimedia-publisher";
 
@@ -57,6 +59,25 @@
       );
     } catch (error) {
       console.warn("[OmniMedia Bridge] Failed to post message back to workspace", error);
+    }
+  }
+
+  function safePostBridgeStatus(payload) {
+    if (typeof window === "undefined" || typeof window.postMessage !== "function") {
+      return;
+    }
+
+    try {
+      window.postMessage(
+        {
+          source: BRIDGE_SOURCE,
+          action: PUBLISH_BRIDGE_STATUS_ACTION,
+          payload,
+        },
+        window.location.origin,
+      );
+    } catch (error) {
+      console.warn("[OmniMedia Bridge] Failed to post bridge status back to workspace", error);
     }
   }
 
@@ -128,6 +149,67 @@
     }
   }
 
+  function probeRuntimeConnection() {
+    if (!hasRuntimeSendMessage()) {
+      safePostBridgeStatus({
+        status: "error",
+        error: "BRIDGE_UNAVAILABLE",
+        message: BRIDGE_UNAVAILABLE_MESSAGE,
+      });
+      return;
+    }
+
+    try {
+      chrome.runtime.sendMessage({ action: "PING" }, (response) => {
+        const runtimeErrorMessage =
+          typeof chrome !== "undefined" && chrome.runtime?.lastError?.message
+            ? chrome.runtime.lastError.message
+            : "";
+
+        if (runtimeErrorMessage) {
+          if (isExtensionInvalidatedMessage(runtimeErrorMessage)) {
+            safePostBridgeStatus({
+              status: "error",
+              error: EXTENSION_INVALIDATED_ERROR,
+              message: EXTENSION_INVALIDATED_MESSAGE,
+            });
+            return;
+          }
+
+          safePostBridgeStatus({
+            status: "error",
+            error: "BACKGROUND_UNAVAILABLE",
+            message: runtimeErrorMessage || MESSAGE_PORT_CLOSED_HINT,
+          });
+          return;
+        }
+
+        safePostBridgeStatus({
+          status: response?.success ? "pong" : "error",
+          error: response?.errorCode,
+          message:
+            typeof response?.message === "string" && response.message.trim()
+              ? response.message
+              : response?.success
+                ? "PONG"
+                : BRIDGE_UNAVAILABLE_MESSAGE,
+          version: typeof response?.version === "string" ? response.version : undefined,
+        });
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      safePostBridgeStatus({
+        status: "error",
+        error: isExtensionInvalidatedMessage(errorMessage)
+          ? EXTENSION_INVALIDATED_ERROR
+          : "BACKGROUND_UNAVAILABLE",
+        message: isExtensionInvalidatedMessage(errorMessage)
+          ? EXTENSION_INVALIDATED_MESSAGE
+          : errorMessage || MESSAGE_PORT_CLOSED_HINT,
+      });
+    }
+  }
+
   function handleWorkspacePublishTask(event) {
     if (event.source !== window) {
       return;
@@ -137,7 +219,16 @@
       return;
     }
 
-    if (!isRecord(event.data) || event.data.type !== PUBLISH_TASK_TYPE) {
+    if (!isRecord(event.data)) {
+      return;
+    }
+
+    if (event.data.type === PUBLISH_PING_TYPE) {
+      probeRuntimeConnection();
+      return;
+    }
+
+    if (event.data.type !== PUBLISH_TASK_TYPE) {
       return;
     }
 
@@ -177,6 +268,11 @@
         console.warn("[OmniMedia Bridge] Failed to process workspace message", error);
         postRuntimeFailure("BRIDGE_MESSAGE_HANDLER_ERROR", "发布请求处理失败，请刷新页面后重试。");
       }
+    });
+
+    safePostBridgeStatus({
+      status: "bridge_ready",
+      message: "Publisher bridge connected.",
     });
   }
 

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "OmniMedia Publisher",
   "description": "Bring OmniMedia drafts into Xiaohongshu Creator Center with a safe copy-assist flow.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "permissions": ["tabs", "scripting", "storage", "clipboardWrite"],
   "host_permissions": [
     "http://localhost:5173/*",

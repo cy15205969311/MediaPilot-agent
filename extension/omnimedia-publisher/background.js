@@ -1,4 +1,5 @@
 const PUBLISH_ACTION = "OMNIMEDIA_PUBLISH";
+const PING_ACTION = "PING";
 const TARGET_SCRIPT_READY_TYPE = "TARGET_SCRIPT_READY";
 const FILL_ACTION = "OMNIMEDIA_FILL_XIAOHONGSHU";
 const PUBLISH_STATUS_TYPE = "OMNIMEDIA_PUBLISH_STATUS";
@@ -299,6 +300,15 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.action === PING_ACTION) {
+    sendResponse(
+      createResponse(true, "PONG", {
+        version: chrome.runtime.getManifest().version,
+      }),
+    );
+    return false;
+  }
+
   if (message?.action === PUBLISH_ACTION) {
     void queuePublishTask(message.payload, sender.tab?.id)
       .then((result) => {
